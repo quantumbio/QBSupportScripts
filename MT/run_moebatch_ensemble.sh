@@ -38,6 +38,8 @@ done
 set -- "${POSITIONAL[@]}" # restore positional parameters
 
 
+
+
 if [ -z ${DIVCON_INSTALL} ]; then echo "ERROR: must set DIVCON_INSTALL env variable to QBHOME path"; exit; fi
 if [ -z ${MOE_INSTALL} ]; then echo "ERROR: must set MOE_INSTALL env variable to QBHOME path"; exit; fi
 
