@@ -10,10 +10,30 @@
 #           and the NOVEL ligand are the same species / file.
 #
 #       INPUT Assumptions:
-#           (1) The script takes two input
+#           (1) The script takes two input files:
+#               --target protein.pdb
+#               --ligand ligand.mol2    - note: this entry may have a wildcard for running a list of mol2 files.
 #
-#           (2) A number of 
+#           (2) The ligand.mol2 file is an already [initially] placed ligand.
 #
+
+error_exit()
+{
+	echo "$1"
+	echo ""
+	echo "Usage: $0 --target protein.pdb --ligand placed_ligand.mol2"
+	echo
+	echo "Useful env variables include:"
+    echo "  DIVCON_INSTALL  = path to QBHOME to be used"
+    echo "  MOE_INSTALL     = path to MOE/batch"
+    echo
+    echo "Optional env variables include:"
+    echo "  MT_HAM_TYPE     = pair potential to be used"
+    echo "  MT_MTCS_TYPE    = ligand (MTCS) lengths/angles to use"
+    echo "  MTCSOPT         = ligand (MTCS) optimization options"
+    echo "  PBS_NUM_PPN     = number of processors cores to use"
+	exit 1
+}
 
 POSITIONAL=()
 while [[ $# -gt 0 ]] ; do
@@ -25,69 +45,76 @@ while [[ $# -gt 0 ]] ; do
         shift # past value
         ;;
         -l|--ligand)
-        ligandfile="$2"
+        inligandfile="$2"
         shift # past argument
         shift # past value
         ;;
         *)    # unknown option
-        POSITIONAL+=("$1") # save it in an array for later
-        shift # past argument
+        error_exit "ERROR: unknown command line argument $1" 
         ;;
     esac
 done
 set -- "${POSITIONAL[@]}" # restore positional parameters
 
+if [ -z "${DIVCON_INSTALL}" ]; then
+    QMECHANIC_BIN=`which qmechanic`
+    if [ -z "${QMECHANIC_BIN}" ]; then error_exit "ERROR: must set DIVCON_INSTALL env variable to QBHOME path or qmechanic must be in the system PATH"; fi
+    progdir=`dirname "$QMECHANIC_BIN"`
+    DIVCON_INSTALL=`dirname "$progdir"`
+fi
 
+echo "NOTE: Running ${DIVCON_INSTALL} on ${targetfile} and ${inligandfile} "
 
+# You may provide a path of a MOE/batch executable if you wish to test different MOE versions.
+#       Otherwise the MOE within the $PATH will be used. If this doesn't exist, then an error will be thrown.
+if [ -z "${MOE_INSTALL}" ]; then
+    MOE_INSTALL=`which moebatch`
+    if [ -z "${MOE_INSTALL}" ]; then error_exit "ERROR: must set MOE_INSTALL env variable or moebatch must be in the system PATH" ; fi
+fi
 
-if [ -z ${DIVCON_INSTALL} ]; then echo "ERROR: must set DIVCON_INSTALL env variable to QBHOME path"; exit; fi
-if [ -z ${MOE_INSTALL} ]; then echo "ERROR: must set MOE_INSTALL env variable to QBHOME path"; exit; fi
+if [ -z "${PREV_DIVCON_INSTALL}" ]; then echo "WARNING: PREV_DIVCON_INSTALL not set. No test on previous version will be run." ; fi     # Generally PREV_DIVCON_INSTALL is to test a previous version. If not included then this test will be skipped.
+if [ -z "${MOE_SVL}" ]; then MOE_SVL=${DIVCON_INSTALL}/svl; fi
 
-if [ -z ${PREV_DIVCON_INSTALL} ]; then "WARNING: PREV_DIVCON_INSTALL not set. No test on previous version will be run."; fi     # Generally PREV_DIVCON_INSTALL is to test a previous version. If not included then this test will be skipped.
-if [ -z ${MOE_SVL} ]; then MOE_SVL=${DIVCON_INSTALL}/svl fi
+if [ -z "${MOE_MTSCOREES}" ]; then MOEOPT_MTSES=""; else MOEOPT_MTSES="-mtscorees"; fi
+if [ -z "${MTCSCONF}" ]; then MTCSCONF=5; fi
+if [ -z "${MAXPOSE}" ]; then MAXPOSE=50; fi
+if [ -z "${REMAXPOSE}" ]; then REMAXPOSE=5; fi
 
-if [ -z ${MOE_MTSCOREES} ]; then MOEOPT_MTSES=""; else MOEOPT_MTSES="-mtscorees"; fi
-if [ -z ${MTCSCONF} ]; then MTCSCONF=5; fi
-if [ -z ${MAXPOSE} ]; then MAXPOSE=50; fi
-if [ -z ${REMAXPOSE} ]; then REMAXPOSE=5; fi
+# DEFAULT MT options (these may be set in the environment prior to calling the script if you wish to change them)
+if [ -z "${QM_OVERWRITE}" ]; then QM_OVERWRITE="-O"; fi           # overwrite all output files with new files
+if [ -z "${MT_HAM_TYPE}" ]; then MT_HAM_TYPE="-h garf"; fi        # use the GARF statistical potential
+if [ -z "${MT_MTCS_TYPE}" ]; then MT_MTCS_TYPE="--mtcs input"; fi        # use the input bond lengths/angles in MTCS
+if [ -z "${MTCSOPT}" ]; then MTCSOPT=""; fi        # do not optimize the ligand conformation using the potential
+if [ -z "${PBS_NUM_PPN}" ]; then PBS_NUM_PPN=4; fi        # use 4 cores when we can 
 
-# default MT options
-if [ -z ${QM_OVERWRITE} ]; then QM_OVERWRITE="-O"; fi           # overwrite all output files with new files
-if [ -z ${MT_HAM_TYPE} ]; then MT_HAM_TYPE="-h garf"; fi        # use the GARF statistical potential
-if [ -z ${MT_MTCS_TYPE} ]; then MT_MTCS_TYPE="--mtcs input"; fi        # use the input bond lengths/angles in MTCS
-if [ -z ${MTCSOPT} ]; then MTCSOPT=""; fi        # do not optimize the ligand conformation using the potential
-if [ -z ${PBS_NUM_PPN} ]; then PBS_NUM_PPN=4; fi        # use 4 cores when we can 
+echo "  MOEOPT_MTSES: ${MOEOPT_MTSES}"
+echo "  MTCSCONF:     ${MTCSCONF}"
+echo "  MAXPOSE:      ${MAXPOSE}"
+echo "  REMAXPOSE:    ${REMAXPOSE}"
+echo "  QM_OVERWRITE: ${QM_OVERWRITE}"
+echo "  MT_HAM_TYPE:  ${MT_HAM_TYPE}"
+echo "  MT_MTCS_TYPE: ${MT_MTCS_TYPE}"
+echo "  MTCSOPT:      ${MTCSOPT}"
+echo "  PBS_NUM_PPN:  ${PBS_NUM_PPN}"
 
-echo "MOEOPT_MTSES: ${MOEOPT_MTSES}"
-echo "MTCSCONF:     ${MTCSCONF}"
-echo "MAXPOSE:      ${MAXPOSE}"
-echo "REMAXPOSE:    ${REMAXPOSE}"
-echo "QM_OVERWRITE: ${QM_OVERWRITE}"
-echo "MT_HAM_TYPE:  ${MT_HAM_TYPE}"
-echo "MT_MTCS_TYPE: ${MT_MTCS_TYPE}"
-echo "MTCSOPT:      ${MTCSOPT}"
-echo "PBS_NUM_PPN:  ${PBS_NUM_PPN}"
-
-targetbasename=$1
+targetbasename=`basename "$targetfile" .pdb`
+if [ ! -e ${targetbasename}.pdb ] ; then error_exit "ERROR: ${PWD}/${targetbasename}.pdb does not exist" ; fi
 
 # Go through all mol2 files in the previous directory and run each one as a 
-for ligandfile in `ls ../*.mol2` ; do
+for ligandfile in `ls ${inligandfile}` ; do
+echo $ligandfile
     ligandbasename=`basename "$ligandfile" .mol2`
     rm -f OUT.${ligandbasename}_proteinE
     rm -f OUT.${ligandbasename}_proteinES
     
-    if [ -e ${targetbasename}.pdb ] ; then
-        ln -s -f ../${targetbasename}.pdb
-    else
-        echo "ERROR: ${PWD}/../${targetbasename}.pdb does not exist"
-    fi
-    ln -s -f ../${ligandbasename}.mol2
-
+    if [ ! -e ${ligandbasename}.mol2 ] ; then echo "ERROR: ${PWD}/${ligandbasename}.mol2 does not exist"; continue; fi
+    
     starttime=`date`
     echo "$ligandbasename STARTTIME: $starttime" &> OUT.${ligandbasename}_proteinE
     
     env >> OUT.${ligandbasename}_proteinE 2>&1
 
+#   STEP #1: EXECUTE MTCS (conformational search) to generate conformers which match the chosen potential.
     timeout 60m ${DIVCON_INSTALL}/bin/qmechanic ${targetbasename}.pdb --ligand ${ligandbasename}.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} ${MT_MTCS_TYPE} ${MTCSOPT} -p sdf --np ${PBS_NUM_PPN} -v 2 >> OUT.${ligandbasename}_proteinE 2>&1
     if [ $? -eq 124 ] ; then
         echo "TIMEOUT ERROR (60min): ${targetbasename}.pdb ${ligandbasename}.mol2 --mtcs - CHECK STRUCTURE FOR ERRORS/ODDITIES" >> OUT.${ligandbasename}_proteinE
@@ -95,13 +122,13 @@ for ligandfile in `ls ../*.mol2` ; do
         echo "QMECHANIC RUN COMPLETE" >> OUT.${ligandbasename}_proteinE
     fi
     
-    if [ -e ${targetbasename}_conf.sdf ] ; then
-        mv ${targetbasename}_conf.sdf ${ligandbasename}_conf.sdf
-    fi
+    if [ -e ${targetbasename}_conf.sdf ] ; then mv ${targetbasename}_conf.sdf ${ligandbasename}_conf.sdf;  fi
 
+#   STEP #2: EXECUTE MOE (docking) to generate poses which fit within the active site of the placed_ligand.mol2
     ${MOE_INSTALL} -licwait -run "${MOE_SVL}" -rec ${targetbasename}.pdb -lig ${ligandbasename}.mol2 -conf ${ligandbasename}_conf.sdf -delwat $MOEOPT_MTSES --maxpose ${MAXPOSE} --mtcsconf ${MTCSCONF} --remaxpose ${REMAXPOSE} >> OUT.${ligandbasename}_proteinE 2>&1
     echo "MOE RUN COMPLETE" >> OUT.${ligandbasename}_proteinE
 
+#   STEP #3: EXECUTE MTScore (Ensemble scoring) to score MOE-generated poses which fit within the active site of the placed_ligand.mol2
     timeout 60m ${DIVCON_INSTALL}/bin/qmechanic ${targetbasename}.pdb --ligand ${ligandbasename}.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} --mtdock ${ligandbasename}_dock.sdf opt off --mtscore --np ${PBS_NUM_PPN} -v 2 >> OUT.${ligandbasename}_proteinE 2>&1
     if [ $? -eq 124 ] ; then
         echo "TIMEOUT ERROR (60min): ${targetbasename}.pdb ${ligandbasename}.mol2 --mtscore" >> OUT.${ligandbasename}_proteinE
@@ -114,7 +141,8 @@ for ligandfile in `ls ../*.mol2` ; do
    
     rm -f *.h5
 
-    if [ ! -z ${PREV_DIVCON_INSTALL} ]; then
+#   OPTIONAL STEP #3: EXECUTE MTScore (Ensemble scoring) using an alternate chosen qmechanic to score MOE-generated poses which fit within the active site of the placed_ligand.mol2
+    if [ ! -z "${PREV_DIVCON_INSTALL}" ]; then
         jobname=`basename ${PREV_DIVCON_INSTALL} | sed 's/DivConDiscoverySuite-//'`
         timeout 60m ${PREV_DIVCON_INSTALL}/bin/qmechanic ${targetbasename}.pdb --ligand ${ligandbasename}.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} --mtdock ${ligandbasename}_dock.sdf opt off --mtscore --np ${PBS_NUM_PPN} -v 2 > OUT.${ligandbasename}_proteinE-${jobname} 2>&1
         if [ $? -eq 124 ] ; then
@@ -124,8 +152,9 @@ for ligandfile in `ls ../*.mol2` ; do
         fi
 
         rm -f *.h5
-    endif
+    fi
 
+#   STEP #4: EXECUTE MTScore (EndState scoring) to score the "winning" or "best" MOE-generated pose which fit within the active site of the placed_ligand.mol2
     mdbfile=${ligandbasename}_dock.mdb
     dockedbasename=`basename "${mdbfile}" .mdb`
     timeout 60m  ${DIVCON_INSTALL}/bin/qmechanic ${targetbasename}.pdb --ligand ${dockedbasename}.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} --mtscore endstate --np ${PBS_NUM_PPN} -v 2 > OUT.${ligandbasename}_proteinES
