@@ -125,7 +125,7 @@ echo $ligandfile
     if [ -e ${targetbasename}_conf.sdf ] ; then mv ${targetbasename}_conf.sdf ${ligandbasename}_conf.sdf;  fi
 
 #   STEP #2: EXECUTE MOE (docking) to generate poses which fit within the active site of the placed_ligand.mol2
-    ${MOE_INSTALL} -licwait -run "${MOE_SVL}" -rec ${targetbasename}.pdb -lig ${ligandbasename}.mol2 -conf ${ligandbasename}_conf.sdf -delwat $MOEOPT_MTSES --maxpose ${MAXPOSE} --mtcsconf ${MTCSCONF} --remaxpose ${REMAXPOSE} >> OUT.${ligandbasename}_proteinE 2>&1
+    ${MOE_INSTALL} -licwait -run "${MOE_SVL}/run/qbDockPair.svl" -rec ${targetbasename}.pdb -lig ${ligandbasename}.mol2 -conf ${ligandbasename}_conf.sdf -delwat $MOEOPT_MTSES --maxpose ${MAXPOSE} --mtcsconf ${MTCSCONF} --remaxpose ${REMAXPOSE} >> OUT.${ligandbasename}_proteinE 2>&1
     echo "MOE RUN COMPLETE" >> OUT.${ligandbasename}_proteinE
 
 #   STEP #3: EXECUTE MTScore (Ensemble scoring) to score MOE-generated poses which fit within the active site of the placed_ligand.mol2
