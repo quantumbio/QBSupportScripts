@@ -2,7 +2,6 @@
 
 # START VARIABLES
 bNOVEL=1        # assume that a novel and a placed ligand will be provided (set to 0 later if not)
-wildcard="*"    # search string for wildcard file names
 
 # SET DEFAULTS:
 if [ -z "${MOE_MTSCOREES}" ]; then MOEOPT_MTSES=""; else MOEOPT_MTSES="-mtscorees"; fi
@@ -176,18 +175,33 @@ while [[ $# -gt 0 ]] ; do
     case $key in
         -t|--target)
             targetfile="$2"
+            if [ ! -f "${targetfile}" ]; then error_exit "ERROR: ${targetfile} does not exist"; fi
             shift # past argument
             shift # past value
         ;;
         -l|--ligand)
-            inligandfile="$2"
+            unset inligandfile
             shift # past argument
-            shift # past value
+            filearray=( "$@" )
+            i=0
+            for file in "${filearray[@]}" ; do
+                if [[ "${file}" == "--"* ]] ; then break; fi    # this is where next argument (if exists) hits.
+                if [ ! -f "${file}" ]; then error_exit "ERROR: ${file} does not exist"; fi
+                inligandfile=( "${inligandfile[@]}" "$file" )
+                shift # past value
+            done
         ;;
         -n|--novel)
-            innovelfile="$2"
+            unset innovelfile
             shift # past argument
-            shift # past value
+            filearray=( "$@" )
+            i=0
+            for file in "${filearray[@]}" ; do
+                if [[ "${file}" == "--"* ]] ; then break; fi    # this is where next argument (if exists) hits.
+                if [ ! -f "${file}" ]; then error_exit "ERROR: ${file} does not exist"; fi
+                innovelfile=( "${innovelfile[@]}" "$file" )
+                shift # past value
+            done
         ;;
         --tlimit)
             timeoutlimit="$2"
@@ -203,7 +217,8 @@ while [[ $# -gt 0 ]] ; do
         error_exit "Help:"         
         ;;
         *)    # unknown option
-        error_exit "ERROR: unknown command line argument $1" 
+            
+            error_exit "ERROR: unknown command line argument $1" 
         ;;
     esac
 done
@@ -213,12 +228,13 @@ set -- "${POSITIONAL[@]}" # restore positional parameters
 if [ -z "${targetfile}" ] ; then error_exit "ERROR: you must define --targetfile as the protein as a separate pdb file."; fi
 if [ -z "${inligandfile}" ] ; then error_exit "ERROR: you must define --ligand as the PLACED [wildtype] ligand as a separate mol2 file."; fi
 
-if [ ! -z "${innovelfile}" ] && [ "$inligandfile" == *"$wildcard"* ] ; then error_exit "ERROR: PLACED [WT] ligand may not include wildcard '*' when NOVEL ligand is provided."; fi
+if [ ! -z "${innovelfile}" ] && [ "${#inligandfile[@]}" -gt 1 ] ; then error_exit "ERROR: PLACED [WT] ligand may not include wildcard '*' when NOVEL ligand is provided."; fi
 
 if [ -z "${innovelfile}" ] ; then
-    echo "WARNING: No NOVEL ligand provided - assuming self-docking/scoring of PLACED [WT] ligand."
+    echo "NOTE: No NOVEL ligand provided - assuming self-docking/scoring of PLACED [WT] ligand."
     echo "          Use --novel to define alternate ligand for docking/scoring."
-    innovelfile=$inligandfile;
+    b=("${a[@]}") 
+    innovelfile=("${inligandfile[@]}") 
     bNOVEL=0
 fi
 
@@ -233,22 +249,20 @@ if [ -z "${PREV_DIVCON_INSTALL}" ]; then echo "NOTE: PREV_DIVCON_INSTALL not set
 # BEGIN JOB
 
 current_settings
-echo "      target: ${targetfile}"
-echo "      placed_ligand: ${inligandfile}"
-echo "      novel_ligand: ${innovelfile}"
 
 targetbasename=`basename "$targetfile" .pdb`
 if [ ! -e ${targetbasename}.pdb ] ; then error_exit "ERROR: ${PWD}/${targetbasename}.pdb does not exist" ; fi
 
 # Go through all mol2 files in the previous directory and run each one as a 
-for novelfile in `ls ${innovelfile}` ; do
-echo $novelfile
+for novelfile in "${innovelfile[@]}" ; do
     novelbasename=`basename "$novelfile" .mol2`
     if [ "$bNOVEL" -eq 0 ]; then
         ligandbasename=${novelbasename}
     else
         ligandbasename=`basename "$inligandfile" .mol2`
     fi
+    echo "Running: $novelfile $ligandbasename"
+
     rm -f OUT.${novelbasename}_proteinE
     rm -f OUT.${novelbasename}_proteinES
     
@@ -266,7 +280,6 @@ echo $novelfile
     if [ -e ${targetbasename}_conf.sdf ] ; then mv ${targetbasename}_conf.sdf ${ligandbasename}_conf.sdf;  fi
 
 #   STEP #2: EXECUTE MOE (docking) to generate poses which fit within the active site of the placed_ligand.mol2
-#    ${MOE_BIN} -licwait -run "${DC_SVL}/run/qbDockPair.svl" -rec ${targetbasename}.pdb -lig ${novelbasename}.mol2 -conf ${ligandbasename}_conf.sdf -delwat $MOEOPT_MTSES --maxpose ${MAXPOSE} --mtcsconf ${MTCSCONF} --remaxpose ${REMAXPOSE} >> OUT.${novelbasename}_proteinE 2>&1
     execute_binary "${MOE_BIN} -licwait -run ${DC_SVL}/run/qbDockPair.svl -rec ${targetbasename}.pdb -lig ${novelbasename}.mol2 -conf ${ligandbasename}_conf.sdf -delwat $MOEOPT_MTSES --maxpose ${MAXPOSE} --mtcsconf ${MTCSCONF} --remaxpose ${REMAXPOSE}" "OUT.${novelbasename}_proteinE"
     echo "MOE RUN COMPLETE" >> OUT.${novelbasename}_proteinE
 
