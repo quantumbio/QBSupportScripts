@@ -274,13 +274,13 @@ for novelfile in "${innovelfile[@]}" ; do
     env >> OUT.${novelbasename}_proteinE 2>&1
 
 #   STEP #1: EXECUTE MTCS (conformational search) to generate conformers which match the chosen potential.
-    execute_binary "${DIVCON_INSTALL}/bin/qmechanic ${targetbasename}.pdb --ligand ${ligandbasename}.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} ${MT_MTCS_TYPE} ${MTCSOPT} -p sdf --np ${PBS_NUM_PPN} -v 2" "OUT.${novelbasename}_proteinE"
+    execute_binary "${DIVCON_INSTALL}/bin/qmechanic ${targetbasename}.pdb --ligand ${novelbasename}.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} ${MT_MTCS_TYPE} ${MTCSOPT} -p sdf --np ${PBS_NUM_PPN} -v 2" "OUT.${novelbasename}_proteinE"
     echo "QMECHANIC RUN COMPLETE" >> OUT.${novelbasename}_proteinE
     
-    if [ -e ${targetbasename}_conf.sdf ] ; then mv ${targetbasename}_conf.sdf ${ligandbasename}_conf.sdf;  fi
+    if [ -e ${targetbasename}_conf.sdf ] ; then mv ${targetbasename}_conf.sdf ${novelbasename}_conf.sdf;  fi
 
 #   STEP #2: EXECUTE MOE (docking) to generate poses which fit within the active site of the placed_ligand.mol2
-    execute_binary "${MOE_BIN} -licwait -run ${DC_SVL}/run/qbDockPair.svl -rec ${targetbasename}.pdb -lig ${novelbasename}.mol2 -conf ${ligandbasename}_conf.sdf -delwat $MOEOPT_MTSES --maxpose ${MAXPOSE} --mtcsconf ${MTCSCONF} --remaxpose ${REMAXPOSE}" "OUT.${novelbasename}_proteinE"
+    execute_binary "${MOE_BIN} -licwait -run ${DC_SVL}/run/qbDockPair.svl -rec ${targetbasename}.pdb -lig ${ligandbasename}.mol2 -conf ${novelbasename}_conf.sdf -o ${novelbasename}_dock -delwat $MOEOPT_MTSES --maxpose ${MAXPOSE} --mtcsconf ${MTCSCONF} --remaxpose ${REMAXPOSE}" "OUT.${novelbasename}_proteinE"
     echo "MOE RUN COMPLETE" >> OUT.${novelbasename}_proteinE
 
 #   STEP #3: EXECUTE MTScore (Ensemble scoring) to score MOE-generated poses which fit within the active site of the placed_ligand.mol2
