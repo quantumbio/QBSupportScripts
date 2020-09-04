@@ -1,0 +1,188 @@
+#svl
+
+//  USAGE: See below or type moebatch -run ./DivConSuite/svl/run/sdf2sdf.svl -help
+
+#if 0
+ // BEGIN COPYRIGHT
+ /***********************************************************************
+    Copyright (c) 1998-2012 QuantumBio Inc. and/or its affiliates.
+	
+ This source code is the property of QuantumBio Inc. and/or its affiliates
+ and is provided AS IS.
+
+ This source code may contain proprietary and Confidential Information, 
+ including trade secrets, belonging to QuantumBio Inc. and/or its 
+ affiliates.
+
+ Please see http://www.quantumbioinc.com/ for more information.
+
+ ***********************************************************************/
+ // END COPYRIGHT
+#endif      
+
+global argv;
+
+function db_ExportSD;
+function db_ImportSD;
+
+function MM;
+function Potential;
+function dock_score_GBVIWSA_dG;
+
+local function usage []
+    
+    pot_Load '$MOE/lib/Amber10EHT.ff.gz';
+    
+    local function yesno inVar
+        if inVar then
+            return 'YES';
+        else
+            return 'NO';
+        endif
+    endfunction
+write [
+#token
+
+USAGE:
+    $ moebatch -run ./DivConSuite/svl/run/sdf2sdf.svl -docksdf docked_poses.sdf  -rec receptor.pdb
+
+AVAILABLE OPTIONS
+
+    -docksdf <file>     (Required) SDF file corresponding to the docked_poses from MOE, GLIDE, etcetera
+    
+    -rec <file>         (Optional) Receptor or Target:ligand in PDB or MOL2 format (DEFAULT: none)
+    
+    -optlig (bool)      (Optional) Minimize each pose provided in the -docksdf file. If receptor provided,
+                            each pose will be optimized within the pocket.
+    -help               Print this help screen and quit without running any further steps.
+
+FILES RETURNED/GENERATED (to be used in MTScoreE)
+
+    <docksdfname>_out.sdf           The docked ligand poses (if -optlig turned on then these would be minimized poses)
+    
+SUBSEQUENT USAGE (in MTScoreE [Ensemble] Score)
+
+    Once the above noted files are generated
+
+    * FOR RIGID RECEPTOR SCORING:
+        $ /path/to/DivConSuite/bin/qmechanic pro_<ligand>_predock.pdb       \\
+            --ligand lig_<ligand>_predock.mol2 --mtdock <docksdfname>_out.sdf   \\
+            --mtscore ensembe -v 2 --np 2
+
+DOCUMENTATION
+    The sdf2sdf.svl script is used to translate or otherwise repackage SDF files provided by software 
+    other than MOE. This script effectively piggybacks on CCG code for SDF processing in case
+    there are problems with the SDF file format (note: this should be a rare problem and QuantumBio 
+    support should be notified if any SDF file is deemed unreadable by qmechanic).
+    
+    Optionally, additional functions can be performed on the input SDF. Specifically, the ligand pose
+    may be optimized using the MOE MM minimization function. If the receptor is provided, the pose
+    will be optimized within the binding pocket. 
+    
+    In this case, the MOE software uses the following default settings:
+    
+        Potential:              {}
+
+     WARNING: very few error traps or other tests are currently put in place. 
+    
+#
+        ,   second first pot_Info[]
+    ];
+
+endfunction
+
+local function main []
+    ArgvReset ArgvExpand argv;
+    local [printhelp, docksdf, optlig, recfilename] = ArgvPull [ ['-help', '-docksdf', '-optlig','-rec'], [0, 1, 0, 1] ];
+    local remaining = ArgvAll [];
+    if not isnull remaining then
+        exit twrite ['ERROR: Unknown command line options: {}\n',remaining];
+    endif
+    
+    if printhelp then
+        usage[];
+        exit[];
+    endif    
+    
+    if isnull docksdf then
+        usage[];
+        exit twrite ['ERROR: Must use -docksdf <docksdf_filename> option to process dock.sdf file'];
+    endif
+    
+    pot_Load '$MOE/lib/Amber10EHT.ff';
+
+    local outfile = twrite ['{}-MOE.{}',fbase docksdf, fext docksdf];
+    if fext docksdf == 'sdf' then
+        local tmpmdb = 'tmp-1234567890.mdb';
+        db_Close db_Open [ tmpmdb,'create' ];
+        db_ImportSD [tmpmdb,docksdf,'mol'];
+        if optlig then
+            if not isnull recfilename then
+                ReadAuto recfilename;
+            endif
+            db_EnsureField [ tmpmdb,'MOE_E_INITIAL','float'];
+            db_EnsureField [ tmpmdb,'MOE_LSTRAIN_INITIAL','float'];
+            db_EnsureField [ tmpmdb,'MOE_GBVI_INITIAL','float'];
+            db_EnsureField [ tmpmdb,'MOE_E_FINAL','float'];
+            db_EnsureField [ tmpmdb,'MOE_LSTRAIN_FINAL','float'];
+            db_EnsureField [ tmpmdb,'MOE_GBVI_FINAL','float'];
+            local ent;
+            local pdata;
+            local inopt;
+            local entry_keys = db_Entries tmpmdb;
+            local [fldnames, fldtypes] = db_Fields tmpmdb;
+            local mfield = fldnames | fldtypes == 'molecule';
+            local count = 0;
+            local mdb_key = db_Open [tmpmdb,'read-write'];
+            for ent in entry_keys loop
+                local psys = SystemPush Atoms[];
+                count = count + 1;
+                local rec_chains = Chains [];
+                pdata = tag [fldnames, db_ReadFields [mdb_key, ent, fldnames]];
+                inopt.pdata = pdata | m_diff [tags pdata, mfield];
+                local mol =  pdata.(first mfield);        // ligand in dock.mdb
+                local lig_chains = mol_Create mol;
+                pot_Load '$MOE/lib/Amber10EHT.ff';      // NOTE: if you wish to use a different potential (e.g. the defaults for your environment) then you need to comment this line out
+                pot_FinalizeModel[];
+                local lig = cat cat cAtoms lig_chains;
+                local rec = cat cat cAtoms rec_chains;
+                local fixedAtoms = one Atoms [];            // default will be to FIX atom positions
+                fixedAtoms [aNumber lig] = 0;               // make sure ligand atoms however are not fixed
+                local tmpSys = SystemPush lig_chains;
+                pdata.MOE_E_INITIAL = first Potential[];
+                MM [gtest:0.001, keep_chirality:1, pot_charge:0];
+                pdata.MOE_LSTRAIN_INITIAL = pdata.MOE_E_INITIAL - first Potential[];
+                SystemPop tmpSys;
+                pdata.MOE_GBVI_INITIAL = dock_score_GBVIWSA_dG ['scoreLigX', [rec,lig]];
+                MM [
+                    gtest		    : 0.01
+            ,	    aFixed		    : fixedAtoms
+            ,	    pot_charge		: 1
+            ,       keep_chirality  : 1
+            ,	    pot_finalize	: 1
+                ];
+                // TMP: Write out the final PDB file
+//                fwrite_PDB [twrite ['{}_{}.pdb',fbase recfilename, count],Chains[]];
+                tmpSys = SystemPush lig_chains;
+                pdata.MOE_E_FINAL = first Potential[];
+                MM [gtest:0.001, keep_chirality:1, pot_charge:0];
+                pdata.MOE_LSTRAIN_FINAL = pdata.MOE_E_FINAL - first Potential[];
+                SystemPop tmpSys;
+                pdata.(first mfield) = mol_Extract lig_chains;
+                lig = cat cat rAtoms (uniq aResidue lig);     // address any changes which may have been made to the ligand (protons, etc)
+                rec = cat cat rAtoms (uniq aResidue rec);     // address any changes which may have been made to receptor (protons, etc)
+                pdata.MOE_GBVI_FINAL = dock_score_GBVIWSA_dG ['scoreLigX', [rec,lig]];
+                db_Write [mdb_key, ent, pdata];
+                SystemPop psys;
+            endloop
+            db_Close mdb_key;
+        endif
+        db_ExportSD [ tmpmdb, outfile];
+        fdelete tmpmdb;
+    elseif fext docksdf === 'mol2' or fext docksdf === 'pdb' then
+        write ['in here: {}\n', fext docksdf];
+        ReadAuto docksdf;
+        WriteAuto outfile;
+    endif
+    
+endfunction

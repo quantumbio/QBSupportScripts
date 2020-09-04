@@ -1,0 +1,161 @@
+#svl
+
+//  USAGE: See below or type moebatch -run ./DivConSuite/svl/run/sdf2sdf.svl -help
+
+#if 0
+ // BEGIN COPYRIGHT
+ /***********************************************************************
+    Copyright (c) 1998-2012 QuantumBio Inc. and/or its affiliates.
+	
+ This source code is the property of QuantumBio Inc. and/or its affiliates
+ and is provided AS IS.
+
+ This source code may contain proprietary and Confidential Information, 
+ including trade secrets, belonging to QuantumBio Inc. and/or its 
+ affiliates.
+
+ Please see http://www.quantumbioinc.com/ for more information.
+
+ ***********************************************************************/
+ // END COPYRIGHT
+#endif      
+
+global argv;
+
+function db_ExportSD;
+function fwrite_TriposMOL2;
+function fwrite_PDB;
+
+local function printUsage []
+
+    write ['\n'];
+    write ['USAGE:\n'];
+    write ['    moebatch -run mdb2sdf.svl -dockmdb dock.mdb\n'];
+    write ['  where:\n'];
+    write ['    -dockmdb = the MDB file corresponding to the output from a docking/scoring run.\n'];
+    write ['\n'];
+    write ['DOCUMENTATION:\n'];
+    write ['    This method will split an mdbfile into separate SDF files based on the mseg field in the mdb file.'];
+endfunction
+
+local function main []
+    local startcputime = cpuclock[];
+    local starttime = clock[];
+    local inopt;
+    ArgvReset ArgvExpand argv;
+    local [printhelp, dockmdb, ligfilename, recfilename] = ArgvPull [ ['-help', '-dockmdb', '-lig','-rec'], [0, 1, 1, 1] ];
+    local remaining = ArgvAll [];
+    if not isnull remaining then
+        exit twrite ['ERROR: Unknown command line options: {}\n',remaining];
+    endif
+    
+    if printhelp then
+        printUsage[];
+        exit[];
+    endif    
+    
+    if isnull dockmdb then
+        printUsage[];
+        exit twrite ['ERROR: Must use -dockmdb <dockmdb_filename> option to process dock.mdb file'];
+    endif
+    
+    db_Sort [dockmdb,['mseq','S'],[0,0]];
+    
+    local mseqColumn = cat db_ReadColumn [dockmdb, 'mseq' ];
+    local entry_keys = db_Entries dockmdb;
+    
+    local mfield = '';
+
+	// make sure that our database contains the right exportable field
+	// and then open the output file
+    local [fldnames, fldtypes] = db_Fields dockmdb;
+
+    mfield = fldnames | fldtypes == 'molecule';
+
+	// run through the database and write the data to the file
+    local ent = 0;
+    local count = 0;
+    local mol = [];
+    local targ_chains = [];
+    local lig_chains = [];
+    local chains = [];
+    local pdata;
+    
+    local ligID;
+    local psys = SystemPush [];
+    if not isnull ligfilename then
+        local lig = cat cat cAtoms ReadAuto ligfilename;
+        local ligResidue = aResidue first lig;
+        local ligChain = rChain ligResidue;
+        ligID.rINS = rINS ligResidue;
+        ligID.rName = rName ligResidue;
+        ligID.rNumber = rNumber ligResidue;
+        ligID.rType = rType ligResidue;
+        ligID.rUID = rUID ligResidue;
+        ligID.cName = fext cName ligChain;
+        ligID.cGroup = cGroup ligChain;   
+        ligID.cNumber = cNumber ligChain;   
+        ligID.cTag = cTag ligChain;
+    endif
+    SystemPop psys;
+   
+    local mseqEntry;
+    local mdb_key = db_Open [dockmdb,'read'];
+    for mseqEntry in uniq mseqColumn loop
+        local compoundNumber = db_ReadFields [mdb_key, first (entry_keys | (mseqColumn == mseqEntry)), 'Compound Number' ];
+        write ['... Writing: {} {}\n',mseqEntry, compoundNumber];
+        if length mfield == 1 then
+            db_ExportSD [ mdb_key, twrite ['{}-dock.sdf', compoundNumber], [], entry_keys | (mseqColumn == mseqEntry), [del_hlp:0] ];
+            db_ExportSD [ mdb_key, twrite ['{}-dock-top.sdf', compoundNumber], [], first (entry_keys | (mseqColumn == mseqEntry)), [del_hlp:0] ];
+        elseif length mfield == 2 then
+            ent = 0;
+            count = 0;
+            mol = [];
+            targ_chains = [];
+            lig_chains = [];
+            chains = [];
+            for ent in (entry_keys | (mseqColumn == mseqEntry)) loop
+                count = count + 1;
+                psys = SystemPush [];
+                pdata = tag [fldnames, db_ReadFields [mdb_key, ent, fldnames]];
+                inopt.pdata = pdata | m_diff [tags pdata, mfield];
+                
+                mol =  pdata.(second mfield);       // receptor in dock.mdb
+                targ_chains = mol_Create mol;
+                cSetName [targ_chains | cName targ_chains == '', mol(1)(MOL_NAME)];
+                
+                mol =  pdata.(first mfield);        // ligand in dock.mdb
+                lig_chains = mol_Create mol;
+                cSetName [lig_chains | cName lig_chains == '', mol(1)(MOL_NAME)];
+        
+                ligResidue = first cat cResidues lig_chains;
+                ligChain = rChain ligResidue;
+        
+                rSetINS [ligResidue, ligID.rINS];
+                rSetName [ligResidue, ligID.rName];
+                rSetType [ligResidue, ligID.rType];
+                rSetUID [ligResidue, ligID.rUID];
+
+                cSetName [ligChain, ligID.cName];
+                cSetGroup [ligChain, ligID.cGroup];
+                cSetNumber [ligChain, ligID.cNumber];
+                cSetTag [ligChain, ligID.cTag];
+
+                chains = cat [targ_chains,lig_chains];
+                
+                fwrite_PDB [twrite ['{}-dock-{}.pdb',compoundNumber,count],chains,inopt];
+                
+                if count == 1 then
+//                    fwrite_PDB [twrite ['{}-dock-top.pdb',compoundNumber,count],chains,inopt];    // don't need -top because -1 is the same
+                    fwrite_TriposMOL2 [twrite ['{}-dock-toplig.mol2',compoundNumber,count],lig_chains,inopt];
+                endif
+
+                SystemPop psys;
+            endloop
+        endif
+    endloop
+    db_Close mdb_key;
+    
+    write ['Done Writing: {} SDF(s) with {} ligands.\n',dockmdb, length uniq mseqColumn];
+
+endfunction
