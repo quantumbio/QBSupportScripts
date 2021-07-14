@@ -2,12 +2,14 @@
 
 # START VARIABLES
 bNOVEL=1        # assume that a novel and a placed ligand will be provided (set to 0 later if not)
+bTHREESTEP=0    # assume that the two step process (skipping MTCS) will be performed.
+bFORCEEXE=""     # assume the protein/ligand is not ready to roll and therefore throw an error if MOE finds a problem.
 
 # SET DEFAULTS:
 if [ -z "${MOE_MTSCOREES}" ]; then MOEOPT_MTSES=""; else MOEOPT_MTSES="-mtscorees"; fi
-if [ -z "${MTCSCONF}" ]; then MTCSCONF=5; fi
-if [ -z "${MAXPOSE}" ]; then MAXPOSE=50; fi
-if [ -z "${REMAXPOSE}" ]; then REMAXPOSE=5; fi
+if [ -z "${MTCSCONF}" ]; then MTCSCONF=0; fi
+if [ -z "${MAXPOSE}" ]; then MAXPOSE=125; fi
+if [ -z "${REMAXPOSE}" ]; then REMAXPOSE=25; fi
 
 # DEFAULT MT options (these may be set in the environment prior to calling the script if you wish to change them)
 if [ -z "${QM_OVERWRITE}" ]; then QM_OVERWRITE="-O"; fi             # overwrite all output files with new files
@@ -19,6 +21,8 @@ if [ -z "${PBS_NUM_PPN}" ]; then PBS_NUM_PPN=4; fi                  # use 4 core
 # CHECK FOR EXISTENCE OF DIVCON / QMECHANIC (see ERROR TRAP BELOW)
 if [ ! -z "${DIVCON_INSTALL}" ]; then
     QMECHANIC_BIN="${DIVCON_INSTALL}/bin/qmechanic"
+elif [ ! -z "${QBHOME}" ]; then
+    QMECHANIC_BIN="${QBHOME}/bin/qmechanic"
 else
     QMECHANIC_BIN=`which qmechanic`
 fi
@@ -93,6 +97,8 @@ current_settings()
     echo "  MT_MTCS_TYPE:        ${MT_MTCS_TYPE}"
     echo "  MTCSOPT:             ${MTCSOPT}"
     echo "  PBS_NUM_PPN:         ${PBS_NUM_PPN}"
+    echo "  THREE_STEP:          ${bTHREESTEP}  // 0 = OFF"
+    echo "  FORCE_EXE:           ${bFORCEEXE}    // "" = OFF"
     echo ""
     echo "* = MUST BE SET OR ERROR WILL THROW"
     echo "--------------------------------------------------------------------"
@@ -107,7 +113,7 @@ error_exit()
 	echo "Usage: $0 --target protein.pdb --ligand placed_ligand.mol2 [novel_ligand.mol2] [--tlimit 60]"
 	echo ""
 	echo "Documentation:"
-    echo "  The MTScoreE (ensemble) workflow is a 3 step process. This script encapulates these steps"
+    echo "  The MTScoreE (ensemble) workflow is a 2 or 3 step process. This script encapulates these steps"
     echo "  and demonstrates the use of the method with qmechanic for scoring and MOE from CCG for docking."
     echo "  The script requires that you provide a fully prepared PDB file for the target alone and "
     echo "  a fully prepared mol2 file for the PLACED [wildtype] ligand to define the active site."
@@ -115,20 +121,24 @@ error_exit()
     echo "  If the NOVEL ligand is not provided, then the PLACED ligand will be used instead."
 	echo ""
 	echo "Command Line Options:"
-	echo "  --help    Print this help and exit."
-	echo "  --target  [required] A PDB file corresponding to a protonated PROTEIN (no ligand)"
-	echo "  --ligand  [required] A MOL2 file corresponding to a protonated LIGAND placed in active site".
-	echo "            - This placed_ligand is used to define the active site residues for docking."
-	echo "            - You may use a wildcard '*' (such as *.mol2) in order to repeat this process for"
-	echo "            - many placed ligands (if --ligand has a '*' then --novel may NOT be provided)."
-	echo "  --novel   [optional] A MOL2 file corresponding to a protonated, novel ligand."
-	echo "            - (Script will use --ligand if --novel is not defined.)"
-	echo "            - You may use a wildcard '*' (such as *.mol2) in order to repeat this process for"
-	echo "            - many placed ligands (if --ligand has a '*' then --novel may NOT be provided)."
-	echo "  --tlimit  [optional] Time limit in minutes for each qmechanic (MTCS, MTScore) run."
-	echo "            - (Script will use 60 minutes if --tlimit is not defined.)"
-	echo "            - Note: generally these calculations should take a few seconds/minutes so "
-	echo "              you should never see this limit reached."
+	echo "  --help     Print this help and exit."
+	echo "  --target   [required] A PDB file corresponding to a protonated PROTEIN (no ligand)"
+	echo "  --ligand   [required] A MOL2 file corresponding to a protonated LIGAND placed in active site".
+	echo "             - This placed_ligand is used to define the active site residues for docking."
+	echo "             - You may use a wildcard '*' (such as *.mol2) in order to repeat this process for"
+	echo "             - many placed ligands (if --ligand has a '*' then --novel may NOT be provided)."
+	echo "  --novel    [optional] A MOL2 file corresponding to a protonated, novel ligand."
+	echo "             - (Script will use --ligand if --novel is not defined.)"
+	echo "             - You may use a wildcard '*' (such as *.mol2) in order to repeat this process for"
+	echo "             - many placed ligands (if --ligand has a '*' then --novel may NOT be provided)."
+	echo "  --tlimit   [optional] Time limit in minutes for each qmechanic (MTCS, MTScore) run."
+	echo "             - (Script will use 60 minutes if --tlimit is not defined.)"
+	echo "             - Note: generally these calculations should take a few seconds/minutes so "
+	echo "               you should never see this limit reached."
+	echo "  --3step    [optional] By default, currently MTCS is only used to generate the unbound ZL."
+	echo "             - Using the 3step option, these MTCS conformers will also be used in MOE/Dock."
+	echo "  --forceexe [optional] By default, MOE will throw an error if it finds any trouble in the input."
+	echo "             - Using the forceexe option, the calculation will continue."
 	echo ""
 	echo "Useful env variables include:"
     echo "  DIVCON_INSTALL  = path to QBHOME to be used"
@@ -208,6 +218,14 @@ while [[ $# -gt 0 ]] ; do
             shift # past argument
             shift # past value
         ;;
+        --3step)
+            bTHREESTEP=1
+            shift # past argument
+        ;;
+        --forceexe)
+            bFORCEEXE="-forceexe"
+            shift # past argument
+        ;;
         -h|--hamiltonian)
             hamiltonian="$2"
             shift # past argument
@@ -273,18 +291,20 @@ for novelfile in "${innovelfile[@]}" ; do
     
     env >> OUT.${novelbasename}_proteinE 2>&1
 
-#   STEP #1: EXECUTE MTCS (conformational search) to generate conformers which match the chosen potential.
-    execute_binary "${DIVCON_INSTALL}/bin/qmechanic ${targetbasename}.pdb --ligand ${novelbasename}.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} ${MT_MTCS_TYPE} ${MTCSOPT} -p sdf --np ${PBS_NUM_PPN} -v 2" "OUT.${novelbasename}_proteinE"
-    echo "QMECHANIC RUN COMPLETE" >> OUT.${novelbasename}_proteinE
-    
-    if [ -e ${targetbasename}_conf.sdf ] ; then mv ${targetbasename}_conf.sdf ${novelbasename}_conf.sdf;  fi
+#   STEP #1: EXECUTE MTCS (conformational search) to generate conformers which match the chosen potential. (for 3 step)
+    if [ "$bTHREESTEP" -eq 1 ]; then
+        execute_binary "${DIVCON_INSTALL}/bin/qmechanic ${targetbasename}.pdb --ligand ${novelbasename}.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} ${MT_MTCS_TYPE} ${MTCSOPT} -p sdf --np ${PBS_NUM_PPN} -v 2" "OUT.${novelbasename}_proteinE"
+        echo "QMECHANIC RUN COMPLETE" >> OUT.${novelbasename}_proteinE
+        if [ -e ${targetbasename}_conf.sdf ] ; then mv ${targetbasename}_conf.sdf ${novelbasename}_conf.sdf;  fi
+        MOE_CONF_FILE="-conf ${novelbasename}_conf.sdf --mtcsconf ${MTCSCONF}"
+    fi
 
 #   STEP #2: EXECUTE MOE (docking) to generate poses which fit within the active site of the placed_ligand.mol2
-    execute_binary "${MOE_BIN} -licwait -run ${DC_SVL}/run/qbDockPair.svl -rec ${targetbasename}.pdb -lig ${ligandbasename}.mol2 -conf ${novelbasename}_conf.sdf -o ${novelbasename}_dock -delwat $MOEOPT_MTSES --maxpose ${MAXPOSE} --mtcsconf ${MTCSCONF} --remaxpose ${REMAXPOSE}" "OUT.${novelbasename}_proteinE"
+    execute_binary "${MOE_BIN} -licwait -run ${DC_SVL}/run/qbDockPair.svl -rec ${targetbasename}.pdb -lig ${ligandbasename}.mol2 ${MOE_CONF_FILE} -o ${novelbasename}_dock -delwat $MOEOPT_MTSES -maxpose ${MAXPOSE} -remaxpose ${REMAXPOSE} ${bFORCEEXE}" "OUT.${novelbasename}_proteinE"
     echo "MOE RUN COMPLETE" >> OUT.${novelbasename}_proteinE
 
 #   STEP #3: EXECUTE MTScore (Ensemble scoring) to score MOE-generated poses which fit within the active site of the placed_ligand.mol2
-    execute_binary "${DIVCON_INSTALL}/bin/qmechanic ${targetbasename}.pdb --ligand ${ligandbasename}.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} --mtdock ${novelbasename}_dock.sdf opt off --mtscore --np ${PBS_NUM_PPN} -v 2" "OUT.${novelbasename}_proteinE"
+    execute_binary "${DIVCON_INSTALL}/bin/qmechanic pro_${ligandbasename}_predock.pdb --ligand lig_${ligandbasename}_predock.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} --mtdock ${novelbasename}_dock.sdf opt off --mtscore --np ${PBS_NUM_PPN} -v 2" "OUT.${novelbasename}_proteinE"
     echo "QMECHANIC RUN COMPLETE" >> OUT.${novelbasename}_proteinE
     
     endtime=`date`
@@ -295,7 +315,7 @@ for novelfile in "${innovelfile[@]}" ; do
 #   OPTIONAL STEP #3: EXECUTE MTScore (Ensemble scoring) using an alternate chosen qmechanic to score MOE-generated poses which fit within the active site of the placed_ligand.mol2
     if [ ! -z "${PREV_DIVCON_INSTALL}" ]; then
         jobname=`basename ${PREV_DIVCON_INSTALL} | sed 's/DivConDiscoverySuite-//'`
-        execute_binary "${PREV_DIVCON_INSTALL}/bin/qmechanic ${targetbasename}.pdb --ligand ${ligandbasename}.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} --mtdock ${novelbasename}_dock.sdf opt off --mtscore --np ${PBS_NUM_PPN} -v 2" "OUT.${novelbasename}_proteinE-${jobname}"
+        execute_binary "${PREV_DIVCON_INSTALL}/bin/qmechanic pro_${targetbasename}_predock.pdb --ligand lig_${ligandbasename}_predock.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} --mtdock ${novelbasename}_dock.sdf opt off --mtscore --np ${PBS_NUM_PPN} -v 2" "OUT.${novelbasename}_proteinE-${jobname}"
 
         rm -f *.h5
     fi
