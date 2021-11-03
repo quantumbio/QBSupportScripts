@@ -1,5 +1,5 @@
 #!/bin/bash
-#set -e
+set -e
 
 if [ -z "${QBHOME}" ]; then
     echo "ERROR: QBHOME is not set! You MUST source /path/to/DivConSuite/etc/qbenv.sh THEN call this function"
