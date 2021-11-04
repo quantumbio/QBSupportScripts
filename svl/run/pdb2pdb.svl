@@ -1,0 +1,130 @@
+#svl
+
+#if 0
+ // BEGIN COPYRIGHT
+ /***********************************************************************
+    Copyright (c) 2021 QuantumBio Inc. and/or its affiliates.
+	
+ This source code is the property of QuantumBio Inc. and/or its affiliates
+ and is provided AS IS.
+
+ This source code may contain proprietary and Confidential Information, 
+ including trade secrets, belonging to QuantumBio Inc. and/or its 
+ affiliates.
+
+ Please see http://www.quantumbioinc.com/ for more information.
+
+ ***********************************************************************/
+ // END COPYRIGHT
+#endif      
+
+
+global argv;
+
+function PartialCharge;
+function ArgvPull;
+function fwrite_TriposMOL2;
+function fwrite_PDB;
+
+local function main []
+    ArgvReset ArgvExpand argv;
+
+    local [complex,ligRes,ligUID,ligChain] = ArgvPull [ ['-complex','-ligRes','-ligUID','-ligChain'], [1,1,1,1] ];
+    
+        local remaining = ArgvAll [];
+    if not isnull remaining then
+        exit twrite ['ERROR: Unknown command line options: {}\n',remaining];
+    endif
+    
+    if isnull complex then
+        exit twrite ['ERROR: use -complex to supply a PDB or mol2 file with the protein:ligand complex.'];
+    endif
+    if isnull ligRes then
+        exit twrite ['ERROR: use -ligRes to supply the 3letter code for the ligand in the protein:ligand complex.'];
+    endif
+    if isnull ligUID then
+        exit twrite ['ERROR: use -ligUID to supply the UID/numerical code for the ligand in the protein:ligand complex.'];
+    endif
+    if isnull ligChain then
+        exit twrite ['ERROR: use -ligChain to supply the Chain ID for the ligand in the protein:ligand complex.'];
+    endif
+    
+    if '' == first fstat complex then
+        exit twrite ['ERROR: file {} not found!', complex];
+    endif
+
+    ReadAuto complex;
+    pot_Load '$MOE/lib/Amber10EHT.ff';
+
+    // Note that the following is the general potential set up only.
+    // Individual stages like refinement may use a modified set up.
+    pot_Setup [
+        strEnable: 1,
+        angEnable: 1,
+        stbEnable: 1,
+        oopEnable: 1,
+        torEnable: 1,
+        vdwEnable: 1,
+        eleEnable: 1,
+        solEnable: 0,
+        resEnable: 1,
+        strWeight: 1,
+        angWeight: 1,
+        stbWeight: 1,
+        oopWeight: 1,
+        torWeight: 1,
+        vdwWeight: 1,
+        eleWeight: 1,
+        solWeight: 1,
+        resWeight: 1,
+        cutoffEnable: 1,
+        cutoffOn: 8,
+        cutoffOff: 10,
+        eleDist: 2,
+        vdwScale14: 0.5,
+        vdwBuffer1: 0,
+        vdwBuffer2: 0,
+        eleScale14: 0.833333,
+        eleDielectric: 1,
+        eleBuffer: 0,
+        solDielectric: 80,
+        solDielectricOffset: 0,
+        state0: 1,
+        state1: 0,
+        state2: 1,
+        threadCount: 0
+    ];
+    pot_SetCharges [];
+
+    local infileBasename = fbase ftail complex;
+    ligChain = twrite ['{}.{}',infileBasename, ligChain];
+    ligUID = atoi ligUID;
+    write ['ligChain: {}\n',ligChain];
+    
+    local selection = Residues [] | (rUID Residues[] == ligUID and cName rChain Residues [] == ligChain );
+    
+    if isnull selection then
+        exit twrite ['ERROR: ligand {} {} {} NOT FOUND in {}', ligRes, ligUID, ligChain, complex];
+    endif
+    
+    if length selection > 1 then
+        exit twrite ['ERROR: ligand {} {} {} has more than one match in {}', ligRes, ligUID, ligChain, complex];
+    endif
+    
+    function writeFile [ofilename, residues]
+        write ['NOTE: Writing {} residues to {}\n', length residues, ofilename];
+        if fext ofilename == 'mol2' then
+            fwrite_TriposMOL2   [ofilename, residues];
+        elseif fext ofilename == 'mol2' then
+            fwrite_PDB   [ofilename, residues];
+        endif
+    endfunction
+
+    writeFile   [twrite ['{}-complex.mol2',infileBasename], Residues[]];
+    writeFile   [twrite ['{}-target.mol2',infileBasename], diff [Residues[],selection]];
+    writeFile   [twrite ['{}-ligand.mol2',infileBasename], selection];
+    writeFile   [twrite ['{}-complex.pdb',infileBasename], Residues[]];
+    writeFile   [twrite ['{}-target.pdb',infileBasename], diff [Residues[],selection]];
+    writeFile   [twrite ['{}-ligand.pdb',infileBasename], selection];
+
+endfunction

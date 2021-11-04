@@ -1,5 +1,22 @@
 #!/bin/bash
 
+#  // BEGIN COPYRIGHT
+#  /***********************************************************************
+#     Copyright (c) 2020-2021 QuantumBio Inc. and/or its affiliates.
+# 	
+#  This source code is the property of QuantumBio Inc. and/or its affiliates
+#  and is provided AS IS.
+# 
+#  This source code may contain proprietary and Confidential Information, 
+#  including trade secrets, belonging to QuantumBio Inc. and/or its 
+#  affiliates.
+# 
+#  Please see http://www.quantumbioinc.com/ for more information.
+# 
+#  ***********************************************************************/
+#  // END COPYRIGHT
+
+
 # START VARIABLES
 bNOVEL=1        # assume that a novel and a placed ligand will be provided (set to 0 later if not)
 bTHREESTEP=0    # assume that the two step process (skipping MTCS) will be performed.
