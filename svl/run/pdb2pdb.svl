@@ -115,7 +115,7 @@ local function main []
         write ['NOTE: Writing {} residues to {}\n', length residues, ofilename];
         if fext ofilename == 'mol2' then
             fwrite_TriposMOL2   [ofilename, residues];
-        elseif fext ofilename == 'mol2' then
+        elseif fext ofilename == 'pdb' then
             fwrite_PDB   [ofilename, residues];
         endif
     endfunction

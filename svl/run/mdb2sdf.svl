@@ -43,7 +43,7 @@ local function main []
     local starttime = clock[];
     local inopt;
     ArgvReset ArgvExpand argv;
-    local [printhelp, dockmdb, ligfilename, recfilename] = ArgvPull [ ['-help', '-dockmdb', '-lig','-rec'], [0, 1, 1, 1] ];
+    local [printhelp, dockmdb, ligfilename, recfilename, setRName] = ArgvPull [ ['-help', '-dockmdb', '-lig','-rec','-rName'], [0, 1, 1, 1, 1] ];
     local remaining = ArgvAll [];
     if not isnull remaining then
         exit twrite ['ERROR: Unknown command line options: {}\n',remaining];
@@ -102,7 +102,8 @@ local function main []
     local mseqEntry;
     local mdb_key = db_Open [dockmdb,'read'];
     for mseqEntry in uniq mseqColumn loop
-        local compoundNumber = db_ReadFields [mdb_key, first (entry_keys | (mseqColumn == mseqEntry)), 'Compound Number' ];
+//        local compoundNumber = db_ReadFields [mdb_key, first (entry_keys | (mseqColumn == mseqEntry)), 'Compound Number' ];   // This is not generally found
+        local compoundNumber = first first first db_ReadFields [mdb_key, first (entry_keys | (mseqColumn == mseqEntry)), 'mol' ];     // Instead use mol name
         write ['... Writing: {} {}\n',mseqEntry, compoundNumber];
         if length mfield == 1 then
             db_ExportSD [ mdb_key, twrite ['{}-dock.sdf', compoundNumber], [], entry_keys | (mseqColumn == mseqEntry), [del_hlp:0] ];
@@ -135,6 +136,10 @@ local function main []
                 rSetName [ligResidue, ligID.rName];
                 rSetType [ligResidue, ligID.rType];
                 rSetUID [ligResidue, ligID.rUID];
+                
+                if not isnull setRName then
+                    rSetName [ligResidue, setRName];
+                endif
 
                 cSetName [ligChain, ligID.cName];
                 cSetGroup [ligChain, ligID.cGroup];
@@ -142,6 +147,7 @@ local function main []
                 cSetTag [ligChain, ligID.cTag];
 
                 chains = cat [targ_chains,lig_chains];
+                
                 
                 fwrite_PDB [twrite ['{}-dock-{}.pdb',compoundNumber,count],chains,inopt];
                 
