@@ -43,8 +43,8 @@ PDBID=2WOR
 echo "Tutorial #1 (Running Phenix/DivCon without the qbphenix wrapper): $PDBID"
 rm -rf ${WORKDIR}/NakedPHENIX ; mkdir -p ${WORKDIR}/NakedPHENIX ; cd ${WORKDIR}/NakedPHENIX
 
-wget https://downloads.quantumbioinc.com/media/tutorials/XModeScore/2WOR.pdb
-wget https://downloads.quantumbioinc.com/media/tutorials/XModeScore/2WOR-sf.cif
+wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2WOR.pdb
+wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2WOR-sf.cif
 
 ${PHENIX}/build/bin/phenix.ready_set ${PDBID}.pdb add_h_to_water=true
 

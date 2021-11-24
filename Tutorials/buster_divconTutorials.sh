@@ -44,8 +44,8 @@ echo "Tutorial #1 (Running BUSTER/DivCon without the qbbuster wrapper): 2BSM"
 rm -rf ${WORKDIR}/NakedBUSTER ; mkdir -p ${WORKDIR}/NakedBUSTER ; cd ${WORKDIR}/NakedBUSTER
 
 tee divcon.ini <<EOF
-region-selection = /A/BSM/1224// 3 0
-hamiltonian = pm6 amberff14
+qm-region = /A/BSM/1224// 3 0
+hamiltonian = pm6 amberff14sb
 np = 4
 EOF
 
@@ -60,25 +60,20 @@ NOTE BUSTER_QM_HELPER $QBHOME/scripts/BusterQMHelper.sh
 NOTE BUSTER_QM_METHOD PM6
 NOTE BUSTER_QM_WEIGHT 3.0
 EOF
+wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2BSM+H.pdb
+wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2BSM.mtz
+wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/BSM.cif
 
-refine -Gelly 2BSM.qm -p 2BSM+H.pdb -m 2BSM.mtz -l BSM.cif -nbig 2  RunGellySanityCheck=no RunGellyScreen=no -qm_weight 3.0
+#refine -Gelly 2BSM.qm -p 2BSM+H.pdb -m 2BSM.mtz -l BSM.cif -nbig 2  RunGellySanityCheck=no RunGellyScreen=no -qm_weight 3.0
 
 
 echo "Tutorial #2 (using qbbuster execution script and Grade & DivCon protonator): 2BSM"
 rm -rf ${WORKDIR}/qbbuster_divcon ; mkdir -p ${WORKDIR}/qbbuster_divcon ; cd ${WORKDIR}/qbbuster_divcon
 
 wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2bsm.pdb
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2bsm-sf.cif
+wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2BSM.mtz
 
-$QBHOME/bin/bin/qbbuster --pdbFile 2bsm.pdb --sfFile 2bsm-sf.cif --protonation divcon --makeCIF grade --mmMethod amberff14 --qmMethod pm6 --qmWeight 5.0 --ncycles 2 --selection "resname BSM" --region-radius 3.0 --np 4 --dir qmRun
-
-echo "Tutorial #3 (qbbuster and XModeScore): 1TOW"
-rm -rf ${WORKDIR}/qbbuster_xmodescore ; mkdir -p ${WORKDIR}/qbbuster_xmodescore ; cd ${WORKDIR}/qbbuster_xmodescore
-
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/1tow.pdb
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/1tow-sf.cif
-
-/path/to/DivConSuite/bin/qbbuster --pdbFile 1tow.pdb --sfFile 1tow-sf.cif --XModeScore --protonation divcon --makeCIF grade --mmMethod amberff14 --qmMethod pm6 --qmWeight 2.0 --selection "resname CRZ chain A resid 501" --region-radius 3.0 --protomers "-1..1" --np 24 --dir XModeScoreRun
+$QBHOME/bin/qbbuster --pdbFile 2bsm.pdb --sfFile 2BSM.mtz --protonation divcon --makeCIF grade --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 2 --selection "resname BSM" --region-radius 3.0 --np 4 --dir qmRun
 
 currentDate=`date`
 echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"

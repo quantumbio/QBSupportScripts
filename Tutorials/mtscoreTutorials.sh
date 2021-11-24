@@ -38,11 +38,25 @@ WORKDIR=$PWD
 echo "First A Tutorial: Command Line: MTConfSearch"
 rm -rf ${WORKDIR}/MTCS-SMILES ; mkdir -p ${WORKDIR}/MTCS-SMILES ; cd ${WORKDIR}/MTCS-SMILES
 
-${DIVCON_BIN} c1ccccc1CCCC --mtcs -p sdf
+${DIVCON_BIN} --ligand c1ccccc1CCCC --mtcs -p sdf
 
 echo "First B Tutorial: Command Line: MTConfSearch"
-rm -rf ${WORKDIR}/MTCS-MOL2 ; mkdir -p ${WORKDIR}/MTCS-MOL2 ; cd ${WORKDIR}/MTCS-MOL2
+tutorFolder=MTCS-MOL2
+rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/4k18_ligand.mol2
+${DIVCON_BIN} --ligand 4k18_ligand.mol2 --mtcs -O
 
+echo "First C Tutorial: Command Line: MTConfSearch Energy Cutoff"
+tutorFolder=MTCS-MOL2_CUTOFF
+rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/4k18_ligand.mol2
+${DIVCON_BIN} --ligand 4k18_ligand.mol2 --mtcs 10kcal -O
+
+echo "First D Tutorial: Command Line: MTConfSearch Energy Cutoff With Opt"
+tutorFolder=MTCS-MOL2_CUTOFF_OPT
+rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/4k18_ligand.mol2
+${DIVCON_BIN} --ligand 4k18_ligand.mol2 --mtcs 10kcal opt torsion 100 0.1 -O
 
 echo "Second Tutorial: Command Line: MTScore (Endstate)"
 rm -rf ${WORKDIR}/MTScoreES ; mkdir -p ${WORKDIR}/MTScoreES ; cd ${WORKDIR}/MTScoreES
@@ -60,7 +74,7 @@ tar xvf Bace_030215_CAT_4p.tar.gz
 cp Bace_030215_CAT_4p/Bace_030215.pdb .
 cp Bace_030215_CAT_4p/Bace_030215_CAT_4p.mol2 .
 
-${DIVCON_BIN} Bace_030215.pdb --ligand Bace_030215_CAT_4p.mol2 --mtcs -p sdf --np 4 -v 2
+${DIVCON_BIN} Bace_030215.pdb --ligand Bace_030215_CAT_4p.mol2 --mtcs --np 2 -v 2
 
 moebatch -licwait -run "${QBHOME}/svl/run/qbDockPair.svl" -rec Bace_030215.pdb -lig Bace_030215_CAT_4p.mol2 -conf Bace_030215_CAT_4p_conf.sdf -protonate -delwat
 
@@ -77,6 +91,7 @@ cp Bace_030215_CAT_4p/Bace_030215_CAT_4p.mol2 .
 moebatch -licwait -run "${QBHOME}/svl/run/qbDockPair.svl" -rec Bace_030215.pdb -lig Bace_030215_CAT_4p.mol2 -delwat -protonate
 
 ${DIVCON_BIN} pro_Bace_030215_CAT_4p_predock.pdb --ligand lig_Bace_030215_CAT_4p_predock.mol2 -h garf --mtdock Bace_030215_CAT_4p_dock.sdf --mtscore ensemble --np 4 -v 2
+echo "Forth Tutorial: 2Step MTScoreE with an External Docker (no-MTCS) -- END"
 
 
 echo "Fifth Tutorial: MTScoreE with induced fit protein:ligand docking"
@@ -89,7 +104,8 @@ cp Bace_030215_CAT_4p/Bace_030215_CAT_4p.mol2 .
 
 moebatch -licwait -run "${QBHOME}/svl/run/qbDockPair.svl" -rec Bace_030215.pdb -lig Bace_030215_CAT_4p.mol2 -inducedfit -delwat -protonate
 
-${DIVCON_BIN} pro_Bace_030215_CAT_4p_predock.pdb --ligand lig_Bace_030215_CAT_4p_predock.mol2 -h amberff14sb --mtdock *_dock.pdb --mtscore ensemble --np 4 -v 2
+${DIVCON_BIN} pro_Bace_030215_CAT_4p_predock.pdb --ligand lig_Bace_030215_CAT_4p_predock.mol2 -h amberff14sb --mtdock *_dock*.pdb --mtscore ensemble --np 4 -v 2
+echo "Fifth Tutorial: MTScoreE with induced fit protein:ligand docking -- END"
 
 echo "Sixth Tutorial: Manipulating cutoffs to maximize predictions"
 rm -rf ${WORKDIR}/Cutoffs ; mkdir -p ${WORKDIR}/Cutoffs ; cd ${WORKDIR}/Cutoffs
@@ -103,9 +119,43 @@ moebatch -licwait -run "${QBHOME}/svl/run/qbDockPair.svl" -rec Bace_030215.pdb -
 
 ${DIVCON_BIN} pro_Bace_030215_CAT_4p_predock.pdb --ligand lig_Bace_030215_CAT_4p_predock.mol2 -h garf --mtdock Bace_030215_CAT_4p_dock.sdf --mtscore ensemble --nb-cutoff 8.0  --np 4 -v 2
 
-echo "Sixth Tutorial: Manipulating cutoffs to maximize predictions"
+echo "Sixth Tutorial: Manipulating cutoffs to maximize predictions -- END"
 
+echo "7th Tutorial: MTScoreE with external third party software docked poses"
+tutorFolder=externalSDF_noOpt
+rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/pro_4wiv_ligand_predock.pdb 
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/lig_4wiv_ligand_predock.mol2 
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/4wiv_ligand_dock.sdf 
+${DIVCON_BIN} pro_4wiv_ligand_predock.pdb --ligand lig_4wiv_ligand_predock.mol2 --mtdock 4wiv_ligand_dock.sdf opt off --mtscore -h garf -O --np 2 -v 2
+echo "7th Tutorial: MTScoreE with external third party software docked poses -- END"
 
+echo "8th Tutorial: MTScoreE with external third party software docked poses with Rigid Pose Opt"
+tutorFolder=externalSDF_RigidOpt
+rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/pro_4wiv_ligand_predock.pdb 
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/lig_4wiv_ligand_predock.mol2 
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/4wiv_ligand_dock.sdf 
+${DIVCON_BIN} pro_4wiv_ligand_predock.pdb --ligand lig_4wiv_ligand_predock.mol2 --mtdock 4wiv_ligand_dock.sdf opt rigid 100 0.01 --mtscore -h garf -O --np 2 -v 2
+echo "8th Tutorial: MTScoreE with external third party software docked poses with Rigid Pose Opt -- END"
+
+echo "9th Tutorial: MTScoreE with external third party software docked poses with Torsion Pose Opt"
+tutorFolder=externalSDF_TorsionOpt
+rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/pro_4wiv_ligand_predock.pdb 
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/lig_4wiv_ligand_predock.mol2 
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/4wiv_ligand_dock.sdf 
+${DIVCON_BIN} pro_4wiv_ligand_predock.pdb --ligand lig_4wiv_ligand_predock.mol2 --mtdock 4wiv_ligand_dock.sdf opt torsion 100 0.01 --mtscore -h garf -O --np 2 -v 2
+echo "9th Tutorial: MTScoreE with external third party software docked poses with Torsion Pose Opt -- END"
+
+echo "10th Tutorial: MTScoreE with external third party software docked poses with All Atom Pose Opt"
+tutorFolder=externalSDF_AllOpt
+rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/pro_4wiv_ligand_predock.pdb 
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/lig_4wiv_ligand_predock.mol2 
+wget http://downloads.quantumbioinc.com/media/tutorials/MT/4wiv_ligand_dock.sdf 
+${DIVCON_BIN} pro_4wiv_ligand_predock.pdb --ligand lig_4wiv_ligand_predock.mol2 --mtdock 4wiv_ligand_dock.sdf opt all 100 0.01 --mtscore -h garf -O --np 2 -v 2
+echo "10th Tutorial: MTScoreE with external third party software docked poses with All Atom Pose Opt -- END"
 
 currentDate=`date`
 echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
