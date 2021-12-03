@@ -71,14 +71,18 @@ wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2BSM+H.pdb
 wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2BSM.mtz
 qbbuster --pdbFile 2BSM+H.pdb --sfFile 2BSM.mtz --XModeScore --protomers "-1..1" --protonation skip --makeCIF grade --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 1 --resname BSM --chain A --resid 1224 --np 20 --buffer-radius 0.0 --region-radius 3.0
 
-exit
 echo "Tutorial #4: Automated MOE-based Docking – using qbphenix"
 dir4=xmodeScore_autoDock
 rm -rf ${WORKDIR}/$dir4 ; mkdir -p ${WORKDIR}/$dir4 ; cd ${WORKDIR}/$dir4
 
 $QBHOME/bin/qbphenix --pdbFile 5C3K-H_refine_001.pdb --dataFile 5C3K.mtz --densityFile 5C3K-H_refine_001.mtz --ligandFile 4XF_A_402.pdb --dock dockFolderResults --protonation skip --Xmodescore --protonateTautomers MOE --mmMethod amberff14 --qmMethod pm6 --region-radius 3.0 --nproc 22
     
-
+echo "Tutorial #5: Real-Space Ligand Statistics – using qmechanic"
+dir5=RealSpaceStatictics
+rm -rf ${WORKDIR}/$dir5 ; mkdir -p ${WORKDIR}/$dir5 ; cd ${WORKDIR}/$dir5
+wget http://downloads.quantumbioinc.com/media/tutorials/RealSpaceStats/0_0_0_0_-1_refine_001.pdb
+wget http://downloads.quantumbioinc.com/media/tutorials/RealSpaceStats/0_0_0_0_-1_refine_001.mtz
+$QBHOME/bin/qmechanic 0_0_0_0_-1_refine_001.pdb 0_0_0_0_-1_refine_001.mtz --xstats "/A/AZM/701//,/A/HIS/96//"
 
 
 currentDate=`date`
