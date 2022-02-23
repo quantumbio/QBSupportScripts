@@ -57,14 +57,14 @@ ${DIVCON_BIN} 1LRI-addH.pdb -h pm6 --np 8 -v 2 --opt all 3 0.01 --symmetry -p pd
 echo "Forth Tutorial: Active Site Structure Optimization"
 rm -rf ${WORKDIR}/ActiveSiteStructureOptimization ; mkdir -p ${WORKDIR}/ActiveSiteStructureOptimization ; cd ${WORKDIR}/ActiveSiteStructureOptimization
 
-wget http://downloads.quantumbioinc.com/media/tutorials/cli/1P2Y-addH.pdb
-${DIVCON_BIN} 1P2Y-addH.pdb --opt /*/HEM/*//,/*/NCT/*// 5.0 0.0 --np 8 -h pm6 -v 2 -p pdb
+wget http://downloads.quantumbioinc.com/media/tutorials/cli/1TOW-H.pdb
+${DIVCON_BIN} 1TOW-H.pdb --opt /*/CRZ/*// 3.0 0.0 --np 8 -h pm6 -v 2 -p pdb
 
 echo "Fifth Tutorial: ONIOM (mixed-QM/MM) Simulations"
 rm -rf ${WORKDIR}/ONIOM_Simulations ; mkdir -p ${WORKDIR}/ONIOM_Simulations ; cd ${WORKDIR}/ONIOM_Simulations
 
 wget http://downloads.quantumbioinc.com/media/tutorials/cli/1LRI-addH.pdb
-${DIVCON_BIN} 1LRI-addH.pdb -h pm6 amberff14sb --opt 100 0.01 --qm-region /A/CLR/99// 3.0 0.0 --np 8 -v 1 -p pdb
+${DIVCON_BIN} 1LRI-addH.pdb -h pm6 amberff14sb --opt 25 0.01 --qm-region /A/CLR/99// 3.0 0.0 --np 8 -v 1 -p pdb
 
 echo "Sixth Tutorial: Protonation"
 rm -rf ${WORKDIR}/Protonation ; mkdir -p ${WORKDIR}/Protonation ; cd ${WORKDIR}/Protonation

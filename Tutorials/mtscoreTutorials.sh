@@ -38,25 +38,25 @@ WORKDIR=$PWD
 echo "First A Tutorial: Command Line: MTConfSearch"
 rm -rf ${WORKDIR}/MTCS-SMILES ; mkdir -p ${WORKDIR}/MTCS-SMILES ; cd ${WORKDIR}/MTCS-SMILES
 
-${DIVCON_BIN} --ligand c1ccccc1CCCC --mtcs -p sdf
+${DIVCON_BIN} c1ccccc1CCCC -p sdf -h amberff14sb -v2
 
 echo "First B Tutorial: Command Line: MTConfSearch"
 tutorFolder=MTCS-MOL2
 rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
 wget http://downloads.quantumbioinc.com/media/tutorials/MT/4k18_ligand.mol2
-${DIVCON_BIN} --ligand 4k18_ligand.mol2 --mtcs -O
+${DIVCON_BIN} --ligand 4k18_ligand.mol2 --mtcs -O -h garf
 
 echo "First C Tutorial: Command Line: MTConfSearch Energy Cutoff"
 tutorFolder=MTCS-MOL2_CUTOFF
 rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
 wget http://downloads.quantumbioinc.com/media/tutorials/MT/4k18_ligand.mol2
-${DIVCON_BIN} --ligand 4k18_ligand.mol2 --mtcs 10kcal -O
+${DIVCON_BIN} --ligand 4k18_ligand.mol2 --mtcs 10kcal -O -h garf
 
 echo "First D Tutorial: Command Line: MTConfSearch Energy Cutoff With Opt"
 tutorFolder=MTCS-MOL2_CUTOFF_OPT
 rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
 wget http://downloads.quantumbioinc.com/media/tutorials/MT/4k18_ligand.mol2
-${DIVCON_BIN} --ligand 4k18_ligand.mol2 --mtcs 10kcal opt torsion 100 0.1 -O
+${DIVCON_BIN} --ligand 4k18_ligand.mol2 --mtcs 10kcal input opt torsion 100 0.1 -O -h amberff14sb
 
 echo "Second Tutorial: Command Line: MTScore (Endstate)"
 rm -rf ${WORKDIR}/MTScoreES ; mkdir -p ${WORKDIR}/MTScoreES ; cd ${WORKDIR}/MTScoreES
@@ -74,11 +74,11 @@ tar xvf Bace_030215_CAT_4p.tar.gz
 cp Bace_030215_CAT_4p/Bace_030215.pdb .
 cp Bace_030215_CAT_4p/Bace_030215_CAT_4p.mol2 .
 
-${DIVCON_BIN} Bace_030215.pdb --ligand Bace_030215_CAT_4p.mol2 --mtcs --np 2 -v 2
+${DIVCON_BIN} Bace_030215.pdb --ligand Bace_030215_CAT_4p.mol2 --mtcs input  -h amberff14sb --np 2 -v 2
 
 moebatch -licwait -run "${QBHOME}/svl/run/qbDockPair.svl" -rec Bace_030215.pdb -lig Bace_030215_CAT_4p.mol2 -conf Bace_030215_CAT_4p_conf.sdf -protonate -delwat
 
-${DIVCON_BIN} Bace_030215.pdb --ligand Bace_030215_CAT_4p.mol2 -h garf --mtdock Bace_030215_CAT_4p_dock.sdf --mtscore ensemble --np 4 -v 2
+${DIVCON_BIN} Bace_030215.pdb --ligand Bace_030215_CAT_4p.mol2 -h amberff14sb --mtdock Bace_030215_CAT_4p_dock.sdf --mtscore ensemble --np 4 -v 2
 
 echo "Forth Tutorial: 2Step MTScoreE with an External Docker (no-MTCS)"
 rm -rf ${WORKDIR}/2Step ; mkdir -p ${WORKDIR}/2Step ; cd ${WORKDIR}/2Step
@@ -90,7 +90,7 @@ cp Bace_030215_CAT_4p/Bace_030215_CAT_4p.mol2 .
 
 moebatch -licwait -run "${QBHOME}/svl/run/qbDockPair.svl" -rec Bace_030215.pdb -lig Bace_030215_CAT_4p.mol2 -delwat -protonate
 
-${DIVCON_BIN} pro_Bace_030215_CAT_4p_predock.pdb --ligand lig_Bace_030215_CAT_4p_predock.mol2 -h garf --mtdock Bace_030215_CAT_4p_dock.sdf --mtscore ensemble --np 4 -v 2
+${DIVCON_BIN} pro_Bace_030215_CAT_4p_predock.pdb --ligand lig_Bace_030215_CAT_4p_predock.mol2 -h amberff14sb --mtdock Bace_030215_CAT_4p_dock.sdf --mtscore ensemble --np 4 -v 2
 echo "Forth Tutorial: 2Step MTScoreE with an External Docker (no-MTCS) -- END"
 
 
@@ -117,7 +117,7 @@ cp Bace_030215_CAT_4p/Bace_030215_CAT_4p.mol2 .
 
 moebatch -licwait -run "${QBHOME}/svl/run/qbDockPair.svl" -rec Bace_030215.pdb -lig Bace_030215_CAT_4p.mol2 -delwat -protonate
 
-${DIVCON_BIN} pro_Bace_030215_CAT_4p_predock.pdb --ligand lig_Bace_030215_CAT_4p_predock.mol2 -h garf --mtdock Bace_030215_CAT_4p_dock.sdf --mtscore ensemble --nb-cutoff 8.0  --np 4 -v 2
+${DIVCON_BIN} pro_Bace_030215_CAT_4p_predock.pdb --ligand lig_Bace_030215_CAT_4p_predock.mol2 -h amberff14sb --mtdock Bace_030215_CAT_4p_dock.sdf --mtscore ensemble --nb-cutoff 8.0  --np 4 -v 2
 
 echo "Sixth Tutorial: Manipulating cutoffs to maximize predictions -- END"
 
