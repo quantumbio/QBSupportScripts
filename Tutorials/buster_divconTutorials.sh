@@ -75,5 +75,12 @@ wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2BSM.mtz
 
 $QBHOME/bin/qbbuster --pdbFile 2bsm.pdb --sfFile 2BSM.mtz --protonation divcon --makeCIF grade --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 2 --selection "resname BSM" --region-radius 3.0 --np 4 --dir qmRun
 
+echo "Tutorial #3 (running XModeScore with qbbuster execution script on the structure with muiltiple ligand copies): 4ntk"
+rm -rf ${WORKDIR}/qbbuster_4ntk ; mkdir -p ${WORKDIR}/qbbuster_4ntk ; cd ${WORKDIR}/qbbuster_4ntk
+
+wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/4ntk.pdb
+wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/4ntk.mtz
+
+qbbuster --pdbFile 4ntk.pdb --sfFile 4ntk.mtz --XModeScore --protomers "-1" --protonation moe --protonateTautomers MOE --makeCIF moe --mmMethod amberff14sb --qmMethod pm6 --qmWeight 3.0 --engine buster --ncycles 1 --nSmallCycles 20 --selection "resname ZSP and resid 202 and chain A" --np 32 --buffer-radius 0.0 --region-radius 3.0 --dir xmodeScore_results
 currentDate=`date`
 echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
