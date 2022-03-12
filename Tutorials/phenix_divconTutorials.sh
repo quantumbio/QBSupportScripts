@@ -45,7 +45,7 @@ rm -rf ${WORKDIR}/NakedPHENIX ; mkdir -p ${WORKDIR}/NakedPHENIX ; cd ${WORKDIR}/
 
 wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2WOR.pdb
 wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2WOR-sf.cif
-cp /home/oleg/TEST/qb_tutorials/depo/2WOR.pdb .
+
 ${PHENIX}/build/bin/phenix.ready_set ${PDBID}.pdb add_h_to_water=true
 
 ${PHENIX}/build/bin/phenix.refine ${PDBID}.updated.pdb ${PDBID}-sf.cif ${PDBID}.ligands.cif output.write_geo_file=False  output.write_def_file=False refinement.refine.strategy=individual_sites+individual_adp main.number_of_macro_cycles=2 qblib=True qblib_method=pm6 qblib_region_selection="chain A and resname 2AN and resid 1098" qblib_region_radius=3.0 qblib_buffer_radius=2.5 qblib_np=4 
