@@ -75,7 +75,7 @@ wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2BSM.mtz
 
 $QBHOME/bin/qbbuster --pdbFile 2bsm.pdb --sfFile 2BSM.mtz --protonation divcon --makeCIF grade --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 2 --selection "resname BSM" --region-radius 3.0 --np 4 --dir qmRun
 
-echo "Tutorial #3 (running XModeScore with qbbuster execution script on the structure with muiltiple ligand copies): 4ntk"
+echo "Tutorial #3 (running XModeScore with qbbuster execution script on the structure with multiple ligand copies): 4ntk"
 rm -rf ${WORKDIR}/qbbuster_4ntk ; mkdir -p ${WORKDIR}/qbbuster_4ntk ; cd ${WORKDIR}/qbbuster_4ntk
 
 wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/4ntk.pdb
