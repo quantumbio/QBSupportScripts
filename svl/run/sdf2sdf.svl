@@ -54,6 +54,8 @@ AVAILABLE OPTIONS
     
     -optlig (bool)      (Optional) Minimize each pose provided in the -docksdf file. If receptor provided,
                             each pose will be optimized within the pocket.
+    -split (bool)       (Optional) Used to split the SDF file into individual SDF files 
+                            (one for each ligand)
     -help               Print this help screen and quit without running any further steps.
 
 FILES RETURNED/GENERATED (to be used in MTScoreE)
@@ -93,7 +95,7 @@ endfunction
 
 local function main []
     ArgvReset ArgvExpand argv;
-    local [printhelp, docksdf, optlig, recfilename] = ArgvPull [ ['-help', '-docksdf', '-optlig','-rec'], [0, 1, 0, 1] ];
+    local [printhelp, docksdf, optlig, recfilename, splitlig] = ArgvPull [ ['-help', '-docksdf', '-optlig','-rec','-split'], [0, 1, 0, 1, 0] ];
     local remaining = ArgvAll [];
     if not isnull remaining then
         exit twrite ['ERROR: Unknown command line options: {}\n',remaining];
@@ -177,7 +179,17 @@ local function main []
             endloop
             db_Close mdb_key;
         endif
-        db_ExportSD [ tmpmdb, outfile];
+        if splitlig then
+            entry_keys = db_Entries tmpmdb;
+            count = 0;
+            for ent in entry_keys loop
+                count = count + 1;
+                local new_outfile = twrite ['{}-{}.sdf', fbase outfile, count];
+                db_ExportSD [ tmpmdb, new_outfile, [], ent];
+            endloop
+        else
+            db_ExportSD [ tmpmdb, outfile];
+        endif
         fdelete tmpmdb;
     elseif fext docksdf === 'mol2' or fext docksdf === 'pdb' then
         write ['in here: {}\n', fext docksdf];
