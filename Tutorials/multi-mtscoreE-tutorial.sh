@@ -51,17 +51,17 @@ for ligandfile in `ls 5-cmet-ligands-MOE-*.mol2` ; do
     max_bg_procs $( echo "scale=0;((${PBS_NUM_PPN})+0.5)/2" | bc )
     ligandbasename=`basename "$ligandfile" .mol2`
     echo "${MOE_INSTALL}/bin/moebatch -licwait -run "${MOE_SVL}" -rec ${targetbasename}.pdb -lig ${ligandfile} -delwat -protonate"
-    ${MOE_INSTALL}/bin/moebatch -licwait -run "${MOE_SVL}" -rec ${targetbasename}.pdb -lig ${ligandfile} -delwat -protonate >> OUT.${ligandbasename}_proteinE 2>&1  &
+    ${MOE_INSTALL}/bin/moebatch -licwait -run "${MOE_SVL}" -rec ${targetbasename}.pdb -lig ${ligandfile} -delwat -protonate -maxpose 2  >> OUT.${ligandbasename}_proteinE 2>&1  &
 done
 wait    # wait until all ligand tasks (docking) have been run
 
 # STEP 3: run the DivCon/MTScore tasks (one on each ligand) - this can be done completely in parallel
 
-for ligandfile in `ls 5-cmet-ligands-MOE-*.sdf` ; do
+for ligandfile in `ls 5-cmet-ligands-MOE-*.mol2 | grep -v _dock` ; do
     max_bg_procs $( echo "scale=0;((${PBS_NUM_PPN})+0.5)/2" | bc )
-    ligandbasename=`basename "$ligandfile" .sdf`
+    ligandbasename=`basename "$ligandfile" .mol2`
     DOCKFILES="${ligandbasename}_dock.sdf"
     echo "${DIVCON_INSTALL}/bin/qmechanic pro_${ligandbasename}_predock.pdb --ligand lig_${ligandbasename}_predock.mol2 -O -h garf --mtdock ${DOCKFILES} --mtscore endstate --np 2 -v 2 -p sdf"
-    ${DIVCON_INSTALL}/bin/qmechanic pro_${ligandbasename}_predock.pdb --ligand lig_${ligandbasename}_predock.mol2 -O -h garf --mtdock ${DOCKFILES} --mtscore ensemble --np 2 -v 2 -p sdf >> OUT.${ligcorename}_proteinE-garf 2>&1 &
+    ${DIVCON_INSTALL}/bin/qmechanic pro_${ligandbasename}_predock.pdb --ligand lig_${ligandbasename}_predock.mol2 -O -h garf --mtdock ${DOCKFILES} --mtscore ensemble --np 2 -v 2 -p sdf >> OUT.${ligandbasename}_proteinE-garf 2>&1 &
 done
 wait    # wait until all ligand tasks (MTScore) have been run
