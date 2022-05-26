@@ -51,6 +51,8 @@ AVAILABLE OPTIONS
     -docksdf <file>     (Required) SDF file corresponding to the docked_poses from MOE, GLIDE, etcetera
     
     -rec <file>         (Optional) Receptor or Target:ligand in PDB or MOL2 format (DEFAULT: none)
+
+    -outf ext           (Optional) Filetype extension for any MOE-supported file type (mol2, pdb, etc)
     
     -optlig (bool)      (Optional) Minimize each pose provided in the -docksdf file. If receptor provided,
                             each pose will be optimized within the pocket.
@@ -95,7 +97,7 @@ endfunction
 
 local function main []
     ArgvReset ArgvExpand argv;
-    local [printhelp, docksdf, optlig, recfilename, splitlig] = ArgvPull [ ['-help', '-docksdf', '-optlig','-rec','-split'], [0, 1, 0, 1, 0] ];
+    local [printhelp, docksdf, optlig, recfilename, splitlig, outf] = ArgvPull [ ['-help', '-docksdf', '-optlig','-rec','-split', '-outf'], [0, 1, 0, 1, 0, 1] ];
     local remaining = ArgvAll [];
     if not isnull remaining then
         exit twrite ['ERROR: Unknown command line options: {}\n',remaining];
@@ -181,12 +183,29 @@ local function main []
         endif
         if splitlig then
             entry_keys = db_Entries tmpmdb;
+            [fldnames, fldtypes] = db_Fields tmpmdb;
+            mfield = fldnames | fldtypes == 'molecule';
             count = 0;
+            mdb_key = db_Open [tmpmdb,'read-write'];
             for ent in entry_keys loop
+                psys = SystemPush Atoms[];
                 count = count + 1;
-                local new_outfile = twrite ['{}-{}.sdf', fbase outfile, count];
-                db_ExportSD [ tmpmdb, new_outfile, [], ent];
+                local new_outfile;
+                if outf == 'sdf' then
+                    new_outfile = twrite ['{}-{}.sdf', fbase outfile, count];
+                    db_ExportSD [ tmpmdb, new_outfile, [], ent];
+                else
+                    new_outfile = twrite ['{}-{}.{}', fbase outfile, count, outf];
+                    pdata = tag [fldnames, db_ReadFields [mdb_key, ent, fldnames]];
+                    mol =  pdata.(first mfield);        // ligand in dock.mdb
+                    lig_chains = mol_Create mol;
+                    pot_Load '$MOE/lib/Amber10EHT.ff';
+                    pot_SetCharges [];
+                    WriteAuto new_outfile;
+                    SystemPop psys;
+                endif
             endloop
+            db_Close mdb_key;
         else
             db_ExportSD [ tmpmdb, outfile];
         endif
