@@ -62,6 +62,6 @@ for ligandfile in `ls 5-cmet-ligands-MOE-*.sdf` ; do
     ligandbasename=`basename "$ligandfile" .sdf`
     DOCKFILES="${ligandbasename}_dock.sdf"
     echo "${DIVCON_INSTALL}/bin/qmechanic pro_${ligandbasename}_predock.pdb --ligand lig_${ligandbasename}_predock.mol2 -O -h garf --mtdock ${DOCKFILES} --mtscore endstate --np 2 -v 2 -p sdf"
-    ${DIVCON_INSTALL}/bin/qmechanic pro_${ligandbasename}_predock.pdb --ligand lig_${ligandbasename}_predock.mol2 -O -h garf --mtdock ${DOCKFILES} --mtscore endstate --np 2 -v 2 -p sdf >> OUT.${ligcorename}_proteinE-garf 2>&1 &
+    ${DIVCON_INSTALL}/bin/qmechanic pro_${ligandbasename}_predock.pdb --ligand lig_${ligandbasename}_predock.mol2 -O -h garf --mtdock ${DOCKFILES} --mtscore ensemble --np 2 -v 2 -p sdf >> OUT.${ligcorename}_proteinE-garf 2>&1 &
 done
 wait    # wait until all ligand tasks (MTScore) have been run
