@@ -36,7 +36,22 @@ echo "BEGIN DivCon Xrya Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
 
 WORKDIR=$PWD
 
-echo "Tutorial #1: XModeScore executed on PDBid:1OPK"
-rm -rf ${WORKDIR}/xmodeScore_1OPK ; mkdir -p ${WORKDIR}/xmodeScore_1OPK ; cd ${WORKDIR}/xmodeScore_1OPK
+echo "Tutorial #1: All Atom refinement with ONIOM region using protonated PDBid:3e34"
+tutorFolder=3e34-All_Atoms
+rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
 
-$QBHOME/bin/qbphenix --pdbID 4YJR --XModeScore --protomers "-1..1" --mmMethod amberff14sb --qmMethod pm6 --protonation MOE --selection "chain A resname 4DJ resid 701" --np 20 --dir test1
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/3e34+H.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/3e34.mtz
+
+qmechanic 3e34+H.pdb 3e34.mtz --opt all 50 0.01 --qm-region /B/ED1/1003// 3.0 0 -h pm6 amberff14sb   --np 2 -O -p 3e34_refined.pdb 3e34_refined.mtz
+
+echo "Tutorial #3: XModeScore executed on protonated PDBid:4b72"
+tutorFolder=xmodeScore_4b72
+rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4b72+H.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4b72.mtz
+
+$QBHOME/bin/qbphenix --pdbFile 4b72+H.pdb --sfFile 4b72.mtz --XmodeScore --protonation Skip --protomers "-1..1" --engine divcon --protonateTautomers divcon --qmMethod pm6 --mmMethod amberff14sb --nSmallCycles 50 --region-radius 3.0 --buffer-radius 0.0 --selection "resname 2FB and resid 1503 and chain A" --dir testXmode --Nproc 16
+
+currentDate=`date`
+echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
