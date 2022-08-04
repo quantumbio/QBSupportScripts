@@ -33,6 +33,7 @@ local function printUsage []
     write ['    moebatch -run mdb2sdf.svl -dockmdb dock.mdb\n'];
     write ['  where:\n'];
     write ['    -dockmdb = the MDB file corresponding to the output from a docking/scoring run.\n'];
+    write ['    -top     = the column in the MDB file corrsponding to the basename.\n'];
     write ['\n'];
     write ['DOCUMENTATION:\n'];
     write ['    This method will split an mdbfile into separate SDF files based on the mseg field in the mdb file.'];
@@ -43,7 +44,7 @@ local function main []
     local starttime = clock[];
     local inopt;
     ArgvReset ArgvExpand argv;
-    local [printhelp, dockmdb, ligfilename, recfilename, setRName] = ArgvPull [ ['-help', '-dockmdb', '-lig','-rec','-rName'], [0, 1, 1, 1, 1] ];
+    local [printhelp, dockmdb, ligfilename, recfilename, setRName, toplimit, IDcolumn] = ArgvPull [ ['-help', '-dockmdb', '-lig','-rec','-rName','-top','-IDcolumn'], [0, 1, 1, 1, 1, 1, 1] ];
     local remaining = ArgvAll [];
     if not isnull remaining then
         exit twrite ['ERROR: Unknown command line options: {}\n',remaining];
@@ -59,10 +60,19 @@ local function main []
         exit twrite ['ERROR: Must use -dockmdb <dockmdb_filename> option to process dock.mdb file'];
     endif
     
+    if isnull IDcolumn then
+        IDcolumn = 'mol';
+    endif
+    
     db_Sort [dockmdb,['mseq','S'],[0,0]];
     
     local mseqColumn = cat db_ReadColumn [dockmdb, 'mseq' ];
     local entry_keys = db_Entries dockmdb;
+    
+    toplimit = atoi toplimit;
+    if isnull toplimit then
+        toplimit = length entry_keys;
+    endif
     
     local mfield = '';
 
@@ -103,10 +113,20 @@ local function main []
     local mdb_key = db_Open [dockmdb,'read'];
     for mseqEntry in uniq mseqColumn loop
 //        local compoundNumber = db_ReadFields [mdb_key, first (entry_keys | (mseqColumn == mseqEntry)), 'Compound Number' ];   // This is not generally found
-        local compoundNumber = first first first db_ReadFields [mdb_key, first (entry_keys | (mseqColumn == mseqEntry)), 'mol' ];     // Instead use mol name
-        write ['... Writing: {} {}\n',mseqEntry, compoundNumber];
+//        local compoundNumber = first first first db_ReadFields [mdb_key, first (entry_keys | (mseqColumn == mseqEntry)), 'mol' ];     // Instead use mol name
+        local compoundNumber = first db_ReadFields [mdb_key, first (entry_keys | (mseqColumn == mseqEntry)), IDcolumn ];     // Instead use mol name
+        if length compoundNumber == 1 and isflattok compoundNumber then                 // single string token
+            compoundNumber = compoundNumber;
+        elseif isflatchar compoundNumber then                                               // string
+            compoundNumber = token compoundNumber;
+        elseif length compoundNumber == 4 and length ((string first compoundNumber) | not ((string first compoundNumber) == " ")) then                                              // mol
+            compoundNumber = token first compoundNumber;
+        else
+            exit twrite ['ERROR: Unknown ligand ID. Use -IDcolumn to see ligand name.\n'];
+        endif
+        write ['... Writing: {} | {} | {} | {}\n',mseqEntry, length compoundNumber, isflatchar compoundNumber, compoundNumber];
         if length mfield == 1 then
-            db_ExportSD [ mdb_key, twrite ['{}-dock.sdf', compoundNumber], [], entry_keys | (mseqColumn == mseqEntry), [del_hlp:0] ];
+            db_ExportSD [ mdb_key, twrite ['{}-dock.sdf', compoundNumber], [], keep [(entry_keys | (mseqColumn == mseqEntry)),toplimit], [del_hlp:0] ];
             db_ExportSD [ mdb_key, twrite ['{}-dock-top.sdf', compoundNumber], [], first (entry_keys | (mseqColumn == mseqEntry)), [del_hlp:0] ];
         elseif length mfield == 2 then
             ent = 0;
@@ -115,7 +135,7 @@ local function main []
             targ_chains = [];
             lig_chains = [];
             chains = [];
-            for ent in (entry_keys | (mseqColumn == mseqEntry)) loop
+            for ent in keep [(entry_keys | (mseqColumn == mseqEntry)),toplimit] loop
                 count = count + 1;
                 psys = SystemPush [];
                 pdata = tag [fldnames, db_ReadFields [mdb_key, ent, fldnames]];
@@ -148,7 +168,9 @@ local function main []
 
                 chains = cat [targ_chains,lig_chains];
                 
-                
+                if count == 1 then
+                    fwrite_PDB [twrite ['{}-dock-top.pdb',compoundNumber],chains,inopt];
+                endif
                 fwrite_PDB [twrite ['{}-dock-{}.pdb',compoundNumber,count],chains,inopt];
                 
                 if count == 1 then
