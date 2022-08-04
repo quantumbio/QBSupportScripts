@@ -119,7 +119,7 @@ local function main []
     
     local count = 0;
     local dockopt;
-//    dockopt.refine='Induced Fit';     // run induced-fit dock
+    dockopt.refine='Induced Fit';     // run induced-fit dock
     for ligRes in ligResList loop
         count = count + 1;
         local newBaseName = twrite ['{}-{}-{}',fbase ftail pdbfile, rName ligRes, count];
@@ -127,14 +127,14 @@ local function main []
         local selection = uniq cat aResidue _Atoms '$$ligand';
         write ['\tsize: {}\n', length Atoms[]];
         RenderProtein [Chains[]];
-//        MM[maxit:100, tetherWeight:((aElement Atoms[] <> 'H') * 10)];
+        MM[maxit:100, tetherWeight:((aElement Atoms[] <> 'H') * 10)];
         writeFile   [twrite ['{}-cmplx.moe',newBaseName], Residues[]];
         writeFile   [twrite ['{}-cmplx.pdb',newBaseName], Residues[]];
         writeFile   [twrite ['{}-targ.pdb',newBaseName], diff [Residues[],selection]];
         writeFile   [twrite ['{}-lig.pdb',newBaseName], selection];
         local rec = _Atoms '$$receptor';
         local site = _Atoms '$$ligand';
-//        DockAtoms [rec, site, site, twrite ['{}-dock.mdb',newBaseName], dockopt];
+        DockAtoms [rec, site, site, twrite ['{}-dock.mdb',newBaseName], dockopt];
         if not isnull novellig then
             write ['novellig: {} | {}\n', novellig, type novellig];
             DockFile [rec, site, novellig, twrite ['{}-novel-dock.mdb',newBaseName], dockopt];
