@@ -1,0 +1,189 @@
+#svl
+
+#if 0
+ // BEGIN COPYRIGHT
+ /***********************************************************************
+    Copyright (c) 2022 QuantumBio Inc. and/or its affiliates.
+	
+ This source code is the property of QuantumBio Inc. and/or its affiliates
+ and is provided AS IS.
+
+ This source code may contain proprietary and Confidential Information, 
+ including trade secrets, belonging to QuantumBio Inc. and/or its 
+ affiliates.
+
+ Please see http://www.quantumbioinc.com/ for more information.
+
+ ***********************************************************************/
+ // END COPYRIGHT
+#endif      
+
+
+global argv;
+
+function PartialCharge;
+function ArgvPull;
+function ReadPDB;
+function Protonate3D;
+function RenderProtein;
+function MM;
+function fwrite_TriposMOL2;
+function fwrite_PDB;
+function fwrite_MOE;
+function DockAtoms;
+function DockFile;
+
+
+local function main []
+    ArgvReset ArgvExpand argv;
+
+    local [pdbfile,protonate,ligName,novellig] = ArgvPull [ ['-pdbfile','-protonate','-ligName','-novellig'], [1,0,1,1] ];
+    
+    local remaining = ArgvAll [];
+    if not isnull remaining then
+        exit twrite ['ERROR: Unknown command line options: {}\n',remaining];
+    endif
+    
+    if isnull pdbfile then
+        exit twrite ['ERROR: use -pdbfile to supply a PDB file.'];
+    endif
+
+    ReadPDB [pdbfile,[gen_biomt:1,biomol:1,ignore_hoh:1]];
+
+    local ligRes;
+    local ligResList = uniq cat aResidue _Atoms '$$ligand';
+    if not isnull ligName then
+        ligResList = ligResList | rName ligResList == ligName;
+    else
+        write ['WARNING: Using full list of ligands found in PDB. Use -ligName to designate 3letter ligand code.\n'];
+    endif
+    
+    write ['{} ligands found in file: {}\n', length ligResList, uniq rName ligResList];
+               
+    pot_Load '$MOE/lib/Amber10EHT.ff';
+
+    // Note that the following is the general potential set up only.
+    // Individual stages like refinement may use a modified set up.
+    pot_Setup [
+        strEnable: 1,
+        angEnable: 1,
+        stbEnable: 1,
+        oopEnable: 1,
+        torEnable: 1,
+        vdwEnable: 1,
+        eleEnable: 1,
+        solEnable: 0,
+        resEnable: 1,
+        strWeight: 1,
+        angWeight: 1,
+        stbWeight: 1,
+        oopWeight: 1,
+        torWeight: 1,
+        vdwWeight: 1,
+        eleWeight: 1,
+        solWeight: 1,
+        resWeight: 1,
+        cutoffEnable: 1,
+        cutoffOn: 8,
+        cutoffOff: 10,
+        eleDist: 2,
+        vdwScale14: 0.5,
+        vdwBuffer1: 0,
+        vdwBuffer2: 0,
+        eleScale14: 0.833333,
+        eleDielectric: 1,
+        eleBuffer: 0,
+        solDielectric: 80,
+        solDielectricOffset: 0,
+        state0: 1,
+        state1: 0,
+        state2: 1,
+        threadCount: 0
+    ];
+
+    if protonate then
+        Protonate3D [Atoms[],Atoms[],Atoms[],[],[],[]];
+    endif
+    pot_SetCharges [];
+
+    function writeFile [ofilename, residues]
+        write ['NOTE: Writing {} residues to {}\n', length residues, ofilename];
+        if fext ofilename == 'mol2' then
+            fwrite_TriposMOL2   [ofilename, residues];
+        elseif fext ofilename == 'pdb' then
+            fwrite_PDB   [ofilename, residues];
+        elseif fext ofilename == 'moe' then
+            fwrite_MOE   [ofilename, residues];
+        endif
+    endfunction
+    
+    local count = 0;
+    local dockopt;
+//    dockopt.refine='Induced Fit';     // run induced-fit dock
+    for ligRes in ligResList loop
+        count = count + 1;
+        local newBaseName = twrite ['{}-{}-{}',fbase ftail pdbfile, rName ligRes, count];
+        local psys = SystemPush cat [diff [Residues[],ligResList], ligRes];
+        local selection = uniq cat aResidue _Atoms '$$ligand';
+        write ['\tsize: {}\n', length Atoms[]];
+        RenderProtein [Chains[]];
+//        MM[maxit:100, tetherWeight:((aElement Atoms[] <> 'H') * 10)];
+        writeFile   [twrite ['{}-cmplx.moe',newBaseName], Residues[]];
+        writeFile   [twrite ['{}-cmplx.pdb',newBaseName], Residues[]];
+        writeFile   [twrite ['{}-targ.pdb',newBaseName], diff [Residues[],selection]];
+        writeFile   [twrite ['{}-lig.pdb',newBaseName], selection];
+        local rec = _Atoms '$$receptor';
+        local site = _Atoms '$$ligand';
+//        DockAtoms [rec, site, site, twrite ['{}-dock.mdb',newBaseName], dockopt];
+        if not isnull novellig then
+            write ['novellig: {} | {}\n', novellig, type novellig];
+            DockFile [rec, site, novellig, twrite ['{}-novel-dock.mdb',newBaseName], dockopt];
+        endif
+        SystemPop psys;
+    endloop
+
+
+//
+//    writeFile   [twrite ['{}-cmplx.mol2',infileBasename], Residues[]];
+//    writeFile   [twrite ['{}-targ.mol2',infileBasename], diff [Residues[],selection]];
+//    writeFile   [twrite ['{}-lig.mol2',infileBasename], selection];
+//    writeFile   [twrite ['{}-cmplx.pdb',infileBasename], Residues[]];
+//    writeFile   [twrite ['{}-targ.pdb',infileBasename], diff [Residues[],selection]];
+//    writeFile   [twrite ['{}-lig.pdb',infileBasename], selection];
+//    
+//    if not isnull posefile then
+//        // process PoseFile through use of temp MDB
+//        local tmpMDB = 'DELME-1234567890.mdb';
+//        fdelete tmpMDB;
+//        local mdb_key = db_Open [ tmpMDB,'create' ];
+//        db_Close mdb_key;
+//        db_ImportSD [tmpMDB, posefile,'mol'];
+//        db_EnsureField [tmpMDB, 'Complex', 'molecule'];
+//        local ent = 0;
+//        local count = 0;
+//        local inEntry;
+////        local pdbHandle = fopenw twrite ['{}-cmplxes.pdb',infileBasename];
+//        while ent = db_NextEntry [tmpMDB,ent] loop
+//            count = count + 1;
+//            local pdbHandle = twrite ['{}-cmplxes-{}.pdb',infileBasename,count];
+//            local psys = SystemPush diff [Residues[],selection];
+//            inEntry = db_Read [ tmpMDB, ent];
+//            ligRes = cat cResidues mol_Create inEntry.mol;
+//            if not isnull setLigName then
+//                rSetName [ligRes, setLigName];
+//            endif
+//           if rName ligRes == '*' then
+//                rSetName [ligRes, 'MOL'];
+//            endif                
+//            RenderProtein [Chains[]];
+//            inEntry.Complex = moe_CreateMOL _moe_Extract [Atoms[], GKeyList[], [mol_name: first cTag Chains[]]];
+//            local tmpKey = db_Write [ tmpMDB, ent, inEntry];
+//            fwrite_PDB [pdbHandle, Chains[]];
+//            SystemPop psys;
+//        endloop
+////        fclose pdbHandle;
+//        db_ExportTriposMOL2 [tmpMDB, twrite ['{}-cmplxes.mol2',infileBasename], 'Complex'];
+////        fdelete tmpMDB;
+//    endif
+
+endfunction
