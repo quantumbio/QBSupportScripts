@@ -44,7 +44,7 @@ local function main []
     local starttime = clock[];
     local inopt;
     ArgvReset ArgvExpand argv;
-    local [printhelp, dockmdb, ligfilename, recfilename, setRName, toplimit, IDcolumn] = ArgvPull [ ['-help', '-dockmdb', '-lig','-rec','-rName','-top','-IDcolumn'], [0, 1, 1, 1, 1, 1, 1] ];
+    local [printhelp, dockmdb, ligfilename, recfilename, setRName, splitEntries, toplimit, IDcolumn] = ArgvPull [ ['-help', '-dockmdb', '-lig','-rec','-rName','-split', '-top','-IDcolumn'], [0, 1, 1, 1, 1, 0, 1, 1] ];
     local remaining = ArgvAll [];
     if not isnull remaining then
         exit twrite ['ERROR: Unknown command line options: {}\n',remaining];
@@ -79,7 +79,39 @@ local function main []
 	// make sure that our database contains the right exportable field
 	// and then open the output file
     local [fldnames, fldtypes] = db_Fields dockmdb;
+    
+    local sortTags = [], sortOrder = [];
+    local mseqFound = 0;
+    if anytrue [fldnames == 'mseq'] then
+        mseqFound = 1;
+        sortTags = append [sortTags, 'mesg'];
+        sortOrder = append [sortOrder, 0];
+    endif
 
+    if anytrue [fldnames == 'S'] then
+        sortTags = append [sortTags, 'S'];
+        sortOrder = append [sortOrder, 0];
+    endif
+    
+    if length sortTags > 0 then
+//        db_Sort [dockmdb,['mseq','S'],[0,0]];
+        db_Sort [dockmdb,sortTags,sortOrder];
+    endif
+    
+    local mseqColumn;
+    local entry_keys = db_Entries dockmdb;
+    
+    if splitEntries then
+        if mseqFound then
+            mseqColumn = cat db_ReadColumn [dockmdb, 'mseq' ];
+        else
+            mseqColumn = igen length entry_keys;
+        endif
+    else
+        mseqColumn = one igen length entry_keys;
+    endif
+    
+    local mfield = '';
     mfield = fldnames | fldtypes == 'molecule';
 
 	// run through the database and write the data to the file
