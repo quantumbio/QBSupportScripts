@@ -159,9 +159,12 @@ local function main []
         db_ImportSD [tmpMDB, posefile,'mol'];
         db_EnsureField [tmpMDB, 'Complex', 'molecule'];
         local ent = 0;
+        local count = 0;
         local inEntry;
-        local pdbHandle = fopenw twrite ['{}-cmplxes.pdb',infileBasename];
+//        local pdbHandle = fopenw twrite ['{}-cmplxes.pdb',infileBasename];
         while ent = db_NextEntry [tmpMDB,ent] loop
+            count = count + 1;
+            local pdbHandle = twrite ['{}-cmplxes-{}.pdb',infileBasename,count];
             local psys = SystemPush diff [Residues[],selection];
             inEntry = db_Read [ tmpMDB, ent];
             ligRes = cat cResidues mol_Create inEntry.mol;
@@ -177,9 +180,9 @@ local function main []
             fwrite_PDB [pdbHandle, Chains[]];
             SystemPop psys;
         endloop
-        fclose pdbHandle;
+//        fclose pdbHandle;
         db_ExportTriposMOL2 [tmpMDB, twrite ['{}-cmplxes.mol2',infileBasename], 'Complex'];
-        fdelete tmpMDB;
+//        fdelete tmpMDB;
     endif
 
 endfunction

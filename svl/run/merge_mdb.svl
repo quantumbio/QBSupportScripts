@@ -1,0 +1,175 @@
+#svl
+
+#if 0
+ // BEGIN COPYRIGHT
+ /***********************************************************************
+    Copyright (c) 2022 QuantumBio Inc. and/or its affiliates.
+	
+ This source code is the property of QuantumBio Inc. and/or its affiliates
+ and is provided AS IS.
+
+ This source code may contain proprietary and Confidential Information, 
+ including trade secrets, belonging to QuantumBio Inc. and/or its 
+ affiliates.
+
+ Please see http://www.quantumbioinc.com/ for more information.
+
+ ***********************************************************************/
+ // END COPYRIGHT
+#endif      
+
+
+global argv;
+
+function PartialCharge;
+function ArgvPull;
+function ReadPDB;
+function Protonate3D;
+function RenderProtein;
+function MM;
+function fwrite_TriposMOL2;
+function fwrite_PDB;
+function fwrite_MOE;
+function DockAtoms;
+function DockFile;
+
+local function MergeMDB [inQBMDB, inDockMDB, inTargetMol]
+    local success = 0;
+    
+    if ftype inQBMDB == '' then
+        db_Close db_Open [ inQBMDB,'create' ];
+    endif
+    
+    local [fldnames, fldtypes] = db_Fields inDockMDB;
+    write ['fldnames: {}\n', fldnames];
+    local fldname, fldtype, mfield;
+    mfield = fldnames | fldtypes == 'molecule';
+    if length mfield == 1 and isnull inTargetMol then
+        exit 'ERROR: If there is only one mfield then you must provide target mol';
+    endif
+
+    for fldname in fldnames loop
+        fldtype = fldtypes (indexof [fldname, fldnames]);
+        write ['fldname: {} / fldtype: {}\n', fldname, fldtype];
+        db_EnsureField [inQBMDB, fldname, fldtype];
+    endloop
+    db_EnsureField [inQBMDB, 'DCLogFileName', 'char' ];
+    db_EnsureField [inQBMDB, 'DCJSONFileName', 'char' ];
+    db_EnsureField [inQBMDB, 'jobtag', 'char' ];
+    db_EnsureField [inQBMDB, 'MTScoreES', 'double'];
+    db_EnsureField [inQBMDB, 'Label', 'char'];
+    db_EnsureField [inQBMDB, 'Complex', 'moe'];
+    db_EnsureField [inQBMDB, 'MTScoreES', 'double'];
+    db_EnsureField [inQBMDB, 'mseq', 'int'];
+    db_EnsureField [inQBMDB, 'S', 'float'];
+    db_EnsureField [inQBMDB, 'jobtag', 'char'];
+
+    db_EnsureField [inQBMDB, 'CompoundID', 'char'];
+    db_EnsureField [inQBMDB, 'PDBid', 'char'];
+    db_EnsureField [inQBMDB, 'SourceMDB', 'char'];
+
+    local newmseq;
+    if isnull db_ReadColumn [inQBMDB, 'mseq' ] then
+        newmseq = 1;
+    else
+        newmseq = (max cat db_ReadColumn [inQBMDB, 'mseq' ]) + 1;
+    endif
+    local ent = 0;
+    local outKeys = [];
+    local inEntry;
+    local cpdids;
+    local mseqs;
+    local syskeys = SystemPush [];
+    while ent = db_NextEntry [inQBMDB,ent] loop
+        Close [force: 1];
+        inEntry = db_Read [ inQBMDB, ent];
+        inEntry.CompoundID = token first first first inEntry.mol;
+        cpdids.(inEntry.CompoundID) = inEntry.mseq;
+        mseqs = uniq append [mseqs, inEntry.mseq];
+    endloop
+    SystemPop syskeys;
+    
+    ent=0;
+    syskeys = SystemPush [];
+    local inDockMDB_key = db_Open [ inDockMDB,'read' ];
+    local inQBMDB_key = db_Open [ inQBMDB,'read-write' ];
+    while ent = db_NextEntry [inDockMDB_key,ent] loop
+        Close [force: 1];
+        inEntry = db_Read [ inDockMDB_key, ent];
+        inEntry.CompoundID = token first first first inEntry.mol;
+        if length mfield == 2 then
+            mol_Create inEntry.receptor;
+        else
+            mol_Create inTargetMol;
+            inEntry.receptor = inTargetMol;
+        endif
+        inEntry.PDBid = token first first first inEntry.receptor;
+
+        mol_Create inEntry.mol;
+        write ['inEntry.mseq: {}\n', inEntry.mseq];
+        write ['inEntry.CompoundID: {}\n', inEntry.CompoundID];
+        write ['cpdids.(inEntry.CompoundID): {}\n', cpdids.(inEntry.CompoundID)];
+        if not isnull cpdids.(inEntry.CompoundID) then
+            inEntry.mseq = cpdids.(inEntry.CompoundID);
+            write ['if inEntry.mesq: {}\n', inEntry.mseq ];
+        elseif indexof [inEntry.mseq,mseqs] <> 0 then
+            inEntry.mesq = max[mseqs]+1;
+            write ['elseif inEntry.mesq: {}\n', inEntry.mseq ];
+            mseqs = uniq append [mseqs, inEntry.mseq];
+            cpdids.(inEntry.CompoundID) = inEntry.mseq;
+        else
+            write ['else inEntry.mesq: {}\n', inEntry.mseq ];
+            mseqs = uniq append [mseqs, inEntry.mseq];
+            cpdids.(inEntry.CompoundID) = inEntry.mseq;
+        write ['cpdids.(inEntry.CompoundID): {}\n', cpdids.(inEntry.CompoundID)];
+        endif
+
+        inEntry.Label = string first inEntry.mol;
+        write ['Chains: {}\n', length Chains[]];
+//        RenderProtein [Chains[]];
+//        inEntry.Complex = _moe_Extract [Atoms[], GKeyList[], [mol_name: first cTag Chains[]]];
+        
+        inEntry.CompoundID = string inEntry.CompoundID;
+        inEntry.PDBid = string inEntry.PDBid;
+        inEntry.SourceMDB = string inDockMDB;
+        
+        local tmpKey = db_Write [ inQBMDB_key, 0, inEntry];
+        write ['tmpKey: {}\n', tmpKey];
+        outKeys = append [outKeys, tmpKey];
+    endloop
+    db_Close inQBMDB_key;
+    db_Close inDockMDB_key;
+    SystemPop syskeys;
+    db_Sort [inQBMDB,['mseq','S'],[0,0]];
+
+    if length outKeys > 0 then
+        success = first outKeys;
+    endif
+write ['success: {}\n', success];
+    return success;
+endfunction
+
+
+local function main []
+    ArgvReset ArgvExpand argv;
+
+    local [inQBMDB, inDockMDB] = ArgvPull [ ['-qbmdb','-dockmdb'], [1,1] ];
+    
+    local remaining = ArgvAll [];
+    if not isnull remaining then
+        exit twrite ['ERROR: Unknown command line options: {}\n',remaining];
+    endif
+    
+    if isnull inQBMDB then
+        exit twrite ['ERROR: use -qbmdb to supply a inQBMDB file.'];
+    endif
+    if isnull inDockMDB then
+        exit twrite ['ERROR: use -dockmdb to supply a inDockMDB file.'];
+    endif
+    
+    local inTargetMol;      // TODO: replace with CLI option
+    
+    MergeMDB [inQBMDB, inDockMDB, inTargetMol];
+    
+
+endfunction
