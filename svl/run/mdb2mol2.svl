@@ -1,0 +1,154 @@
+#svl
+
+#if 0
+ // BEGIN COPYRIGHT
+ /***********************************************************************
+    Copyright (c) 2022 QuantumBio Inc. and/or its affiliates.
+	
+ This source code is the property of QuantumBio Inc. and/or its affiliates
+ and is provided AS IS.
+
+ This source code may contain proprietary and Confidential Information, 
+ including trade secrets, belonging to QuantumBio Inc. and/or its 
+ affiliates.
+
+ Please see http://www.quantumbioinc.com/ for more information.
+
+ ***********************************************************************/
+ // END COPYRIGHT
+#endif      
+
+
+global argv;
+
+function PartialCharge;
+function ArgvPull;
+function ReadPDB;
+function Protonate3D;
+function RenderProtein;
+function MM;
+function fwrite_TriposMOL2;
+function fwrite_PDB;
+function fwrite_MOE;
+function DockAtoms;
+function DockFile;
+
+
+local function main []
+    ArgvReset ArgvExpand argv;
+
+    local [inQBMDB, ligName] = ArgvPull [ ['-qbmdb','-ligName'], [1] ];
+    
+    local remaining = ArgvAll [];
+    if not isnull remaining then
+        exit twrite ['ERROR: Unknown command line options: {}\n',remaining];
+    endif
+    
+    if isnull inQBMDB then
+        exit twrite ['ERROR: use -qbmdb to supply a inQBMDB file.'];
+    endif
+    db_Sort [inQBMDB,['mseq','S'],[0,0]];
+
+
+    function writeFile [ofilename, residues]
+        write ['NOTE: Writing {} residues to {}\n', length residues, ofilename];
+        if fext ofilename == 'mol2' then
+            fwrite_TriposMOL2   [ofilename, residues];
+        elseif fext ofilename == 'pdb' then
+            fwrite_PDB   [ofilename, residues];
+        elseif fext ofilename == 'moe' then
+            fwrite_MOE   [ofilename, residues];
+        endif
+    endfunction
+
+    local ent = 0;
+    local preveMseq = 0;
+    local count = 0;
+    local inEntry;
+    local syskeys = SystemPush [];
+    local inQBMDB_key = db_Open [ inQBMDB,'read-write' ];
+    while ent = db_NextEntry [inQBMDB_key,ent] loop
+        Close [force: 1];
+        inEntry = db_Read [ inQBMDB_key, ent];
+
+        local rec = mol_Create inEntry.receptor;
+        local lig = mol_Create inEntry.mol;
+
+        local ligRes;
+        local ligResList = uniq cat aResidue _Atoms '$$ligand';
+        
+        if length ligResList <> 1 then
+            exit twrite ['ERROR: there are {} designated ligands in file.\n', length ligResList];
+        endif
+        
+        if not isnull ligName then
+            rSetName [ligResList, ligName];
+        endif
+
+        pot_Load '$MOE/lib/Amber10EHT.ff';
+
+        // Note that the following is the general potential set up only.
+        // Individual stages like refinement may use a modified set up.
+        pot_Setup [
+            strEnable: 1,
+            angEnable: 1,
+            stbEnable: 1,
+            oopEnable: 1,
+            torEnable: 1,
+            vdwEnable: 1,
+            eleEnable: 1,
+            solEnable: 0,
+            resEnable: 1,
+            strWeight: 1,
+            angWeight: 1,
+            stbWeight: 1,
+            oopWeight: 1,
+            torWeight: 1,
+            vdwWeight: 1,
+            eleWeight: 1,
+            solWeight: 1,
+            resWeight: 1,
+            cutoffEnable: 1,
+            cutoffOn: 8,
+            cutoffOff: 10,
+            eleDist: 2,
+            vdwScale14: 0.5,
+            vdwBuffer1: 0,
+            vdwBuffer2: 0,
+            eleScale14: 0.833333,
+            eleDielectric: 1,
+            eleBuffer: 0,
+            solDielectric: 80,
+            solDielectricOffset: 0,
+            state0: 1,
+            state1: 0,
+            state2: 1,
+            threadCount: 0
+        ];
+
+        pot_SetCharges [];
+                
+        if preveMseq <> inEntry.mseq then
+            count = 1;
+            preveMseq = inEntry.mseq;
+        else
+            count = count + 1;
+        endif
+        
+        local newBaseName = twrite ['{}-{}-{}',inEntry.PDBid,inEntry.CompoundID,count];
+        
+        if count < 26 then
+//            RenderProtein [Chains[]];
+
+//            writeFile   [twrite ['{}-cmplx.moe',newBaseName], Residues[]];
+            writeFile   [twrite ['{}-cmplx.pdb',newBaseName], Residues[]];
+//            writeFile   [twrite ['{}-targ.pdb',newBaseName], rec];
+//            writeFile   [twrite ['{}-lig.pdb',newBaseName], lig];
+        
+        endif
+
+   endloop
+    db_Close inQBMDB_key;
+    SystemPop syskeys;
+
+endfunction

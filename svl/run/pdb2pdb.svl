@@ -25,11 +25,13 @@ function PartialCharge;
 function ArgvPull;
 function fwrite_TriposMOL2;
 function fwrite_PDB;
+function db_ImportSD;
+function db_ExportTriposMOL2;
 
 local function main []
     ArgvReset ArgvExpand argv;
 
-    local [complex,ligRes,ligUID,ligChain] = ArgvPull [ ['-complex','-ligRes','-ligUID','-ligChain'], [1,1,1,1] ];
+    local [complex,ligfile,posefile,ligRes,ligUID,ligChain,setLigName] = ArgvPull [ ['-complex','-ligfile','-posefile','-ligRes','-ligUID','-ligChain','-setLigName'], [1,1,1,1,1,1,1] ];
     
         local remaining = ArgvAll [];
     if not isnull remaining then
@@ -37,23 +39,59 @@ local function main []
     endif
     
     if isnull complex then
-        exit twrite ['ERROR: use -complex to supply a PDB or mol2 file with the protein:ligand complex.'];
-    endif
-    if isnull ligRes then
-        exit twrite ['ERROR: use -ligRes to supply the 3letter code for the ligand in the protein:ligand complex.'];
-    endif
-    if isnull ligUID then
-        exit twrite ['ERROR: use -ligUID to supply the UID/numerical code for the ligand in the protein:ligand complex.'];
-    endif
-    if isnull ligChain then
-        exit twrite ['ERROR: use -ligChain to supply the Chain ID for the ligand in the protein:ligand complex.'];
-    endif
-    
-    if '' == first fstat complex then
-        exit twrite ['ERROR: file {} not found!', complex];
+        exit twrite ['ERROR: use -complex to supply a PDB or mol2 file with the protein:ligand complex or receptor.'];
     endif
 
     ReadAuto complex;
+    local infileBasename = fbase ftail complex;
+    
+    if isnull ligfile then
+
+        if isnull ligRes then
+            exit twrite ['ERROR: use -ligRes to supply the 3letter code for the ligand in the protein:ligand complex.'];
+        endif
+    
+        if '' == first fstat complex then
+            exit twrite ['ERROR: file {} not found!', complex];
+        endif
+
+        if isnull ligChain then
+            ligChain = cName rChain first (Residues [] | rName Residues[] == ligRes);
+            write ['WARNING: use -ligChain to supply the Chain ID for the ligand {}. Assuming first copy found in chain {}.\n', ligRes, ligChain];
+        else
+            ligChain = twrite ['{}.{}',infileBasename, ligChain];
+        endif
+
+        if isnull ligUID then
+            ligUID = rUID first ( (cat cResidues (Chains[] | cName Chains[] == ligChain)) | (rName (cat cResidues (Chains[] | cName Chains[] == ligChain)) == ligRes));
+            write ['WARNING: use -ligUID to supply the UID/numerical code for the ligand {}. Assuming first copy found in chain {}: {}\n', ligRes, ligChain, ligUID];
+        else
+            ligUID = atoi ligUID;
+        endif
+    else
+        ligChain = ReadAuto ligfile;
+        ligRes = cResidues ligChain;
+        ligUID = rUID ligRes;
+        ligChain = cName ligChain;
+        ligRes = rName ligRes;
+    endif
+    
+    local selection = Residues [] | (rUID Residues[] == ligUID and cName rChain Residues [] == ligChain );
+    
+    if isnull selection then
+        exit twrite ['ERROR: ligand {} {} {} NOT FOUND in {}', ligRes, ligUID, ligChain, complex];
+    endif
+    
+    if length selection > 1 then
+        exit twrite ['ERROR: ligand {} {} {} has more than one match in {}', ligRes, ligUID, ligChain, complex];
+    endif
+    
+    if not isnull setLigName then
+        rSetName [selection, setLigName];
+    endif
+
+    write ['Ligand: {} | {} | {}\n',cName rChain selection, rName selection, rUID selection];
+    
     pot_Load '$MOE/lib/Amber10EHT.ff';
 
     // Note that the following is the general potential set up only.
@@ -96,21 +134,6 @@ local function main []
     ];
     pot_SetCharges [];
 
-    local infileBasename = fbase ftail complex;
-    ligChain = twrite ['{}.{}',infileBasename, ligChain];
-    ligUID = atoi ligUID;
-    write ['ligChain: {}\n',ligChain];
-    
-    local selection = Residues [] | (rUID Residues[] == ligUID and cName rChain Residues [] == ligChain );
-    
-    if isnull selection then
-        exit twrite ['ERROR: ligand {} {} {} NOT FOUND in {}', ligRes, ligUID, ligChain, complex];
-    endif
-    
-    if length selection > 1 then
-        exit twrite ['ERROR: ligand {} {} {} has more than one match in {}', ligRes, ligUID, ligChain, complex];
-    endif
-    
     function writeFile [ofilename, residues]
         write ['NOTE: Writing {} residues to {}\n', length residues, ofilename];
         if fext ofilename == 'mol2' then
@@ -120,11 +143,46 @@ local function main []
         endif
     endfunction
 
-    writeFile   [twrite ['{}-complex.mol2',infileBasename], Residues[]];
-    writeFile   [twrite ['{}-target.mol2',infileBasename], diff [Residues[],selection]];
-    writeFile   [twrite ['{}-ligand.mol2',infileBasename], selection];
-    writeFile   [twrite ['{}-complex.pdb',infileBasename], Residues[]];
-    writeFile   [twrite ['{}-target.pdb',infileBasename], diff [Residues[],selection]];
-    writeFile   [twrite ['{}-ligand.pdb',infileBasename], selection];
+    writeFile   [twrite ['{}-cmplx.mol2',infileBasename], Residues[]];
+    writeFile   [twrite ['{}-targ.mol2',infileBasename], diff [Residues[],selection]];
+    writeFile   [twrite ['{}-lig.mol2',infileBasename], selection];
+    writeFile   [twrite ['{}-cmplx.pdb',infileBasename], Residues[]];
+    writeFile   [twrite ['{}-targ.pdb',infileBasename], diff [Residues[],selection]];
+    writeFile   [twrite ['{}-lig.pdb',infileBasename], selection];
+    
+    if not isnull posefile then
+        // process PoseFile through use of temp MDB
+        local tmpMDB = 'DELME-1234567890.mdb';
+        fdelete tmpMDB;
+        local mdb_key = db_Open [ tmpMDB,'create' ];
+        db_Close mdb_key;
+        db_ImportSD [tmpMDB, posefile,'mol'];
+        db_EnsureField [tmpMDB, 'Complex', 'molecule'];
+        local ent = 0;
+        local count = 0;
+        local inEntry;
+//        local pdbHandle = fopenw twrite ['{}-cmplxes.pdb',infileBasename];
+        while ent = db_NextEntry [tmpMDB,ent] loop
+            count = count + 1;
+            local pdbHandle = twrite ['{}-cmplxes-{}.pdb',infileBasename,count];
+            local psys = SystemPush diff [Residues[],selection];
+            inEntry = db_Read [ tmpMDB, ent];
+            ligRes = cat cResidues mol_Create inEntry.mol;
+            if not isnull setLigName then
+                rSetName [ligRes, setLigName];
+            endif
+           if rName ligRes == '*' then
+                rSetName [ligRes, 'MOL'];
+            endif                
+            RenderProtein [Chains[]];
+            inEntry.Complex = moe_CreateMOL _moe_Extract [Atoms[], GKeyList[], [mol_name: first cTag Chains[]]];
+            local tmpKey = db_Write [ tmpMDB, ent, inEntry];
+            fwrite_PDB [pdbHandle, Chains[]];
+            SystemPop psys;
+        endloop
+//        fclose pdbHandle;
+        db_ExportTriposMOL2 [tmpMDB, twrite ['{}-cmplxes.mol2',infileBasename], 'Complex'];
+//        fdelete tmpMDB;
+    endif
 
 endfunction

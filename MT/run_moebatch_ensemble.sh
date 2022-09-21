@@ -2,7 +2,7 @@
 
 #  // BEGIN COPYRIGHT
 #  /***********************************************************************
-#     Copyright (c) 2020-2021 QuantumBio Inc. and/or its affiliates.
+#     Copyright (c) 2020-2022 QuantumBio Inc. and/or its affiliates.
 # 	
 #  This source code is the property of QuantumBio Inc. and/or its affiliates
 #  and is provided AS IS.
@@ -25,7 +25,7 @@ bFORCEEXE=""     # assume the protein/ligand is not ready to roll and therefore 
 # SET DEFAULTS:
 if [ -z "${MOE_MTSCOREES}" ]; then MOEOPT_MTSES=""; else MOEOPT_MTSES="-mtscorees"; fi
 if [ -z "${MTCSCONF}" ]; then MTCSCONF=0; fi
-if [ -z "${MAXPOSE}" ]; then MAXPOSE=125; fi
+if [ -z "${MAXPOSE}" ]; then MAXPOSE=50; fi
 if [ -z "${REMAXPOSE}" ]; then REMAXPOSE=25; fi
 
 # DEFAULT MT options (these may be set in the environment prior to calling the script if you wish to change them)
@@ -290,7 +290,7 @@ if [ ! -e ${targetbasename}.pdb ] ; then error_exit "ERROR: ${PWD}/${targetbasen
 
 # Go through all mol2 files in the previous directory and run each one as a 
 for novelfile in "${innovelfile[@]}" ; do
-    novelbasename=`basename "$novelfile" .mol2`
+    novelbasename=`basename "$novelfile" .sdf`
     if [ "$bNOVEL" -eq 0 ]; then
         ligandbasename=${novelbasename}
     else
@@ -301,7 +301,7 @@ for novelfile in "${innovelfile[@]}" ; do
     rm -f OUT.${novelbasename}_proteinE
     rm -f OUT.${novelbasename}_proteinES
     
-    if [ ! -e ${novelbasename}.mol2 ] ; then echo "ERROR: ${PWD}/${novelbasename}.mol2 does not exist"; continue; fi
+    if [ ! -e ${novelbasename}.sdf ] ; then echo "ERROR: ${PWD}/${novelbasename}.sdf does not exist"; continue; fi
     
     starttime=`date`
     echo "$novelbasename STARTTIME: $starttime" &> OUT.${novelbasename}_proteinE
@@ -317,12 +317,12 @@ for novelfile in "${innovelfile[@]}" ; do
     fi
 
 #   STEP #2: EXECUTE MOE (docking) to generate poses which fit within the active site of the placed_ligand.mol2
-    execute_binary "${MOE_BIN} -licwait -run ${DC_SVL}/run/qbDockPair.svl -rec ${targetbasename}.pdb -lig ${ligandbasename}.mol2 ${MOE_CONF_FILE} -o ${novelbasename}_dock -delwat $MOEOPT_MTSES -maxpose ${MAXPOSE} -remaxpose ${REMAXPOSE} ${bFORCEEXE}" "OUT.${novelbasename}_proteinE"
+    execute_binary "${MOE_BIN} -licwait -run ${DC_SVL}/run/qbDockPair.svl -rec ${targetbasename}.pdb -novellig ${novelfile} -lig ${ligandbasename}.mol2 ${MOE_CONF_FILE} -o ${novelbasename}_dock -delwat $MOEOPT_MTSES -maxpose ${MAXPOSE} -remaxpose ${REMAXPOSE} ${bFORCEEXE}" "OUT.${novelbasename}_proteinE"
     echo "MOE RUN COMPLETE" >> OUT.${novelbasename}_proteinE
 
 #   STEP #3: EXECUTE MTScore (Ensemble scoring) to score MOE-generated poses which fit within the active site of the placed_ligand.mol2
-    execute_binary "${DIVCON_INSTALL}/bin/qmechanic pro_${ligandbasename}_predock.pdb --ligand lig_${ligandbasename}_predock.mol2 ${QM_OVERWRITE} ${MT_HAM_TYPE} --mtdock ${novelbasename}_dock.sdf opt off --mtscore --np ${PBS_NUM_PPN} -v 2" "OUT.${novelbasename}_proteinE"
-    echo "QMECHANIC RUN COMPLETE" >> OUT.${novelbasename}_proteinE
+#    execute_binary "${DIVCON_INSTALL}/bin/qmechanic pro_${ligandbasename}_predock.pdb --ligand lig_${ligandbasename}_predock.mol2 ${novelfile} ${QM_OVERWRITE} ${MT_HAM_TYPE} --mtdock ${novelbasename}_dock.sdf opt off --mtscore --np ${PBS_NUM_PPN} -v 2" "OUT.${novelbasename}_proteinE"
+    echo "QMECHANIC RUN SKIPPED" >> OUT.${novelbasename}_proteinE
     
     endtime=`date`
     echo "$novelbasename ENDTIME: $endtime" >> OUT.${novelbasename}_proteinE 2>&1
