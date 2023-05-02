@@ -64,20 +64,27 @@ wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/3HS4-tautomer
 cd ../
 $QBHOME/bin/qbphenix --pdbFile 3HS4+H.pdb --dataFile  3HS4.mtz --XModeScore 3HS4-tautomers --selection "chain A resname AZM resid 701" --mmMethod amberff14sb --qmMethod pm6 --protonation skip --protonateTautomers skip --nproc 20 --dir xmodeData --v 1 
 
-echo "Tutorial #3: XModeScore on Buster structures"
+echo "Tutorial #3: XModeScore using Buster"
 rm -rf ${WORKDIR}/xmodeScore_external_2BSM ; mkdir -p ${WORKDIR}/xmodeScore_external_2BSM ; cd ${WORKDIR}/xmodeScore_external_2BSM
-source /share/apps/GlobalPhasing/linux-x86_64/BUSTER_snapshot_20180515/setup.sh
+source /share/apps/GlobalPhasing/linux-x86_64/BUSTER_snapshot_20221121/setup.sh
 wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2BSM+H.pdb
 wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2BSM.mtz
 qbbuster --pdbFile 2BSM+H.pdb --sfFile 2BSM.mtz --XModeScore --protomers "-1..1" --protonation skip --makeCIF grade --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 1 --resname BSM --chain A --resid 1224 --np 20 --buffer-radius 0.0 --region-radius 3.0
 
-echo "Tutorial #4: Automated MOE-based Docking – using qbphenix"
+echo "Tutorial #4: XModeScore with the new features to explore flip and chiral states - using Buster"
+rm -rf ${WORKDIR}/xmodeScore_external_4wq6 ; mkdir -p ${WORKDIR}/xmodeScore_external_4wq6 ; cd ${WORKDIR}/xmodeScore_external_4wq6
+source /share/apps/GlobalPhasing/linux-x86_64/BUSTER_snapshot_20221121/setup.sh
+wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/4wq6+H.pdb
+wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/4wq6.mtz
+qbbuster --pdbFile 4wq6+H.pdb --sfFile 4wq6.mtz --XModeScore --protomers "-1..1" --exploreFlip --exploreChiral --protonation skip --makeCIF grade --mmMethod amberff14sb --qmMethod pm6 --engine buster --qmWeight 5.0 --ncycles 1 --nSmallCycles 50 --resname 3TQ --chain A --resid 601 --np 24 --buffer-radius 0.0 --region-radius 3.0
+
+echo "Tutorial #5: Automated MOE-based Docking – using qbphenix"
 dir4=xmodeScore_autoDock
 rm -rf ${WORKDIR}/$dir4 ; mkdir -p ${WORKDIR}/$dir4 ; cd ${WORKDIR}/$dir4
 
 $QBHOME/bin/qbphenix --pdbFile 5C3K-H_refine_001.pdb --dataFile 5C3K.mtz --densityFile 5C3K-H_refine_001.mtz --ligandFile 4XF_A_402.pdb --dock dockFolderResults --protonation skip --Xmodescore --protonateTautomers MOE --mmMethod amberff14 --qmMethod pm6 --region-radius 3.0 --nproc 22
     
-echo "Tutorial #5: Real-Space Ligand Statistics – using qmechanic"
+echo "Tutorial #6: Real-Space Ligand Statistics – using qmechanic"
 dir5=RealSpaceStatictics
 rm -rf ${WORKDIR}/$dir5 ; mkdir -p ${WORKDIR}/$dir5 ; cd ${WORKDIR}/$dir5
 wget http://downloads.quantumbioinc.com/media/tutorials/RealSpaceStats/0_0_0_0_-1_refine_001.pdb
