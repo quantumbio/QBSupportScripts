@@ -48,7 +48,6 @@ $QBHOME/bin/qmechanic 3e34+H.pdb 3e34.mtz --opt all 50 0.01 --qm-region /B/ED1/1
 echo "Tutorial #2: All Atom refinement wtih ONIOM region on the structure downloaded from PDB: PDBid:1lri"
 tutorFolder=1lri-allAtom
 rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
-export DEV_ENABLE_FIRST_ALTERNATE=1
 
 $QBHOME/bin/qmechanic 1lri --prepare --opt all 50 0.01 --qm-region /A/CLR/99// 3.0 0 -h pm6 amberff14sb   --np 4 -O -p 1lri_refined.pdb 1lri_refined.mtz
 
