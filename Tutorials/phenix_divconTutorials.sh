@@ -39,6 +39,13 @@ currentDate=`date`
 echo "BEGIN PHENIX/DivCon Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
 
 WORKDIR=$PWD
+if [[ -v ENFORCE_DIVCON ]];  
+then 
+ENGINE_DIVCON=" --protonation DivCon --engine DivCon"
+else
+ENGINE_DIVCON=""
+fi
+
 PDBID=2WOR
 echo "Tutorial #1 (Running Phenix/DivCon without the qbphenix wrapper): $PDBID"
 rm -rf ${WORKDIR}/NakedPHENIX ; mkdir -p ${WORKDIR}/NakedPHENIX ; cd ${WORKDIR}/NakedPHENIX
@@ -77,17 +84,17 @@ rm -rf ${WORKDIR}/qbphenix_moe_1lri ; mkdir -p ${WORKDIR}/qbphenix_moe_1lri ; cd
 wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/1lri.pdb
 wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/1lri-sf.cif
 
-$QBHOME/bin/qbphenix --dataFile 1lri-sf.cif --pdbFile 1lri.pdb --selection "chain A resname CLR resid 99"  --phenixOptions "main.number_of_macro_cycles=2" --protonation MOE --qmMethod pm6 --mmMethod amberff14sb --region-radius 3.0 --buffer-radius 2.5 --Nproc 4 
+$QBHOME/bin/qbphenix --dataFile 1lri-sf.cif --pdbFile 1lri.pdb --selection "chain A resname CLR resid 99"  --phenixOptions "main.number_of_macro_cycles=2" --protonation MOE --qmMethod pm6 --mmMethod amberff14sb --region-radius 3.0 --buffer-radius 2.5 --Nproc 4 $ENGINE_DIVCON
 
 echo "Tutorial #5: ONIOM (QM/MM) Based X-ray Refinement and Phenix Clash Score Analysis"
 rm -rf ${WORKDIR}/Protonation ; mkdir -p ${WORKDIR}/Protonation ; cd ${WORKDIR}/Protonation
 
-$QBHOME/bin/qbphenix --pdbID 1NAV --mmMethod amberff14sb --qmMethod pm6 --selection "resname IH5" --np 4 --region-radius 3.0 --buffer-radius 0.0 --protonation MOE >& OUT.screen
+$QBHOME/bin/qbphenix --pdbID 1NAV --mmMethod amberff14sb --qmMethod pm6 --selection "resname IH5" --np 4 --region-radius 3.0 --buffer-radius 0.0 --protonation MOE $ENGINE_DIVCON >& OUT.screen
 
 echo "Tutorial #6 (using qbphenix execution script and MOE on covalently bound ligand): 3NCK"
 rm -rf ${WORKDIR}/Protonation ; mkdir -p ${WORKDIR}/Protonation ; cd ${WORKDIR}/Protonation
 
-$QBHOME/bin/qbphenix --pdbID 3NCK --selection "resname NFF" --phenixOptions "main.number_of_macro_cycles=2" --protonation MOE  --qmMethod pm6 --mmMethod amberff14sb --region-radius 3.0 --buffer-radius 2.5  --Nproc 4  --scriptName run
+$QBHOME/bin/qbphenix --pdbID 3NCK --selection "resname NFF" --phenixOptions "main.number_of_macro_cycles=2" --protonation MOE  --qmMethod pm6 --mmMethod amberff14sb --region-radius 3.0 --buffer-radius 2.5  --Nproc 4  --scriptName run $ENGINE_DIVCON
 
 grep -v "H1  NFF A" 3NCK.pdb > tmp.$$ ; mv tmp.$$ 3NCK.pdb
 grep -v "H3  NFF A" 3NCK.pdb > tmp.$$ ; mv tmp.$$ 3NCK.pdb
