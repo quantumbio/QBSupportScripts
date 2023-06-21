@@ -50,20 +50,20 @@ PDBID=2WOR
 echo "Tutorial #1 (Running Phenix/DivCon without the qbphenix wrapper): $PDBID"
 rm -rf ${WORKDIR}/NakedPHENIX ; mkdir -p ${WORKDIR}/NakedPHENIX ; cd ${WORKDIR}/NakedPHENIX
 
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2WOR.pdb
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2WOR-sf.cif
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/2WOR.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/2WOR-sf.cif
 
 ${PHENIX}/build/bin/phenix.ready_set ${PDBID}.pdb add_h_to_water=true
 
-${PHENIX}/build/bin/phenix.refine ${PDBID}.updated.pdb ${PDBID}-sf.cif ${PDBID}.ligands.cif output.write_geo_file=False  output.write_def_file=False refinement.refine.strategy=individual_sites+individual_adp main.number_of_macro_cycles=2 qblib=True qblib_method=pm6 qblib_region_selection="chain A and resname 2AN and resid 1098" qblib_region_radius=3.0 qblib_buffer_radius=2.5 qblib_np=4 
+${PHENIX}/build/bin/phenix.refine ${PDBID}.updated.pdb ${PDBID}-sf.cif output.write_geo_file=False output.write_eff_file=False output.write_def_file=False refinement.refine.strategy=individual_sites+individual_adp main.number_of_macro_cycles=2 qblib=True qblib_method=pm6 qblib_region_selection="chain A and resname 2AN and resid 1098" qblib_region_radius=3.0 qblib_buffer_radius=2.5 qblib_np=4 
 
 echo "Tutorial #2a (using qbphenix execution script and MOE on single ligand): 3IX1"
 rm -rf ${WORKDIR}/qbphenix_moe ; mkdir -p ${WORKDIR}/qbphenix_moe ; cd ${WORKDIR}/qbphenix_moe
 
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/3ix1.pdb
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/3ix1-sf.cif
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/3ix1.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/3ix1-sf.cif
 
-$QBHOME/bin/qbphenix --dataFile 3ix1-sf.cif --pdbFile 3ix1.pdb --selection "chain A resname NFM resid 401"  --phenixOptions "main.number_of_macro_cycles=2" --protonation MOE --qmMethod pm6 --region-radius 3.0 --buffer-radius 2.5 --Nproc 4
+$QBHOME/bin/qbphenix --dataFile 3ix1-sf.cif --pdbFile 3ix1.pdb --selection "chain A resname NFM resid 401"  --phenixOptions "main.number_of_macro_cycles=2" --protonation MOE --qmMethod pm6 --region-radius 3.0 --buffer-radius 2.5 --Nproc 4 --v 1 $ENGINE_DIVCON
 
 echo "Tutorial #2b (using qbphenix execution script and phenix.ready_set on single ligand): 3IX1"
 rm -rf ${WORKDIR}/qbphenix_readyset ; mkdir -p ${WORKDIR}/qbphenix_readyset ; cd ${WORKDIR}/qbphenix_readyset
@@ -73,16 +73,16 @@ $QBHOME/bin/qbphenix --pdbID 3ix1 --selection "chain A resname NFM resid 401" --
 echo "Tutorial #3 (using qbphenix execution script and MOE on all ligands): 3IX1"
 rm -rf ${WORKDIR}/qbphenix_moe_all ; mkdir -p ${WORKDIR}/qbphenix_moe_all ; cd ${WORKDIR}/qbphenix_moe_all
 
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/3ix1.pdb
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/3ix1-sf.cif
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/3ix1.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/3ix1-sf.cif
 
 $QBHOME/bin/qbphenix --dataFile 3ix1-sf.cif --pdbFile 3ix1.pdb --selection "resname NFM" --phenixOptions "main.number_of_macro_cycles=1" --protonation MOE  --qmMethod pm6 --region-radius 3.0 --buffer-radius 2.5  --Nproc 4  
 
 echo "Tutorial #4 (using qbphenix execution script and MOE): 1LRI "
 rm -rf ${WORKDIR}/qbphenix_moe_1lri ; mkdir -p ${WORKDIR}/qbphenix_moe_1lri ; cd ${WORKDIR}/qbphenix_moe_1lri
 
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/1lri.pdb
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/1lri-sf.cif
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/1lri.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/1lri-sf.cif
 
 $QBHOME/bin/qbphenix --dataFile 1lri-sf.cif --pdbFile 1lri.pdb --selection "chain A resname CLR resid 99"  --phenixOptions "main.number_of_macro_cycles=2" --protonation MOE --qmMethod pm6 --mmMethod amberff14sb --region-radius 3.0 --buffer-radius 2.5 --Nproc 4 $ENGINE_DIVCON
 
