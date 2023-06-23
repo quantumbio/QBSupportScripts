@@ -98,8 +98,8 @@ $QBHOME/bin/qbphenix --pdbFile 5C3K-H_refine_001.pdb --dataFile 5C3K.mtz --densi
 echo "Tutorial #6: Real-Space Ligand Statistics – using qmechanic"
 dir5=RealSpaceStatictics
 rm -rf ${WORKDIR}/$dir5 ; mkdir -p ${WORKDIR}/$dir5 ; cd ${WORKDIR}/$dir5
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/RealSpaceStats/0_0_0_0_-1_refine_001.pdb
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/RealSpaceStats/0_0_0_0_-1_refine_001.mtz
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/RealSpaceStats/4wq6+H_2_1_0_0_0_F2_C1_refined.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/RealSpaceStats/4wq6+H_2_1_0_0_0_F2_C1_refined.mtz
 $QBHOME/bin/qmechanic 4wq6+H_2_1_0_0_0_F2_C1_refined.pdb 4wq6+H_2_1_0_0_0_F2_C1_refined.mtz --xstats "/A/3TQ/601//"
 
 
