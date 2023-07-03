@@ -1,0 +1,47 @@
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:48:45 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic 1LRI+H_refined.pdb tmp.h5 -h amberff14sb -p 1LRI+H_refined-mon.cif
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 16
+INFO - Memory Requested: 1.69376e+11 b
+INFO - MM name amberff14sb
+DEBUG - to loop: dynamic roothaan for standard: VM: 813456 RES: 92716
+DEBUG - to cap: dynamic roothaan for standard: VM: 813456 RES: 92716
+DEBUG - 0DP 0 for /A/LEU/98// N C
+DEBUG -  /A/LEU/98// thick N H
+DEBUG - /A/LEU/98// 20 caps  21 -1 97
+DEBUG - runChargesOn: dynamic roothaan for standard: VM: 813456 RES: 92764
+DEBUG - before: dynamic roothaan for standard: VM: 827004 RES: 94288
+DEBUG -  /A/LEU/98//H mully N H -0.682491 0.246415
+DEBUG - after yet in scope: dynamic roothaan for standard: VM: 2.01006e+06 RES: 97500
+DEBUG - transferChargesBackTo: dynamic roothaan for standard: VM: 2.01006e+06 RES: 97500
+DEBUG - loop end: dynamic roothaan for standard: VM: 2.01006e+06 RES: 97500
+DEBUG - /A/CLR/99// standalone 0 74
+DEBUG - runChargesOn: dynamic roothaan for standard: VM: 2.01006e+06 RES: 97500
+DEBUG - before: dynamic roothaan for standard: VM: 2.01006e+06 RES: 97672
+DEBUG - after yet in scope: dynamic roothaan for standard: VM: 2.10676e+06 RES: 99496
+INFO - qmechanic finished at Mon Jul  3 16:48:56 2023
+

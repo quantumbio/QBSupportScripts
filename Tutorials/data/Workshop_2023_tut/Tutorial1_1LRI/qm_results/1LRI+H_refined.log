@@ -1,0 +1,217 @@
+
+Mon Jul  3 16:35:31 2023
+
+QB_PERL5LIB=/home/oleg/TEST/qmechanic4/perl
+QB_CLASSPATH=/home/oleg/TEST/qmechanic4/linux-x86_64/HDFView.jar:/home/oleg/TEST/qmechanic4/linux-x86_64/lib/hdfobject.jar:/home/oleg/TEST/qmechanic4/linux-x86_64/lib/org.eclipse.equinox.common.jar:/home/oleg/TEST/qmechanic4/linux-x86_64/lib/org.eclipse.osgi.jar:/home/oleg/TEST/qmechanic4/linux-x86_64/lib/org.eclipse.nebula.widgets.nattable.core.jar:/home/oleg/TEST/qmechanic4/linux-x86_64/lib/org.eclipse.jface.jar:/home/oleg/TEST/qmechanic4/linux-x86_64/lib/org.eclipse.collections.jar:/home/oleg/TEST/qmechanic4/linux-x86_64/lib/org.eclipse.core.commands.jar:/home/oleg/TEST/qmechanic4/linux-x86_64/lib/commons-logging-1.2.jar:/home/oleg/TEST/qmechanic4/linux-x86_64/lib/slf4j-api-1.7.25.jar:/home/oleg/TEST/qmechanic4/linux-x86_64/lib/swt.jar:/home/oleg/TEST/qmechanic4/linux-x86_64/lib/args4j-2.0.17-SNAPSHOT.jar:/home/oleg/TEST/qmechanic4/linux-x86_64/QBReporter.jar
+QB_PYTHONPATH=/home/oleg/TEST/qmechanic4/python/linux-x86_64/lib/python2.7/site-packages:/home/oleg/TEST/qmechanic4/python/linux-x86_64/lib/python2.7/site-packages/setuptools-0.6c11-py2.7.egg
+QB_LD_LIBRARY_PATH=/home/oleg/TEST/qmechanic4/python/linux-x86_64/lib
+QB_DYLD_LIBRARY_PATH=/home/oleg/TEST/qmechanic4/python/linux-x86_64/lib:/home/oleg/TEST/qmechanic4/python/linux-x86_64/lib:/home/oleg/TEST/qmechanic4/python/linux-x86_64/lib:/home/oleg/TEST/qmechanic4/python/linux-x86_64/lib:/home/oleg/TEST/qmechanic4/python/linux-x86_64/lib
+DEV_XRAY_WEIGHT=0.4
+QB_FIX_METAL_CHARGES=1
+QBHOME: /home/oleg/TEST/qmechanic4
+Command line:
+qmechanic 1LRI+H.pdb 1LRI.mtz --opt all 25 0.01 --qm-region /A/CLR/99// 3.0 0 -\
+h pm6 amberff14sb --np 4 -O -p 1LRI+H_refined.pdb 1LRI+H_refined.mtz \
+
+Version: DivCon Discovery Suite 1 6.1.x-beta
+
+For licensing information along with a list of included packages/dependencies,
+    See: /home/oleg/TEST/qmechanic4/LICENSE
+
+
+
+Running on bilbo.quantumbioinc.com
+Processors: 4
+Processing target 1 of 1
+
+----------------------------------------------- Bond Angle Outliers (amberff14sb) ------------------------------------------------
+Residue1       Atom1   Type1   Residue        Atom    Type    Residue2       Atom2   Type2      Model    Ideal    Delta  Deviation
+----------------------------------------------------------------------------------------------------------------------------------
+/A/CLR/99//   |C17    |c3     |/A/CLR/99//   |C13    |c3     |/A/CLR/99//   |C14    |c3     |  98.408| 111.510|  13.102|       5.2
+----------------------------------------------------------------------------------------------------------------------------------
+
+
+------------------------ Atoms with Zero VDW Parameters ------------------------
+Residue        Atom    Type         Sigma Well_depth Status      
+--------------------------------------------------------------------------------
+/A/THR/1//HG1 |HG1    |HO     |     0.000|     0.000|VALID       
+/A/THR/4//HG1 |HG1    |HO     |     0.000|     0.000|VALID       
+/A/SER/6//HG  |HG     |HO     |     0.000|     0.000|VALID       
+/A/THR/9//HG1 |HG1    |HO     |     0.000|     0.000|VALID       
+/A/TYR/12//HH |HH     |HO     |     0.000|     0.000|VALID       
+/A/THR/14//HG1|HG1    |HO     |     0.000|     0.000|VALID       
+/A/SER/17//HG |HG     |HO     |     0.000|     0.000|VALID       
+/A/SER/20//HG |HG     |HO     |     0.000|     0.000|VALID       
+/A/SER/23//HG |HG     |HO     |     0.000|     0.000|VALID       
+/A/SER/28//HG |HG     |HO     |     0.000|     0.000|VALID       
+/A/THR/29//HG1|HG1    |HO     |     0.000|     0.000|VALID       
+/A/SER/31//HG |HG     |HO     |     0.000|     0.000|VALID       
+/A/TYR/33//HH |HH     |HO     |     0.000|     0.000|VALID       
+/A/SER/34//HG |HG     |HO     |     0.000|     0.000|VALID       
+/A/THR/37//HG1|HG1    |HO     |     0.000|     0.000|VALID       
+/A/THR/43//HG1|HG1    |HO     |     0.000|     0.000|VALID       
+/A/THR/44//HG1|HG1    |HO     |     0.000|     0.000|VALID       
+/A/TYR/47//HH |HH     |HO     |     0.000|     0.000|VALID       
+/A/SER/53//HG |HG     |HO     |     0.000|     0.000|VALID       
+/A/THR/54//HG1|HG1    |HO     |     0.000|     0.000|VALID       
+/A/THR/58//HG1|HG1    |HO     |     0.000|     0.000|VALID       
+/A/THR/65//HG1|HG1    |HO     |     0.000|     0.000|VALID       
+/A/THR/74//HG1|HG1    |HO     |     0.000|     0.000|VALID       
+/A/THR/77//HG1|HG1    |HO     |     0.000|     0.000|VALID       
+/A/SER/78//HG |HG     |HO     |     0.000|     0.000|VALID       
+/A/TYR/85//HH |HH     |HO     |     0.000|     0.000|VALID       
+/A/SER/86//HG |HG     |HO     |     0.000|     0.000|VALID       
+/A/TYR/87//HH |HH     |HO     |     0.000|     0.000|VALID       
+/A/SER/92//HG |HG     |HO     |     0.000|     0.000|VALID       
+/A/SER/96//HG |HG     |HO     |     0.000|     0.000|VALID       
+/A/SER/97//HG |HG     |HO     |     0.000|     0.000|VALID       
+--------------------------------------------------------------------------------
+
+ 
+Input Mapper --- End of Maps Init
+Running PM6 in  oniom 
+
+Requested Memory:                       159054 mb
+Total Memory Requirements:              136 mb
+
+--------------------------------------------------------------------------------
+Single Point
+Cycle       Energy (eV)      Delta E       D RMSD  Max Delta D  Damp        Time
+--------------------------------------------------------------------------------
+    1   -2.04988346e+06  -1.8001e+02   3.3097e-03   3.4152e-01 1.0000000    1.06
+    2   -2.04989598e+06  -1.2525e+01   8.2308e-04   6.7978e-02 1.0000000    1.18
+    3   -2.04989819e+06  -2.2101e+00   3.4815e-04   3.2961e-02 1.0000000    1.13
+    4   -2.04989874e+06  -5.4946e-01   1.7501e-04   1.7581e-02 1.0000000    1.17
+    5   -2.04989891e+06  -1.6401e-01   9.6173e-05   9.6374e-03 1.0000000    1.09
+    6   -2.04989896e+06  -5.5751e-02   5.6416e-05   5.4262e-03 1.0000000    1.06
+    7   -2.04989898e+06  -2.1032e-02   3.4878e-05   3.1006e-03 1.0000000    1.05
+    8   -2.04989899e+06  -8.6345e-03   2.2512e-05   2.0653e-03 1.0000000    1.17
+    9   -2.04989899e+06  -3.7953e-03   1.5050e-05   1.5981e-03 1.0000000    1.09
+   10   -2.04989900e+06  -1.7638e-03   1.0357e-05   1.2395e-03 1.0000000    1.09
+   11   -2.04989900e+06  -8.5892e-04   7.3038e-06   9.6824e-04 1.0000000    0.98
+   12   -2.04989900e+06  -4.3562e-04   5.2594e-06   7.6900e-04 1.0000000    1.12
+   13   -2.04989900e+06  -2.2902e-04   3.8569e-06   6.1311e-04 1.0000000    1.14
+   14   -2.04989900e+06  -1.2442e-04   2.8734e-06   4.9025e-04 1.0000000    1.02
+   15   -2.04989900e+06  -6.9551e-05   2.1702e-06   3.9287e-04 1.0000000    0.94
+   16   -2.04989900e+06  -3.9878e-05   1.6581e-06   3.1535e-04 1.0000000    0.96
+   17   -2.04989900e+06  -2.3362e-05   1.2792e-06   2.5345e-04 1.0000000    1.03
+   18   -2.04989900e+06  -1.3978e-05   9.9485e-07   2.0389e-04 1.0000000    0.97
+   19   -2.04989900e+06  -8.4897e-06   7.7869e-07   1.6414e-04 1.0000000    1.06
+   20   -2.04989900e+06  -5.1723e-06   6.1268e-07   1.3221e-04 1.0000000    1.00
+   21   -2.04989900e+06  -3.2287e-06   4.8406e-07   1.0654e-04 1.0000000    0.95
+
+totalNumberOfParameters: 6256 #OF RBO PARAMS: 0 numberOfTorsions: 0 Number of XYZ refined atoms: 1804 Number Of refined B factors: 844
+MAP UPDATE
+
+MTZ LABELS TO BE USED:
+/*/*/[FP SIGFP]
+/*/*/[FREE]
+/*/*/[FWT PHWT]
+/*/*/[DELFWT PHDELWT]
+
+----------------------------MTZ/CIF DATA FILE STATS-----------------------------
+reflections: 17524 cell: 30.96 94.80 65.30 sg: C 2 2 21 Resol: 1.45
+fo-obj: 2 17432 type: F_sigF
+fc-obj: 2 17524 type: F_phi
+fc-obj: 2 17524 type: F_phi
+fb info 1 2 17524 type: F_phi
+fd info 1 2 17524 type: F_phi
+phiw-obj: 2 17524 type: Phi_fom
+Map stats: mean: 0.21 std dev: 0.37  Max:  5.58  Min:  -0.54
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+All X-ray Refinement - LBFGS Convergence Criteria (Tolerance):
+    Maximum iterations: 25
+    Gradient norm     : 0.01
+    Energy tolerance  : 1.00e-06
+    Coordinate norm   : 1.00e-06
+    Rigid Body Params : 0
+    Moving atoms      : 1804
+    Torsions          : 0
+--------------------------------------------------------------------------------
+ Cycle Time(s) SCF's QM Time G Time Total Energy (kCal)       Delta E    Grad. Norm     Grad. Max   Coord. Norm
+    0   8.98    22  36.544  9.993    -1.23251909e+06   -1.2325e+06    1.1752e+03    2.8373e+02    0.0000e+00
+    1  56.92    31  56.734 20.152    -1.23278682e+06   -2.6773e+02    6.6266e+02    1.4134e+02    0.0000e+00
+    2  26.93    12  26.834 10.323    -1.23289281e+06   -1.0599e+02    4.2713e+02    6.6063e+01    4.8193e-01
+    3  29.16    13  29.057 10.236    -1.23302495e+06   -1.3214e+02    3.2752e+02    7.0960e+01    2.2087e-01
+    4  34.49    12  34.389 10.826    -1.23307567e+06   -5.0718e+01    4.5220e+02    1.0419e+02    5.3843e-01
+    5  28.06    11  27.917 11.316    -1.23311773e+06   -4.2062e+01    2.2170e+02    2.8044e+01    4.7617e-01
+    6  32.51    11  32.377 11.849    -1.23314329e+06   -2.5558e+01    1.9294e+02    3.0058e+01    2.6217e-01
+    7  32.29    10  32.193 12.448    -1.23316442e+06   -2.1132e+01    2.1811e+02    3.1618e+01    2.6891e-01
+    8  37.19    12  37.092 12.776    -1.23318629e+06   -2.1869e+01    4.0372e+02    1.2767e+02    2.8148e-01
+    9  37.79    11  37.587 12.426    -1.23321091e+06   -2.4619e+01    1.7696e+02    3.0078e+01    6.3244e-01
+   10  28.12     9  27.815 11.769    -1.23322136e+06   -1.0446e+01    1.3269e+02    1.8983e+01    3.3754e-01
+   11  32.61    10  32.511 12.473    -1.23324100e+06   -1.9646e+01    1.4551e+02    2.9052e+01    8.8990e-02
+   12  31.61    11  31.467 12.643    -1.23325389e+06   -1.2884e+01    2.6722e+02    6.0595e+01    2.7397e-01
+   13  32.52    10  32.408 12.256    -1.23326991e+06   -1.6020e+01    1.6502e+02    2.6214e+01    4.5151e-01
+   14  37.97    11  37.731 12.472    -1.23328573e+06   -1.5824e+01    1.2156e+02    1.1995e+01    3.0837e-01
+   15  34.13    10  34.020 11.739    -1.23329545e+06   -9.7164e+00    1.3417e+02    2.4909e+01    4.5335e-01
+   16  30.80    11  30.700 10.824    -1.23330890e+06   -1.3458e+01    2.3123e+02    5.9703e+01    3.1890e-01
+   17  22.86     9  22.762 10.126    -1.23332228e+06   -1.3379e+01    1.2169e+02    1.4495e+01    6.6308e-01
+   18  22.93     9  22.829 10.351    -1.23333229e+06   -1.0008e+01    1.1178e+02    1.1588e+01    2.0700e-01
+   19  22.95    10  22.826 10.227    -1.23334224e+06   -9.9458e+00    1.3322e+02    2.2831e+01    1.7265e-01
+   20  22.55    11  22.451  9.646    -1.23334721e+06   -4.9745e+00    2.5279e+02    6.5226e+01    3.4125e-01
+   21  20.69     9  20.581  9.768    -1.23335678e+06   -9.5643e+00    1.0247e+02    1.4942e+01    5.5922e-01
+   22  20.49     9  20.400  9.840    -1.23336165e+06   -4.8769e+00    8.9945e+01    1.8603e+01    1.4711e-01
+   23  21.19     9  21.095  9.957    -1.23336753e+06   -5.8780e+00    1.1843e+02    1.9590e+01    1.2314e-01
+   24  21.35    10  21.253  9.683    -1.23337805e+06   -1.0519e+01    2.1207e+02    7.9255e+01    2.9621e-01
+   25  22.43    10  22.341 10.077    -1.23338648e+06   -8.4285e+00    1.1674e+02    2.3346e+01    5.7486e-01
+TIME AFTER OPT: 740.5361
+
+TIME AFTER setup & OPT: 778.9755
+
+----------------------------MTZ/CIF DATA FILE STATS-----------------------------
+reflections: 17524 cell: 30.9640 94.8000 65.2960 sg: C 2 2 21 Resol: 1.4497
+fo-obj: 2 17432 type: F_sigF
+fc-obj: 2 17524 type: F_phi
+fc-obj: 2 17524 type: F_phi
+fb info 1 2 17524 type: F_phi
+fd info 1 2 17524 type: F_phi
+phiw-obj: 2 17524 type: Phi_fom
+Map stats: mean: 0.2190 std dev: 0.3659  Max:  5.6006  Min:  -0.4873
+--------------------------------------------------------------------------------
+R-work: 0.1895 # of reflections: 16037 | R-free: 0.2234 # of reflections: 1395
+ # of Nan Reflections: 0 # of Missing Reflections: 92
+Normal Termination of DivCon Refinement
+
+Direct Quantum Mechanics (pm6) Results:
+                   Total SCF Time (Seconds):                             0.00000
+                     Electronic Energy (eV):                      -2049741.51781
+                          Total Energy (eV):                        -51512.23643
+               Heat of Formation (kcal/mol):                         -1800.28567
+                  Ionization Potential (eV):                             8.98934
+                     Electron Affinity (eV):                             3.92277
+
+Molecular Mechanics (amberff14sb) Results:
+                     Total MM Time (Seconds):                             0.0000
+                             TotalCharge (q):                             2.0000
+                     Total Energy (kcal/mol):                         -2395.8190
+                      Bond Length (kcal/mol):                           165.1152
+                       Bond Angle (kcal/mol):                           193.8710
+                    Torsion Angle (kcal/mol):                          1255.7924
+           Improper Torsion Angle (kcal/mol):                            14.1216
+                    Electrostatic (kcal/mol):                         -3631.3278
+                    Van der Waals (kcal/mol):                          -393.3914
+
+QM/MM (pm6/amberff14sb) Results:
+                     Total Energy (kcal/mol):                     -1190425.08517
+                   QM - Selection (kcal/mol):                     -1187900.96195
+                   MM - Selection (kcal/mol):                          128.30424
+            MM - Entire Structure (kcal/mol):                        -2395.81898
+1 has cif? 0
+
+--------------------------------------------------------------------------------
+                               Total Charge:                                   2
+
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+                    Energy Delta (kcal/mol):                           747.89867
+--------------------------------------------------------------------------------
+
+Job Complete 
+Total Computation Time (Seconds): 793.57314
+Mon Jul  3 16:48:45 2023
+

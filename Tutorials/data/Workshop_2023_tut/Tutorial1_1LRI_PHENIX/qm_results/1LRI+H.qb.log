@@ -1,0 +1,1162 @@
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:51:56 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 --opt 500 1e-2 --crop first /A/CLR/99// 0.0 0.0 --np 4 -p tmp.pdb
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70661e+11 b
+INFO - MM name amberff14sb
+INFO - qmechanic finished at Mon Jul  3 16:53:21 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:53:35 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70577e+11 b
+INFO - MM name amberff14sb
+DEBUG - to loop: dynamic roothaan for standard: VM: 810884 RES: 90080
+DEBUG - to cap: dynamic roothaan for standard: VM: 810884 RES: 90080
+DEBUG - 0DP 0 for /A/LEU/98// N C
+DEBUG -  /A/LEU/98// thick N H
+DEBUG - /A/LEU/98// 20 caps  21 -1 97
+DEBUG - runChargesOn: dynamic roothaan for standard: VM: 810884 RES: 90080
+DEBUG - before: dynamic roothaan for standard: VM: 824432 RES: 91648
+DEBUG -  /A/LEU/98//H mully N H -0.67283 0.24789
+DEBUG - after yet in scope: dynamic roothaan for standard: VM: 1.18824e+06 RES: 94864
+DEBUG - transferChargesBackTo: dynamic roothaan for standard: VM: 1.18824e+06 RES: 94864
+DEBUG - loop end: dynamic roothaan for standard: VM: 1.18824e+06 RES: 94864
+DEBUG - /A/CLR/99// standalone 0 74
+DEBUG - runChargesOn: dynamic roothaan for standard: VM: 1.18824e+06 RES: 94864
+DEBUG - before: dynamic roothaan for standard: VM: 1.18824e+06 RES: 94980
+DEBUG - after yet in scope: dynamic roothaan for standard: VM: 1.30256e+06 RES: 95656
+INFO - qmechanic finished at Mon Jul  3 16:54:07 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:54:07 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.7077e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 16:54:39 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:54:40 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70765e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 16:55:10 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:55:11 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70788e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 16:55:42 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:55:43 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70709e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 16:56:13 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:56:14 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70626e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 16:56:46 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:56:46 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70754e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 16:57:17 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:57:18 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70697e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 16:57:49 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:57:50 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70687e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 16:58:20 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:58:21 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70677e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 16:58:52 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:58:53 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70557e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 16:59:23 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:59:24 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70743e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 16:59:55 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 16:59:56 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70678e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:00:26 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:00:27 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70682e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:00:58 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:00:59 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70658e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:01:30 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:01:30 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70633e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:02:00 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:02:01 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70527e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:02:32 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:02:33 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70676e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:03:03 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:03:04 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70654e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:03:35 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:03:36 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70609e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:04:07 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:04:08 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70682e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:04:39 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:04:40 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70665e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:05:10 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:05:10 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.7066e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:05:41 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:05:42 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70539e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:06:13 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:06:14 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70493e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:06:45 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:07:11 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70637e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:07:41 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:07:42 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70701e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:08:13 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:08:14 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70648e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:08:44 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:08:45 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70532e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:09:17 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:09:17 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70701e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:09:48 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:09:49 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70669e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
+INFO - qmechanic finished at Mon Jul  3 17:10:20 2023
+
+INFO - Compiled: Mon Jul 3 15:20:01 EDT 2023, Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+
+Execution Hardware: Linux bilbo.quantumbioinc.com 3.10.0-862.14.4.el7.x86_64 #1 SMP Wed Sep 26 15:12:11 UTC 2018 x86_64 x86_64 x86_64 GNU/Linux
+Execution Environment: linux-x86_64
+Execution Time: Mon Jul 3 17:10:21 EDT 2023
+Execution Distribution: CentOS Linux release 7.5.1804 (Core)
+
+
+QB Build: b
+
+Component: Persistence
+Version: QB_VERSION
+Revision: GIT_REVISION
+
+Component: hdf5
+Version: 1.10.6
+
+Component: open mpi
+Component: lib z
+Version: 1.2.11
+
+Component: lib c
+Version: 2.17
+
+Command line: "/home/oleg/TEST/qmechanic4"/bin/qmechanic ./1LRI+H.h5#1LRI+H ./1LRI+H.h5 -h pm6 amberff14sb -g --qm-region /*/CLR/*// 3.0 0.0 --np 4
+
+INFO - Running on bilbo.quantumbioinc.com
+INFO - Processors: 4
+INFO - Memory Requested: 1.70668e+11 b
+INFO - MM name amberff14sb
+INFO - Retrieved perception prodigals: 30
+INFO - Retrieved perception repairs: 0
+INFO - amber set to: amberff14sb
