@@ -70,10 +70,10 @@ wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/BSM.cif
 echo "Tutorial #2 (using qbbuster execution script and Grade & DivCon protonator): 2BSM"
 rm -rf ${WORKDIR}/qbbuster_divcon ; mkdir -p ${WORKDIR}/qbbuster_divcon ; cd ${WORKDIR}/qbbuster_divcon
 
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2bsm.pdb
-wget http://downloads.quantumbioinc.com/media/tutorials/XModeScore/2BSM.mtz
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/2BSM.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/2BSM.mtz
 
-$QBHOME/bin/qbbuster --pdbFile 2bsm.pdb --sfFile 2BSM.mtz --protonation divcon --makeCIF grade --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 2 --selection "resname BSM" --region-radius 3.0 --np 4 --dir qmRun
+$QBHOME/bin/qbbuster --pdbFile 2BSM.pdb --sfFile 2BSM.mtz --protonation divcon --makeCIF divcon --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 1  --nSmallCycles 15 --selection "resname BSM" --region-radius 3.0 --np 4 --dir qmRun
 
 echo "Tutorial #3 (running XModeScore with qbbuster execution script on the structure with multiple ligand copies): 4ntk"
 rm -rf ${WORKDIR}/qbbuster_4ntk ; mkdir -p ${WORKDIR}/qbbuster_4ntk ; cd ${WORKDIR}/qbbuster_4ntk
