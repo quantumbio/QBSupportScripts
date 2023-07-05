@@ -85,7 +85,6 @@ $QBHOME/bin/$qbExec --pdbfile 3HS4+H.pdb --sfFile 3HS4.mtz --Xmodescore --protom
 
 
 echo "Tutorial 4: XModeScore on user-provided AZM tautomer files "
-rm -rf ${WORKDIR}/xmodeScore_3HS4 ; mkdir -p ${WORKDIR}/xmodeScore_3HS4 ; cd ${WORKDIR}/xmodeScore_3HS4
 dir1=Tutorial4_AZM_XmodeScore_ExternalFiles
 rm -rf ${WORKDIR}/$dir1 ; mkdir -p ${WORKDIR}/$dir1 ; cd ${WORKDIR}/$dir1
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/Workshop_2023/3HS4+H.pdb
