@@ -24,7 +24,6 @@ global argv;
 function PartialCharge;
 function ArgvPull;
 function ReadPDB;
-function Protonate3D;
 function RenderProtein;
 function MM;
 function fwrite_TriposMOL2;
@@ -153,7 +152,7 @@ endfunction
 local function main []
     ArgvReset ArgvExpand argv;
 
-    local [inQBMDB, inDockMDB] = ArgvPull [ ['-qbmdb','-dockmdb'], [1,1] ];
+    local [inQBMDB, inDockMDB, inTarget] = ArgvPull [ ['-qbmdb','-dockmdb','-target'], [1,1,1] ];
     
     local remaining = ArgvAll [];
     if not isnull remaining then
@@ -168,6 +167,14 @@ local function main []
     endif
     
     local inTargetMol;      // TODO: replace with CLI option
+    
+    if not isnull inTarget then
+        write ['WARNING: file {} is being read in and treated as a target (w/o ligand). No atoms are being deleted/modified.\n'];
+        local syskeys = SystemPush [];
+        ReadAuto inTarget;
+        inTargetMol = mol_Extract Chains[];
+        SystemPop syskeys;
+    endif
     
     MergeMDB [inQBMDB, inDockMDB, inTargetMol];
     

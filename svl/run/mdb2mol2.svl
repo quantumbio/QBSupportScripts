@@ -135,6 +135,14 @@ local function main []
             count = count + 1;
         endif
         
+        if isnull inEntry.PDBid then
+            inEntry.PDBid = 'PDB';
+        endif
+        
+        if isnull inEntry.CompoundID then
+            inEntry.CompoundID = 'XXX';
+        endif
+        
         local newBaseName = twrite ['{}-{}-{}',inEntry.PDBid,inEntry.CompoundID,count];
         
         if count < 26 then
