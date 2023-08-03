@@ -23,10 +23,6 @@ if [ -z "${QBHOME}" ]; then
     exit
 fi
 
-if [ -z "${PHENIX}" ]; then
-    echo "ERROR: PHENIX is not set! You MUST source /path/to/phenix-1.XX.XXX/phenix_env.sh THEN call this function"
-    exit
-fi
 
 DIVCON_BIN=${QBHOME}/bin/qmechanic
 
@@ -41,12 +37,9 @@ echo "BEGIN Workshop 2003 Tutorials at ${currentDate} using ${DIVCON_BIN}"
 qbExec=qbphenix
 cloud=""
 WORKDIR=$PWD
-if [[ -v GRID_MARKET ]];  
-then 
+if [ ! -z "${GRID_MARKETS}" ]; then 
 qbExec=qbdivcon
 cloud=" --cloud gridmarkets"
-else
-ENGINE_DIVCON=""
 fi
 
 echo "Tutorial #1:ONIOM  Refinement of PDBid:1LRI with Protonation of the input PDB"

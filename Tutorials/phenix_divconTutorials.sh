@@ -94,10 +94,7 @@ $QBHOME/bin/qbphenix --pdbID 1NAV --mmMethod amberff14sb --qmMethod pm6 --select
 echo "Tutorial #6 (using qbphenix execution script and MOE on covalently bound ligand): 3NCK"
 rm -rf ${WORKDIR}/Protonation ; mkdir -p ${WORKDIR}/Protonation ; cd ${WORKDIR}/Protonation
 
-$QBHOME/bin/qbphenix --pdbID 3NCK --selection "resname NFF" --phenixOptions "main.number_of_macro_cycles=2" --protonation MOE  --qmMethod pm6 --mmMethod amberff14sb --region-radius 3.0 --buffer-radius 2.5  --Nproc 4  --scriptName run $ENGINE_DIVCON
-
-grep -v "H1  NFF A" 3NCK.pdb > tmp.$$ ; mv tmp.$$ 3NCK.pdb
-grep -v "H3  NFF A" 3NCK.pdb > tmp.$$ ; mv tmp.$$ 3NCK.pdb
+$QBHOME/bin/qbphenix --pdbID 3NCK --selection "resname NFF" --phenixOptions "main.number_of_macro_cycles=2" --protonation divcon  --qmMethod pm6 --mmMethod amberff14sb --region-radius 3.0 --Nproc 4  --scriptName run $ENGINE_DIVCON
 
 ./run
 

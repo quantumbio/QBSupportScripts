@@ -23,10 +23,10 @@ if [ -z "${QBHOME}" ]; then
     exit
 fi
 
-if [ -z "${PHENIX}" ]; then
-    echo "ERROR: PHENIX is not set! You MUST source /path/to/phenix-1.XX.XXX/phenix_env.sh THEN call this function"
-    exit
-fi
+#if [ -z "${PHENIX}" ]; then
+#    echo "ERROR: PHENIX is not set! You MUST source /path/to/phenix-1.XX.XXX/phenix_env.sh THEN call this function"
+#    exit
+#fi
 
 DIVCON_BIN=${QBHOME}/bin/qmechanic
 
@@ -39,8 +39,7 @@ currentDate=`date`
 echo "BEGIN PHENIX/DivCon Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
 
 WORKDIR=$PWD
-if [[ -v ENFORCE_DIVCON ]];  
-then 
+if [ ! -z "${ENFORCE_DIVCON}" ]; then 
 ENGINE_DIVCON=" --protonation DivCon --engine DivCon --protonateTautomers DivCon"
 else
 ENGINE_DIVCON=""
