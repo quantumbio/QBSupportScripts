@@ -23,7 +23,7 @@ WORKDIR="${PWD}"
 
 wget https://github.com/quantumbio/QBSupportScripts/raw/master/Tutorials/data/MT/4w7t_ligand.mol2
 wget https://github.com/quantumbio/QBSupportScripts/raw/master/Tutorials/data/MT/4w7t_protein.pdb
-#wget https://github.com/quantumbio/QBSupportScripts/raw/master/Tutorials/data/MT/4w7t-sf.cif
+wget https://github.com/quantumbio/QBSupportScripts/raw/master/Tutorials/data/MT/4w7t-sf.cif
 wget https://github.com/quantumbio/QBSupportScripts/raw/master/Tutorials/data/MT/4w7t_phases.mtz
 
 echo "Default MTDock"
@@ -36,7 +36,7 @@ CLI_ARGS="4w7t_protein.pdb        \
     --mtcs 2 preopt opt torsion 100 1e-3      \
     --mtdock 2,3 opt torsion 100 0.01  \
     --mtscore ensemble                          \
-    -p pdb -v 2 -O -h amberff14sb"
+    -p pdb -v 2 -O -h amberff14sb --np 10"
 #    --mtdock 5,10 opt torsion ligand 100 0.01  \
 
 #${QBHOME}/bin/qmechanic ${CLI_ARGS}
@@ -52,7 +52,7 @@ CLI_ARGS="4w7t_protein.pdb 4w7t_phases.mtz       \
     --mtcs 2 preopt opt torsion 100 1e-3      \
     --mtdock 2,3 opt torsion 100 0.01  \
     --mtscore ensemble                          \
-    -p pdb -v 2 -O -h amberff14sb"
+    -p pdb -v 2 -O -h amberff14sb --np 10"
 #    --mtdock 2,3 opt torsion ligand 100 0.01  \
 
 ${QBHOME}/bin/qmechanic ${CLI_ARGS}
@@ -63,9 +63,12 @@ cd "${WORKDIR}/default-MTCS_MTDOCK_MTSCOREE-sf"
 ln -s ../4w7t_ligand.mol2
 ln -s ../4w7t_protein.pdb
 ln -s ../4w7t-sf.cif
-${QBHOME}/bin/qmechanic 4w7t_protein.pdb 4w7t_phases.mtz       \
+CLI_ARGS="4w7t_protein.pdb 4w7t-sf.cif       \
     --ligand 4w7t_ligand.mol2                   \
-    --mtcs 5 preopt opt torsion 100 1e-3      \
-    --mtdock 5,10 opt torsion ligand 100 0.01  \
+    --mtcs 2 preopt opt torsion 100 1e-3      \
+    --mtdock 2,3 opt torsion 100 0.01  \
     --mtscore ensemble                          \
-    -p pdb -v 2 -O -h amberff14sb
+    -p pdb -v 2 -O -h amberff14sb --np 10"
+#    --mtdock 5,10 opt torsion ligand 100 0.01  \
+
+# ${QBHOME}/bin/qmechanic ${CLI_ARGS}
