@@ -26,7 +26,12 @@ wget https://github.com/quantumbio/QBSupportScripts/raw/master/Tutorials/data/MT
 wget https://github.com/quantumbio/QBSupportScripts/raw/master/Tutorials/data/MT/4w7t-sf.cif
 wget https://github.com/quantumbio/QBSupportScripts/raw/master/Tutorials/data/MT/4w7t_phases.mtz
 
-echo "Default MTDock"
+wget https://github.com/quantumbio/QBSupportScripts/raw/master/Tutorials/data/XModeScore/1bzc%2BH.pdb
+wget https://github.com/quantumbio/QBSupportScripts/raw/master/Tutorials/data/XModeScore/1bzc.mtz
+wget https://github.com/quantumbio/QBSupportScripts/raw/master/Tutorials/data/XModeScore/1bzc-sf.cif
+
+
+echo "Default MTCS+MTDock"
 mkdir -p "${WORKDIR}/default-MTCS_MTDOCK_MTSCOREE"
 cd "${WORKDIR}/default-MTCS_MTDOCK_MTSCOREE"
 ln -s ../4w7t_ligand.mol2
@@ -39,9 +44,10 @@ CLI_ARGS="4w7t_protein.pdb        \
     -p pdb -v 2 -O -h amberff14sb --np 10"
 #    --mtdock 5,10 opt torsion ligand 100 0.01  \
 
-#${QBHOME}/bin/qmechanic ${CLI_ARGS}
+echo ${QBHOME}/bin/qmechanic ${CLI_ARGS}
+${QBHOME}/bin/qmechanic ${CLI_ARGS}
 
-echo "Default MTDock+Density (MTZ) test"
+echo "Default MTCS+MTDock+Density (MTZ) test"
 mkdir -p "${WORKDIR}/default-MTCS_MTDOCK_MTSCOREE-mtz"
 cd "${WORKDIR}/default-MTCS_MTDOCK_MTSCOREE-mtz"
 ln -s ../4w7t_ligand.mol2
@@ -55,9 +61,10 @@ CLI_ARGS="4w7t_protein.pdb 4w7t_phases.mtz       \
     -p pdb -v 2 -O -h amberff14sb --np 10"
 #    --mtdock 2,3 opt torsion ligand 100 0.01  \
 
+echo ${QBHOME}/bin/qmechanic ${CLI_ARGS}
 ${QBHOME}/bin/qmechanic ${CLI_ARGS}
 
-echo "Default MTDock+Density (SF) test"
+echo "Default MTCS+MTDock+Density (SF-CIF) test"
 mkdir -p "${WORKDIR}/default-MTCS_MTDOCK_MTSCOREE-sf"
 cd "${WORKDIR}/default-MTCS_MTDOCK_MTSCOREE-sf"
 ln -s ../4w7t_ligand.mol2
@@ -71,4 +78,98 @@ CLI_ARGS="4w7t_protein.pdb 4w7t-sf.cif       \
     -p pdb -v 2 -O -h amberff14sb --np 10"
 #    --mtdock 5,10 opt torsion ligand 100 0.01  \
 
-# ${QBHOME}/bin/qmechanic ${CLI_ARGS}
+echo ${QBHOME}/bin/qmechanic ${CLI_ARGS}
+${QBHOME}/bin/qmechanic ${CLI_ARGS}
+
+echo "Default ED+MTDock+Density (MTZ) test"
+mkdir -p "${WORKDIR}/default-ED_MTDOCK_MTSCOREE-mtz"
+cd "${WORKDIR}/default-ED_MTDOCK_MTSCOREE-mtz"
+ln -s ../1bzc+H.pdb
+ln -s ../1bzc.mtz
+CLI_ARGS="1bzc+H.pdb 1bzc.mtz      \
+    --structures [-1..1] /A/TPI/902// \
+   --mtdock opt torsion 15 0.01  \
+    -p pdb -v 2 -O -h amberff14sb --np 10"
+#    --mtdock 2,3 opt torsion pocket 100 0.01  \
+
+echo ${QBHOME}/bin/qmechanic ${CLI_ARGS}
+${QBHOME}/bin/qmechanic ${CLI_ARGS}
+
+echo "Default ED+MTDock+Density (SF-CIF) test"
+mkdir -p "${WORKDIR}/default-ED_MTDOCK_MTSCOREE-sf"
+cd "${WORKDIR}/default-ED_MTDOCK_MTSCOREE-sf"
+ln -s ../1bzc+H.pdb
+ln -s ../1bzc-sf.cif
+CLI_ARGS="1bzc+H.pdb 1bzc-sf.cif      \
+    --structures [-1..1] /A/TPI/902// \
+   --mtdock opt torsion 15 0.01  \
+    -p pdb -v 2 -O -h amberff14sb --np 10"
+#    --mtdock 2,3 opt torsion pocket 100 0.01  \
+
+echo ${QBHOME}/bin/qmechanic ${CLI_ARGS}
+${QBHOME}/bin/qmechanic ${CLI_ARGS}
+
+# now run the ED tests without density to make sure they work
+
+echo "Default ED+MTDock+noDensity test"
+mkdir -p "${WORKDIR}/default-ED_MTDOCK_MTSCOREE"
+cd "${WORKDIR}/default-ED_MTDOCK_MTSCOREE"
+ln -s ../1bzc+H.pdb
+CLI_ARGS="1bzc+H.pdb     \
+    --structures [-1..1] /A/TPI/902// \
+   --mtdock opt torsion 15 0.01  \
+    -p pdb -v 2 -O -h amberff14sb --np 10"
+#    --mtdock 2,3 opt torsion pocket 100 0.01  \
+
+echo ${QBHOME}/bin/qmechanic ${CLI_ARGS}
+${QBHOME}/bin/qmechanic ${CLI_ARGS}
+
+# testing the ED+MTDock+Density cases with density but with --ligand instead of selections
+
+echo "Default ED+MTDock+Density (MTZ) test"
+mkdir -p "${WORKDIR}/default-ED_MTDOCK_MTSCOREE-mtz"
+cd "${WORKDIR}/default-ED_MTDOCK_MTSCOREE-mtz"
+ln -s ../1bzc+H.pdb
+ln -s ../1bzc.mtz
+CLI_ARGS="1bzc+H.pdb 1bzc.mtz      \
+    --ligand /A/TPI/902//       \
+    --structures [-1..1]  \
+   --mtdock opt torsion 15 0.01  \
+    -p pdb -v 2 -O -h amberff14sb --np 10"
+#    --mtdock 2,3 opt torsion pocket 100 0.01  \
+
+echo ${QBHOME}/bin/qmechanic ${CLI_ARGS}
+${QBHOME}/bin/qmechanic ${CLI_ARGS}
+
+echo "Default ED+MTDock+Density (SF-CIF) test"
+mkdir -p "${WORKDIR}/default-ED_MTDOCK_MTSCOREE-sf"
+cd "${WORKDIR}/default-ED_MTDOCK_MTSCOREE-sf"
+ln -s ../1bzc+H.pdb
+ln -s ../1bzc-sf.cif
+CLI_ARGS="1bzc+H.pdb 1bzc-sf.cif      \
+    --ligand /A/TPI/902//       \
+    --structures [-1..1]     \
+   --mtdock opt torsion 15 0.01  \
+    -p pdb -v 2 -O -h amberff14sb --np 10"
+#    --mtdock 2,3 opt torsion pocket 100 0.01  \
+
+echo ${QBHOME}/bin/qmechanic ${CLI_ARGS}
+${QBHOME}/bin/qmechanic ${CLI_ARGS}
+
+# now run the ED tests without density to make sure they work
+
+echo "Default ED+MTDock+noDensity test"
+mkdir -p "${WORKDIR}/default-ED_MTDOCK_MTSCOREE"
+cd "${WORKDIR}/default-ED_MTDOCK_MTSCOREE"
+ln -s ../1bzc+H.pdb
+CLI_ARGS="1bzc+H.pdb     \
+    --ligand /A/TPI/902//       \
+    --structures [-1..1]     \
+   --mtdock opt torsion 15 0.01  \
+    -p pdb -v 2 -O -h amberff14sb --np 10"
+#    --mtdock 2,3 opt torsion pocket 100 0.01  \
+
+echo ${QBHOME}/bin/qmechanic ${CLI_ARGS}
+${QBHOME}/bin/qmechanic ${CLI_ARGS}
+
+
