@@ -94,6 +94,18 @@ wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutori
 
 # C31 chiral atom name in the selection R4B chain A 
 
-qbbuster --pdbFile 4gr0+H.pdb --sfFile 4gr0.mtz --XModeScore --protomers "0" --exploreChiral "C31" --protonation skip --protonateTautomers MOE --makeCIF moe --mmMethod amberff14sb --qmMethod pm6 --qmWeight 3.0 --engine buster --ncycles 1 --nSmallCycles 20 --selection "resname R4B and resid 306 and chain A" --np 32 --buffer-radius 0.0 --region-radius 3.0 --dir xmodeScore_results
+qbbuster --pdbFile 4gr0+H.pdb --sfFile 4gr0.mtz --XModeScore --protomers "0" --exploreChiral "C31" --protonation skip --protonateTautomers MOE --makeCIF moe --mmMethod amberff14sb --qmMethod pm6 --qmWeight 3.0 --engine buster --ncycles 1 --nSmallCycles 20 --selection "resname R4B and resid 306 and chain A" --np 32 --region-radius 3.0 --dir xmodeScore_results
+currentDate=`date`
+echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
+
+echo "Tutorial #5 (running XModeScore with qbbuster execution script on the structure with multiple flips): 3r4p"
+rm -rf ${WORKDIR}/qbbuster_3r4p ; mkdir -p ${WORKDIR}/qbbuster_3r4p ; cd ${WORKDIR}/qbbuster_3r4p
+
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/3r4p+H.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/3r4p.mtz
+
+# C31 chiral atom name in the selection R4B chain A 
+
+qbbuster --pdbFile 3r4p+H.pdb --sfFile 3r4p.mtz --XModeScore --protomers "0" --exploreFLip "N6" --protonation skip --protonateTautomers MOE --makeCIF moe --mmMethod amberff14sb --qmMethod pm6 --qmWeight 3.0 --engine buster --ncycles 1 --nSmallCycles 20 --selection "resname FU7 and resid 901 and chain A" --np 32 --region-radius 3.0 --dir xmodeScore_results
 currentDate=`date`
 echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
