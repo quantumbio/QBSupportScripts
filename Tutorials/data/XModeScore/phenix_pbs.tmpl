@@ -1,0 +1,36 @@
+#!/bin/bash
+
+{$preamble}
+
+# ----------------------------------------------------------------------------------------
+
+# NOTE: the *.tmpl files located in $QBHOME/perl are Perl Text::Template files and therefore
+#       are formatted in a particular manner to be filled in by QuantumBio Perl-based scripts.
+#       They may need to be "tuned" to your environment.
+
+#PBS -S /bin/bash
+#PBS -l nodes=1:ppn={$ppn}
+#PBS -l mem={$mem}mb
+#PBS -l walltime=10:00:00 
+#PBS -j oe
+
+# ----------------------------------------------------------------------------------------
+# Update scratch path for local environment
+cd /net/`hostname -s`/scratch/$USER
+
+# Update the QBHOME & PHENIX paths to be set for cluster locations
+source {$QBHOME}
+source {$PROGRAM}
+# ----------------------------------------------------------------------------------------
+
+mkdir $PBS_JOBID ; cd $PBS_JOBID
+cp $PBS_O_WORKDIR/*.* .
+cp -r $PBS_O_WORKDIR/ligandsCIF* .
+
+{$phenix_cl}
+
+#cp *refine*.* $PBS_O_WORKDIR/
+#cp *.log $PBS_O_WORKDIR/
+#cp *.h5 $PBS_O_WORKDIR/
+#cp *.ccp4 $PBS_O_WORKDIR/
+cp -r * $PBS_O_WORKDIR/
