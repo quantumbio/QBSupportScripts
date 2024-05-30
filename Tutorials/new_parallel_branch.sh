@@ -17,7 +17,7 @@ WORKDIR=${PWD}
 #   * Since we know where we are docking, the "blobs" keyword is unnecessary.
 
 echo "Tutorial #1a-pdb: Automated DivCon-based Docking – using qmechanic and XModeScore"
-dir4=xmodeScore_autoDock
+dir4=XModeScore-dock_ONIOM
 rm -rf ${WORKDIR}/$dir4 ; mkdir -p ${WORKDIR}/$dir4 ; cd ${WORKDIR}/$dir4
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.pdb
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.mtz
@@ -38,7 +38,7 @@ ${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   \   # input files. Since
         >& OUT.SCREEN
 
 echo "Tutorial #1a-mol2: Automated DivCon-based Docking – using qmechanic and XModeScore"
-dir4=xmodeScore_autoDock
+dir4=XModeScore-dock_MM
 rm -rf ${WORKDIR}/$dir4 ; mkdir -p ${WORKDIR}/$dir4 ; cd ${WORKDIR}/$dir4
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.pdb
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.mtz
@@ -58,7 +58,7 @@ ${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   \   # input files. Since
         >& OUT.SCREEN
 
 echo "Tutorial #1b: Automated DivCon-based Docking – using qmechanic and EndState MTScore"
-dir4=xmodeScore_autoDock
+dir4=MTDock-MTScore_garf
 rm -rf ${WORKDIR}/$dir4 ; mkdir -p ${WORKDIR}/$dir4 ; cd ${WORKDIR}/$dir4
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.pdb
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.mtz
@@ -70,7 +70,7 @@ ${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   \   # input files. Since
     --mtcs 1SD LIGAND opt torsion 100 1e-3              \   # Generate conformers [using MTCS] for selected ligand (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform torsion opt
     --rotamers all                                      \   # Enumerate all rotomers (flip states) available in LIGAND
     --stereoisomers all                                 \   # Enumerate all stereoisomers (chiral centers) available in LIGAND
-    --dock 5,1SD opt torsion SITE 100 0.01              \   # Dock the top 5 poses/enumerations from above and refine/optimize the entire site during placement, keep the top 1 standard deviation of refined sets to pass to MTScore.
+    --mtdock 5,1SD opt torsion SITE 100 0.01            \   # Dock the top 5 poses/enumerations from above and refine/optimize the entire site during placement, keep the top 1 standard deviation of refined sets to pass to MTScore.
     --protomers off                                     \   # DONT Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target
     --MTScore opt POCKET EndState                       \   # Use MTScore EndState to decide the final "winners" and "losers"
     --np 8  -v 2                                        \   # All refinements and all scoring happen in parallel
@@ -78,18 +78,19 @@ ${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   \   # input files. Since
         >& OUT.SCREEN
 
 echo "Tutorial #1c: Automated DivCon-based Docking – using qmechanic and Ensemble MTScore"
-dir4=xmodeScore_autoDock
+dir4=MTDock-MTScore_amberff14sb
 rm -rf ${WORKDIR}/$dir4 ; mkdir -p ${WORKDIR}/$dir4 ; cd ${WORKDIR}/$dir4
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.pdb
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.mtz
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4XF_A_402.pdb
 
 ${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   \   # input files. Since MTZ file is provided, it is understood that density docking will be used
+    -h amberff14sb                                      \   # This is going to be an MT calculation so as always: MM-amberff14sb used for all optimizations and AMBERff14sb for all MT calculations.
     --ligand 4XF_A_402.pdb                              \   # This is a placed ligand so no novel compound required. 
     --confSearch 1SD LIGAND opt torsion 100 1e-3        \   # Generate conformers [using MTCS] for selected ligand (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform torsion opt
     --rotamers all                                      \   # Enumerate all rotomers (flip states) available in LIGAND
     --stereoisomers all                                 \   # Enumerate all stereoisomers (chiral centers) available in LIGAND
-    --dock 5,1SD opt torsion SITE 100 0.01              \   # Dock the top 5 poses/enumerations from above and refine/optimize the entire site during placement, keep the top 1 standard deviation of refined sets.
+    --mtdock 5,1SD opt torsion SITE 100 0.01            \   # Dock the top 5 poses/enumerations from above and refine/optimize the entire site during placement, keep the top 1 standard deviation of refined sets.
     --protomers all [-1..1]                             \   # Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target
     --MTScore opt all Ensemble                          \    # Use MTScore Ensemble across the entire ensemble of protein/ligand complexes generated.
     --np 8  -v 2                                        \   # All refinements and all scoring happen in parallel
