@@ -34,7 +34,8 @@ fi
 currentDate=`date`
 echo "BEGIN Workshop 2003 Tutorials at ${currentDate} using ${DIVCON_BIN}"
 
-qbExec=qbphenix
+#qbExec=qbphenix
+qbExec=qbdivcon
 cloud=""
 WORKDIR=$PWD
 if [ ! -z "${GRID_MARKETS}" ]; then 
