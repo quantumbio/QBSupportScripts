@@ -78,7 +78,7 @@ ${DIVCON_BIN} Bace_030215.pdb --ligand Bace_030215_CAT_4p.mol2 --mtcs input  -h 
 
 moebatch -licwait -run "${QBHOME}/svl/run/qbDockPair.svl" -rec Bace_030215.pdb -lig Bace_030215_CAT_4p.mol2 -conf Bace_030215_CAT_4p_conf.sdf -protonate -delwat
 
-${DIVCON_BIN} Bace_030215.pdb --ligand Bace_030215_CAT_4p.mol2 -h amberff14sb --mtdock Bace_030215_CAT_4p_dock.sdf --mtscore ensemble --np 4 -v 2
+${DIVCON_BIN} Bace_030215.pdb --ligand Bace_030215_CAT_4p.mol2 -h amberff14sb --mtdock Bace_030215_CAT_4p_dock.sdf --mtscore ensemble --np 4 -v 2 -O
 
 echo "Forth Tutorial: 2Step MTScoreE with an External Docker (no-MTCS)"
 rm -rf ${WORKDIR}/2Step ; mkdir -p ${WORKDIR}/2Step ; cd ${WORKDIR}/2Step
