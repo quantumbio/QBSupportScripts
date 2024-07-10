@@ -7,8 +7,14 @@ if [ -z ${PBS_NUM_PPN} ]; then export PBS_NUM_PPN=10; fi
 
 # Multi-ligand example: CMET from MCompChem benchmark https://github.com/MCompChem/fep-benchmark/tree/master/cmet
 
-export MOE_INSTALL=/share/apps/MOE/moe2020.0901
-export DIVCON_INSTALL=/home/lance/Release/DivConDiscoverySuite-2022-b4882
+if [ -z "${QBHOME}" ]; then
+    echo "ERROR: QBHOME is not set! Must set the QBHOME environment variable THEN call this function"
+    exit
+fi
+
+export DIVCON_INSTALL=${QBHOME}
+
+export MOE_INSTALL=/share/apps/MOE/current
 export MOE_SVL=${DIVCON_INSTALL}/svl/run/qbDockPair.svl
 
 # support function
