@@ -69,7 +69,7 @@ ${DIVCON_BIN} 1LRI-addH.pdb -h pm6 amberff14sb --opt 25 0.01 --qm-region /A/CLR/
 echo "Sixth Tutorial: Protonation"
 rm -rf ${WORKDIR}/Protonation ; mkdir -p ${WORKDIR}/Protonation ; cd ${WORKDIR}/Protonation
 
-${DIVCON_BIN} 4EK4 --prepare --np 8 -v 2 -p pdb
+${DIVCON_BIN} 4EK4 --prepare --np 8 -v 2 -p pdb -h amberff14sb
 
 currentDate=`date`
 echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
