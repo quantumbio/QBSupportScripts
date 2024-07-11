@@ -62,7 +62,7 @@ rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/CryoEM/7jsy+H.pdb
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/CryoEM/emd_22463.map
 
-$QBHOME/bin/qbdivcon --pdbfile 7jsy+H.pdb --sfFile emd_22463.map --experiment cryoEM --resolution 1.8 --XmodeScore --protomers "0" --exploreFlip --protonation skip  --engine divcon --qmMethod pm6 --mmMethod amberff14sb --resname I3C --chain A --resid 501 --np 16 --region-radius 3.0 --nSmallCycles 40 --dir testXmode
+$QBHOME/bin/qbdivcon --pdbfile 7jsy+H.pdb --sfFile emd_22463.map --experiment cryoEM --resolution 1.8 --XmodeScore --protomers "-1..1" --exploreFlip --protonation skip  --engine divcon --qmMethod pm6 --mmMethod amberff14sb --resname I3C --chain A --resid 501 --np 16 --region-radius 3.0 --nSmallCycles 40 --dir testXmode
 #
 
 currentDate=`date`
