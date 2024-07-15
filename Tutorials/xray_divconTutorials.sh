@@ -79,5 +79,15 @@ wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutori
 
 $QBHOME/bin/qbphenix --pdbFile 1bzc+H.pdb --sfFile 1bzc.mtz --XmodeScore --protonation Skip --protomers "0" --exploreFlip --exploreChiral --exploreDocking --engine divcon --protonateTautomers divcon --qmMethod pm6 --mmMethod amberff14sb --nSmallCycles 40 --region-radius 3.0 --selection "resname TPI and resid 902 and chain A" --dir testXmode --Nproc 16
 
+echo "Tutorial #6: Multi-Blob Docking PDBid:4o9s"
+tutorFolder=multiBlob_4o9s
+rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/Dock/4o9s+HnL5.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/Dock/4o9s_lig.mol2
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/Dock/4o9s.mtz
+export QB_FIX_METAL_CHARGES=1
+
+$QBHOME/bin/qmechanic 4o9s+HnL5.pdb 4o9s.mtz --ligand blobs 4o9s_lig.mol2 -h amberff14sb --np 2 -v2 --dock opt rigid >test2.log
+
 currentDate=`date`
 echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
