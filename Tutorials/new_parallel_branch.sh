@@ -72,7 +72,7 @@ ${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   `# input files. Since MT
     --chirality all                                     `# Enumerate all stereoisomers (chiral centers) available in LIGAND`        \
     --mtdock 5,1SD opt torsion POCKET 100 0.01          `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site after placement, keep the top 1 standard deviation of refined sets to pass to MTScore.`        \
     --protomers off                                     `# DONT Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target`      \
-    --mtscore opt POCKET EndState                       `# Use MTScore EndState to decide the final "winners" and "losers"`     \
+    --mtscore endstate                                  `# Use MTScore EndState to decide the final "winners" and "losers"`     \
     --np 8  -v 2                                        `# All refinements and all scoring happen in parallel`              \
     -p 5C3K-out.mol2 5C3K-out.mtz                       `# There should be a MOL2 and MTZ file for each refined/scored case from MTScore. Should be called: 5C3K-out_pose-1.mol2 5C3K-out_pose-1.mtz, 5C3K-out_pose-2.mol2 5C3K-out_pose-2.mtz etc (note: the pose-# should equal the number in the Pose Scoring Table in the screen output and the MTScore terms should be stored in the mol2 file)`       \
         >& OUT.SCREEN
@@ -92,7 +92,7 @@ ${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   `# input files. Since MT
     --chirality all                                     `# Enumerate all stereoisomers (chiral centers) available in LIGAND`    \
     --mtdock 5,1SD opt torsion POCKET 100 0.01          `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site after placement, keep the top 1 standard deviation of refined sets.`   \
     --protomers all [-1..1]                             `# Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target`       \
-    --mtscore opt all Ensemble                          `# Use MTScore Ensemble across the entire ensemble of protein/ligand complexes generated.`      \
+    --mtscore ensemble                                  `# Use MTScore Ensemble across the entire ensemble of protein/ligand complexes generated.`      \
     --np 8  -v 2                                        `# All refinements and all scoring happen in parallel`      \
     -p 5C3K-out.mol2 5C3K-out.mtz                       `# There should be a MOL2 and MTZ file for each refined/scored case from MTScore. Should be called: 5C3K-out_pose-1.mol2 5C3K-out_pose-1.mtz, 5C3K-out_pose-2.mol2 5C3K-out_pose-2.mtz etc (note: the pose-# should equal the number in the Pose Scoring Table in the screen output and the MTScore terms should be stored in the mol2 file)`       \
         >& OUT.SCREEN
