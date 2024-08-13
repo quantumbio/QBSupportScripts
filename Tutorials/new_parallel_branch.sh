@@ -27,10 +27,10 @@ ${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   `# input files. Since MT
     -h amberff14sb pm6                                  `# Use AMBERFF14SB for all MM and PM6 for all QM. For v1: all steps up to XModeScore should be done with MM and final XModeScore should be done with QM/MM`             \
     --ligand 4XF_A_402.pdb                              `# This is a placed ligand so no novel compound required. The novel compound (if provided) is the LIGAND in any subsequent steps which uses the LIGAND keyword.`        \
     --qm-region LIGAND,/A/ZN/401// 3.0 0                `# The QM region in ONIOM. Note: for v1, all steps up to XModeScore should be done with MM and final XModeScore should be done with QM/MM. `                            \
-    --confSearch LIGAND opt off                         `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform torsion opt`                \
+    --confSearch LIGAND opt off                         `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform no opt on conformer`                \
     --flip all                                          `# Enumerate all rotomers (flip states) available in LIGAND`                                                                                                            \
     --chirality all                                     `# Enumerate all stereoisomers (chiral centers) available in LIGAND`                                                                                                    \
-    --dock 5,1SD opt torsion POCKET 100 0.01            `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site during placement (using MM), keep the top 1 standard deviation of refined sets.`    \
+    --dock 5,1SD opt torsion POCKET 100 0.01            `# Dock the top 5 poses/enumerations from confSearch and refine/optimize the entire site after placement (using MM), keep the top 1 standard deviation of refined sets.`    \
     --protomers all [-1..1]                             `# Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target.`                                                  \
     --xmodescore opt all                                `# Use XModeScore to decide the final "winners" and "losers." If --qm-region and -h amberff14sb pm6 set, use QM/MM refinement of the target+ligand for XModeScore.`     \
     --np 8  -v 2                                        `# All refinements and all scoring happen in parallel. Verbosity=2 should be clean. Verbosity=3 should just have a bit more debug information but should still be fairly clean.`    \
@@ -47,10 +47,10 @@ wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutori
 ${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   `# input files. Since MTZ file is provided, it is understood that density docking will be used`     \
     -h amberff14sb                                      `# Use AMBERFF14SB for all MM. Since no PM6 is requested & no region is set, all calculations (including XModeScore) should be done with MM only.`      \
     --ligand 4XF_A_402.pdb                              `# This is a placed ligand so no novel compound required. `     \
-    --confSearch LIGAND opt off                         `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform torsion opt`        \
+    --confSearch LIGAND opt off                         `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform no opt on conformer`        \
     --flip off                                          `# DONT Enumerate all rotomers (flip states) available in LIGAND`       \
     --chirality off                                     `# DONE Enumerate all stereoisomers (chiral centers) available in LIGAND`   \
-    --dock 5,1SD opt torsion LIGAND 100 0.01            `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site during placement, keep the top 1 standard deviation of refined sets to pass to XModeScore.` \
+    --dock 5,1SD opt torsion LIGAND 100 0.01            `# Dock the top 5 poses/enumerations from confSearch and refine/optimize the ligand after placement, keep the top 1 standard deviation of refined sets to pass to XModeScore.` \
     --protomers all [-1..1]                             `# Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target`       \
     --xmodescore opt POCKET                             `# Use XModeScore to decide the final "winners" and "losers." Only optimize the POCKET+LIGAND and not the whole target+ligand.`     \
     --np 8  -v 2                                        `# All refinements and all scoring happen in parallel`      \
@@ -67,10 +67,10 @@ wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutori
 ${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   `# input files. Since MTZ file is provided, it is understood that density docking will be used`     \
     -h garf                                             `# This is going to be an MT calculation so as always: MM-amberff14sb used for all optimizations and GARF for all MT calculations.`     \
     --ligand 4XF_A_402.pdb                              `# This is a placed ligand so no novel compound required. `     \
-    --mtcs LIGAND opt off                               `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform torsion opt`    \
+    --mtcs LIGAND opt off                               `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform no opt on conformer`    \
     --flip all                                          `# Enumerate all rotomers (flip states) available in LIGAND`        \
     --chirality all                                     `# Enumerate all stereoisomers (chiral centers) available in LIGAND`        \
-    --mtdock 5,1SD opt torsion SITE 100 0.01            `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site during placement, keep the top 1 standard deviation of refined sets to pass to MTScore.`        \
+    --mtdock 5,1SD opt torsion POCKET 100 0.01          `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site after placement, keep the top 1 standard deviation of refined sets to pass to MTScore.`        \
     --protomers off                                     `# DONT Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target`      \
     --mtscore opt POCKET EndState                       `# Use MTScore EndState to decide the final "winners" and "losers"`     \
     --np 8  -v 2                                        `# All refinements and all scoring happen in parallel`              \
@@ -87,10 +87,10 @@ wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutori
 ${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   `# input files. Since MTZ file is provided, it is understood that density docking will be used`     \
     -h amberff14sb                                      `# This is going to be an MT calculation so as always: MM-amberff14sb used for all optimizations and AMBERff14sb for all MT calculations.`  \
     --ligand 4XF_A_402.pdb                              `# This is a placed ligand so no novel compound required. ` \
-    --confSearch LIGAND opt off                         `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform torsion opt`    \
+    --confSearch LIGAND opt off                         `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform no opt on conformer`    \
     --flip all                                          `# Enumerate all rotomers (flip states) available in LIGAND`        \
     --chirality all                                     `# Enumerate all stereoisomers (chiral centers) available in LIGAND`    \
-    --mtdock 5,1SD opt torsion SITE 100 0.01            `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site during placement, keep the top 1 standard deviation of refined sets.`   \
+    --mtdock 5,1SD opt torsion POCKET 100 0.01          `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site after placement, keep the top 1 standard deviation of refined sets.`   \
     --protomers all [-1..1]                             `# Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target`       \
     --mtscore opt all Ensemble                          `# Use MTScore Ensemble across the entire ensemble of protein/ligand complexes generated.`      \
     --np 8  -v 2                                        `# All refinements and all scoring happen in parallel`      \
@@ -111,10 +111,10 @@ ${DIVCON} 5C3K-refined.pdb  5C3K-refined.mtz -O         `# Use the prepared file
     -h amberff14sb pm6                                  `# Use AMBERFF14SB for all MM and PM6 for all QM. For v1: all steps up to XModeScore should be done with MM and final XModeScore should be done with QM/MM`     \
     --ligand /A/4XF/402//                               `# Run on the selection (not a supplied ligand file).`      \
     --qm-region LIGAND,/A/ZN/401// 3.0 0                `# The QM region in ONIOM. Note: for v1, all steps up to XModeScore should be done with MM and final XModeScore should be done with QM/MM. `        \
-    --confSearch LIGAND opt off                         `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform torsion opt`        \
+    --confSearch LIGAND opt off                         `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform no opt on conformer`        \
     --flip all                                          `# Enumerate all rotomers (flip states) available in LIGAND`        \
     --chirality all                                     `# Enumerate all stereoisomers (chiral centers) available in LIGAND`        \
-    --dock 5,1SD opt torsion POCKET 100 0.01            `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site during placement (using MM), keep the top 1 standard deviation of refined sets.`        \
+    --dock 5,1SD opt torsion POCKET 100 0.01            `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site after placement (using MM), keep the top 1 standard deviation of refined sets.`        \
     --protomers all [-1..1]                             `# Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target.`      \
     --xmodescore opt all                                `# Use XModeScore to decide the final "winners" and "losers." If --qm-region and -h amberff14sb pm6 set, use QM/MM refinement of the target+ligand for XModeScore.`     \
     --np 8  -v 2                                        `# All refinements and all scoring happen in parallel. Verbosity=2 should be clean. Verbosity=3 should just have a bit more debug information but should still be fairly clean.`        \
