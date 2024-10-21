@@ -1,5 +1,3 @@
-#   Written October 2024 - Lance Westerhoff w/help of ChatGPT
-#
 #  /***********************************************************************
 #     Copyright (c) 2024 QuantumBio Inc. and/or its affiliates.
 # 	
@@ -58,6 +56,7 @@ import hashlib
 import string
 import importlib.resources
 import mdtraj as md
+import time
 
 # Load the Amber topology and coordinate files
 prmtopFile = sys.argv[1]
@@ -347,13 +346,21 @@ t.image_molecules(inplace=True,make_whole=True)
 t.save_pdb('minimized_with_unique_residues.pdb')
 os.remove("tmp.pdb")
 
+print ('Equilibrating (NVT)....')
+start_time = time.time()
 simulation.step(50000)  # NVT equilibration, adjust steps as needed
 #simulation.step(5000)  # NVT equilibration, adjust steps as needed
+elapsed_time = time.time() - start_time
+print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
+print ('Equilibrating (NPT)....')
 system.addForce(mm.MonteCarloBarostat(1*unit.atmospheres, 300*unit.kelvin, 25))
 simulation.context.reinitialize(preserveState=True)
+start_time = time.time()
 simulation.step(100000)  # NPT equilibration
 #simulation.step(10000)  # NPT equilibration
+elapsed_time = time.time() - start_time
+print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
 positions = simulation.context.getState(getPositions=True,enforcePeriodicBox=True).getPositions()
 app.PDBFile.writeFile(simulation.topology, positions, open('tmp.pdb', 'w'))
@@ -362,18 +369,19 @@ t.image_molecules(inplace=True,make_whole=True)
 t.save_pdb('equilibrated_with_NVT+NPT.pdb')
 os.remove("tmp.pdb")
 
-
 simulation.context.setVelocitiesToTemperature(300*unit.kelvin)
-
 simulation.reporters.append(app.PDBReporter('output.pdb', 1000))
-simulation.reporters.append(app.StateDataReporter(sys.stdout, 1000, step=True,
-        potentialEnergy=True, temperature=True))
-simulation.reporters.append(app.StateDataReporter('energies.csv', 1000, step=True,
-        potentialEnergy=True, temperature=True))
+simulation.reporters.append(app.StateDataReporter(sys.stdout, 1000, step=True, potentialEnergy=True, temperature=True))
+simulation.reporters.append(app.StateDataReporter('energies.csv', 1000, step=True, potentialEnergy=True, temperature=True))
 simulation.reporters.append(app.DCDReporter('output.dcd', 1000))
+
+print ('Running Production Simulation....')
+start_time = time.time()
 #simulation.step(1000000)    # 2ns
 simulation.step(500000)    # 1ns
 #simulation.step(100000)
+elapsed_time = time.time() - start_time
+print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
 positions = simulation.context.getState(getPositions=True,enforcePeriodicBox=True).getPositions()
 app.PDBFile.writeFile(simulation.topology, positions, open('tmp.pdb', 'w'))
