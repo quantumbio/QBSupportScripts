@@ -389,11 +389,25 @@ t.image_molecules(inplace=True,make_whole=True)
 t.save_pdb('final-1ns.pdb')
 os.remove("tmp.pdb")
 
-sys.exit()
-
 t = md.load('output.pdb')
 print (t)
 t.image_molecules(inplace=True,make_whole=True)
 print (t)
 
 t.save_pdb('trajectory.pdb')
+os.remove("output.pdb")
+
+import gzip
+import shutil
+
+# Compress the large trajectory files
+print(f"Compressiong output.dcd...")
+with open('output.dcd', 'rb') as f_in:
+    with gzip.open('output.dcd.gz', 'wb', compresslevel=9) as f_out:
+        shutil.copyfileobj(f_in, f_out)
+
+# Compress the large trajectory files
+print(f"Compressiong trajectory.pdb...")
+with open('trajectory.pdb', 'rb') as f_in:
+    with gzip.open('trajectory.pdb.gz', 'wb', compresslevel=9) as f_out:
+        shutil.copyfileobj(f_in, f_out)
