@@ -296,9 +296,8 @@ else:
 
 forcefield = app.ForceField('amber14/tip3pfb.xml','complete_forcefield_with_unique_residues.xml')
 
-# Use Modeller to delete existing waters
+# Use Modeller to create a waterbox
 modeller = app.Modeller(prmtop.topology, inpcrd.positions)
-#modeller.deleteWater()
 
 # Create box dimensions with padding
 padding = 1.0 * unit.nanometers  # Example padding
