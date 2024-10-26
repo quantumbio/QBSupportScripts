@@ -332,11 +332,14 @@ simulation = app.Simulation(modeller.topology, system, integrator)
 
 # Set initial positions from Amber coordinates
 simulation.context.setPositions(modeller.positions)
-#simulation.context.setPositions(inpcrd.positions)
 
 # Minimize energy
-print('Minimizing...')
-simulation.minimizeEnergy(maxIterations=5000)
+nsteps = 5000
+print(f'Minimizing {nsteps} steps ...', flush=True)
+start_time = time.time()
+simulation.minimizeEnergy(maxIterations=nsteps)
+elapsed_time = time.time() - start_time
+print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
 positions = simulation.context.getState(getPositions=True,enforcePeriodicBox=True).getPositions()
 app.PDBFile.writeFile(simulation.topology, positions, open('tmp.pdb', 'w'))
@@ -345,19 +348,19 @@ t.image_molecules(inplace=True,make_whole=True)
 t.save_pdb('minimized_with_unique_residues.pdb')
 os.remove("tmp.pdb")
 
-print ('Equilibrating (NVT)....')
+nsteps = 100000
+print (f'Equilibrating (NVT) - {nsteps * 0.002} ps ....', flush=True)
 start_time = time.time()
-simulation.step(50000)  # NVT equilibration, adjust steps as needed
-#simulation.step(5000)  # NVT equilibration, adjust steps as needed
+simulation.step(nsteps)  # NVT equilibration
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
-print ('Equilibrating (NPT)....')
+nsteps = 100000
+print (f'Equilibrating (NPT) - {nsteps * 0.002} ps ....', flush=True)
 system.addForce(mm.MonteCarloBarostat(1*unit.atmospheres, 300*unit.kelvin, 25))
 simulation.context.reinitialize(preserveState=True)
 start_time = time.time()
-simulation.step(100000)  # NPT equilibration
-#simulation.step(10000)  # NPT equilibration
+simulation.step(nsteps)  # NPT equilibration
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
@@ -368,17 +371,16 @@ t.image_molecules(inplace=True,make_whole=True)
 t.save_pdb('equilibrated_with_NVT+NPT.pdb')
 os.remove("tmp.pdb")
 
+nsteps = 1000000
+report_interval = min(nsteps,1000)
 simulation.context.setVelocitiesToTemperature(300*unit.kelvin)
-simulation.reporters.append(app.PDBReporter('output.pdb', 1000))
-simulation.reporters.append(app.StateDataReporter(sys.stdout, 1000, step=True, potentialEnergy=True, temperature=True))
-simulation.reporters.append(app.StateDataReporter('energies.csv', 1000, step=True, potentialEnergy=True, temperature=True))
-simulation.reporters.append(app.DCDReporter('output.dcd', 1000))
-
-print ('Running Production Simulation....')
+simulation.reporters.append(app.PDBReporter('output.pdb', report_interval))
+simulation.reporters.append(app.StateDataReporter(sys.stdout, report_interval, step=True, potentialEnergy=True, temperature=True))
+simulation.reporters.append(app.StateDataReporter('energies.csv', report_interval, step=True, potentialEnergy=True, temperature=True))
+simulation.reporters.append(app.DCDReporter('output.dcd', report_interval))
+print (f'Running Production NPT Simulation - {nsteps * 0.002} ps ....', flush=True)
 start_time = time.time()
-#simulation.step(1000000)    # 2ns
-simulation.step(500000)    # 1ns
-#simulation.step(100000)
+simulation.step(nsteps)
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
@@ -386,14 +388,14 @@ positions = simulation.context.getState(getPositions=True,enforcePeriodicBox=Tru
 app.PDBFile.writeFile(simulation.topology, positions, open('tmp.pdb', 'w'))
 t = md.load('tmp.pdb')
 t.image_molecules(inplace=True,make_whole=True)
-t.save_pdb('final-1ns.pdb')
+filename = f'final-{nsteps * 0.002}ps.pdb'  # Format to one decimal place
+t.save_pdb(filename)
 os.remove("tmp.pdb")
 
 t = md.load('output.pdb')
 print (t)
 t.image_molecules(inplace=True,make_whole=True)
 print (t)
-
 t.save_pdb('trajectory.pdb')
 os.remove("output.pdb")
 
@@ -422,3 +424,6 @@ thread1.join()
 thread2.join()
 
 print("Both files compressed successfully.")
+os.remove("output.dcd")
+os.remove("trajectory.pdb")
+
