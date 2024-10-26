@@ -399,15 +399,26 @@ os.remove("output.pdb")
 
 import gzip
 import shutil
+import threading
 
-# Compress the large trajectory files
-print(f"Compressiong output.dcd...")
-with open('output.dcd', 'rb') as f_in:
-    with gzip.open('output.dcd.gz', 'wb', compresslevel=9) as f_out:
-        shutil.copyfileobj(f_in, f_out)
+# Function to compress a file
+def compress_file(input_filename, output_filename):
+    print(f"Compressing {input_filename}...")
+    with open(input_filename, 'rb') as f_in:
+        with gzip.open(output_filename, 'wb', compresslevel=9) as f_out:
+            shutil.copyfileobj(f_in, f_out)
+    print(f"{input_filename} compressed to {output_filename}.")
 
-# Compress the large trajectory files
-print(f"Compressiong trajectory.pdb...")
-with open('trajectory.pdb', 'rb') as f_in:
-    with gzip.open('trajectory.pdb.gz', 'wb', compresslevel=9) as f_out:
-        shutil.copyfileobj(f_in, f_out)
+# Create threads for each compression task
+thread1 = threading.Thread(target=compress_file, args=('output.dcd', 'output.dcd.gz'))
+thread2 = threading.Thread(target=compress_file, args=('trajectory.pdb', 'trajectory.pdb.gz'))
+
+# Start both threads
+thread1.start()
+thread2.start()
+
+# Wait for both threads to complete
+thread1.join()
+thread2.join()
+
+print("Both files compressed successfully.")
