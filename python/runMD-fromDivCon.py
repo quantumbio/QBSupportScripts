@@ -118,6 +118,9 @@ for residue in prmtop.residues:
         # Assign a unique identifier (A, B, C, etc.) per residue type
         unique_residue_code = alphabet[residue_counters[residue_type] % len(alphabet)]
         unique_residue_name = residue_type + unique_residue_code
+
+        # Print Chain, Residue Name, and Residue UID information
+        print(f"New unique residue {unique_residue_name}: Chain {residue.chain}, Name {residue.name}, UID {residue.idx}")
         
         # Save the unique fingerprint and name
         unique_bond_fingerprints[(residue_type, bond_fingerprint)] = unique_residue_name
@@ -391,6 +394,8 @@ t.image_molecules(inplace=True,make_whole=True)
 filename = f'final-{nsteps * 0.002}ps.pdb'  # Format to one decimal place
 t.save_pdb(filename)
 os.remove("tmp.pdb")
+
+sys.exit()
 
 t = md.load('output.pdb')
 print (t)
