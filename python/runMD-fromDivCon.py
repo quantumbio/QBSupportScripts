@@ -106,12 +106,22 @@ residue_counters = {res_type: 0 for res_type in unique_residue_types}
 # Initialize a mapping of unique names back to original names
 original_residue_names = {}
 
+# Initialize counter
+counter = 0
+
 # Loop through all residues and analyze their bonding patterns for all residue types
 for residue in prmtop.residues:
     residue_type = residue.name
 
     # Generate the bond fingerprint for this residue
     bond_fingerprint = generate_bond_fingerprint(residue)
+    
+    # Retrieve chain ID from the first atom in the residue
+    chain_id = residue.atoms[0].tree if residue.atoms else 'Unknown'
+    if chain_id == "BLA":
+        # Convert counter to a letter
+        code = chr(ord('A') + (counter % 26))
+        counter += 1
 
     # Check if we have seen this bonding pattern before for the specific residue type
     if (residue_type, bond_fingerprint) not in unique_bond_fingerprints:
@@ -120,7 +130,7 @@ for residue in prmtop.residues:
         unique_residue_name = residue_type + unique_residue_code
 
         # Print Chain, Residue Name, and Residue UID information
-        print(f"New unique residue {unique_residue_name}: Chain {residue.chain}, Name {residue.name}, UID {residue.idx}")
+        print(f"New unique residue {unique_residue_name}: Chain {code}, Name {residue.name}, UID {residue.idx}")
         
         # Save the unique fingerprint and name
         unique_bond_fingerprints[(residue_type, bond_fingerprint)] = unique_residue_name
@@ -335,6 +345,8 @@ simulation = app.Simulation(modeller.topology, system, integrator)
 
 # Set initial positions from Amber coordinates
 simulation.context.setPositions(modeller.positions)
+
+#sys.exit()
 
 # Minimize energy
 nsteps = 5000
