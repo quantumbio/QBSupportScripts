@@ -46,8 +46,18 @@ rmsf_2 = np.sqrt(np.mean((trajectory_2.xyz[:, ca_indices_2, :] - np.mean(traject
 rmsf_per_residue_1 = np.sqrt(np.sum(rmsf_1**2, axis=1))
 rmsf_per_residue_2 = np.sqrt(np.sum(rmsf_2**2, axis=1))
 
+# Calculate average and standard deviation
+avg_rmsf_1 = np.mean(rmsf_per_residue_1)
+std_rmsf_1 = np.std(rmsf_per_residue_1)
+avg_rmsf_2 = np.mean(rmsf_per_residue_2)
+std_rmsf_2 = np.std(rmsf_per_residue_2)
+
 # Kolmogorov-Smirnov test on RMSF values
 ks_stat_rmsf, p_value_rmsf = ks_2samp(rmsf_per_residue_1, rmsf_per_residue_2)
+
+# Report results
+print(f"Trajectory 1: Average RMSF = {avg_rmsf_1:.3f}, Standard Deviation = {std_rmsf_1:.3f}")
+print(f"Trajectory 2: Average RMSF = {avg_rmsf_2:.3f}, Standard Deviation = {std_rmsf_2:.3f}")
 print(f"K-S test for RMSF: D = {ks_stat_rmsf}, p-value = {p_value_rmsf}")
 
 # Plot RMSF for both trajectories
@@ -78,6 +88,8 @@ plt.ylabel('Radius of Gyration (nm)')
 plt.title(f'Radius of Gyration Over Time\nK-S test p-value: {p_value_rg:.4f}')
 plt.legend()
 plt.savefig('rg_comparison.pdf', dpi=300, bbox_inches='tight')
+
+sys.exit()
 
 # ---------------------------------------
 # Compute Secondary Structure (DSSP) for both trajectories
