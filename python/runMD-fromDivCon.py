@@ -124,7 +124,7 @@ for residue in prmtop.residues:
         counter += 1
 
     # Check if we have seen this bonding pattern before for the specific residue type
-    if (residue_type, bond_fingerprint) not in unique_bond_fingerprints:
+    if (residue_type, bond_fingerprint) not in unique_bond_fingerprints or residue.name == "PO4":
         # Assign a unique identifier (A, B, C, etc.) per residue type
         unique_residue_code = alphabet[residue_counters[residue_type] % len(alphabet)]
         unique_residue_name = residue_type + unique_residue_code
@@ -346,10 +346,9 @@ simulation = app.Simulation(modeller.topology, system, integrator)
 # Set initial positions from Amber coordinates
 simulation.context.setPositions(modeller.positions)
 
-#sys.exit()
-
 # Minimize energy
-nsteps = 5000
+#nsteps = 5000
+nsteps = 100
 print(f'Minimizing {nsteps} steps ...', flush=True)
 start_time = time.time()
 simulation.minimizeEnergy(maxIterations=nsteps)
@@ -363,14 +362,16 @@ t.image_molecules(inplace=True,make_whole=True)
 t.save_pdb('minimized_with_unique_residues.pdb')
 os.remove("tmp.pdb")
 
-nsteps = 100000
+#nsteps = 100000
+nsteps = 1
 print (f'Equilibrating (NVT) - {nsteps * 0.002} ps ....', flush=True)
 start_time = time.time()
 simulation.step(nsteps)  # NVT equilibration
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
-nsteps = 100000
+#nsteps = 100000
+nsteps = 1
 print (f'Equilibrating (NPT) - {nsteps * 0.002} ps ....', flush=True)
 system.addForce(mm.MonteCarloBarostat(1*unit.atmospheres, 300*unit.kelvin, 25))
 simulation.context.reinitialize(preserveState=True)
@@ -386,10 +387,11 @@ t.image_molecules(inplace=True,make_whole=True)
 t.save_pdb('equilibrated_with_NVT+NPT.pdb')
 os.remove("tmp.pdb")
 
-nsteps = 1000000
+#nsteps = 1000000
+nsteps = 1
 report_interval = min(nsteps,1000)
 simulation.context.setVelocitiesToTemperature(300*unit.kelvin)
-simulation.reporters.append(app.PDBReporter('output.pdb', report_interval))
+#simulation.reporters.append(app.PDBReporter('output.pdb', report_interval))
 simulation.reporters.append(app.StateDataReporter(sys.stdout, report_interval, step=True, potentialEnergy=True, temperature=True))
 simulation.reporters.append(app.StateDataReporter('energies.csv', report_interval, step=True, potentialEnergy=True, temperature=True))
 simulation.reporters.append(app.DCDReporter('output.dcd', report_interval))
@@ -406,6 +408,15 @@ t.image_molecules(inplace=True,make_whole=True)
 filename = f'final-{nsteps * 0.002}ps.pdb'  # Format to one decimal place
 t.save_pdb(filename)
 os.remove("tmp.pdb")
+
+
+# Note: to ouput a parmtop file, use ParMed - which requires a conversion to non-rigid Water
+tmpSystem = forcefield.createSystem (simulation.topology, rigidWater=False)
+positions = simulation.context.getState(getPositions=True).getPositions()   # update to remove enforcePeriodicBox=True
+structure = pmd.openmm.topsystem.load_topology(simulation.topology, system=tmpSystem, xyz=positions)
+structure.save("output.prmtop", format="amber") 
+structure.save("output.inpcrd", format="rst7") 
+
 
 sys.exit()
 
