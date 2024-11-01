@@ -76,6 +76,12 @@ plt.savefig('rmsf_comparison.pdf', dpi=300, bbox_inches='tight')
 rg_1 = md.compute_rg(trajectory_1)
 rg_2 = md.compute_rg(trajectory_2)
 
+# Calculate average and standard deviation of Rg
+avg_rg_1 = np.mean(rg_1)
+std_rg_1 = np.std(rg_1)
+avg_rg_2 = np.mean(rg_2)
+std_rg_2 = np.std(rg_2)
+
 # Kolmogorov-Smirnov test on Rg values
 ks_stat_rg, p_value_rg = ks_2samp(rg_1, rg_2)
 print(f"K-S test for Radius of Gyration: D = {ks_stat_rg}, p-value = {p_value_rg}")
