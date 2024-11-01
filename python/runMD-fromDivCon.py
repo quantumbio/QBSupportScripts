@@ -347,8 +347,7 @@ simulation = app.Simulation(modeller.topology, system, integrator)
 simulation.context.setPositions(modeller.positions)
 
 # Minimize energy
-#nsteps = 5000
-nsteps = 100
+nsteps = 5000
 print(f'Minimizing {nsteps} steps ...', flush=True)
 start_time = time.time()
 simulation.minimizeEnergy(maxIterations=nsteps)
@@ -362,16 +361,14 @@ t.image_molecules(inplace=True,make_whole=True)
 t.save_pdb('minimized_with_unique_residues.pdb')
 os.remove("tmp.pdb")
 
-#nsteps = 100000
-nsteps = 1
+nsteps = 100000
 print (f'Equilibrating (NVT) - {nsteps * 0.002} ps ....', flush=True)
 start_time = time.time()
 simulation.step(nsteps)  # NVT equilibration
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
-#nsteps = 100000
-nsteps = 1
+nsteps = 100000
 print (f'Equilibrating (NPT) - {nsteps * 0.002} ps ....', flush=True)
 system.addForce(mm.MonteCarloBarostat(1*unit.atmospheres, 300*unit.kelvin, 25))
 simulation.context.reinitialize(preserveState=True)
@@ -387,8 +384,7 @@ t.image_molecules(inplace=True,make_whole=True)
 t.save_pdb('equilibrated_with_NVT+NPT.pdb')
 os.remove("tmp.pdb")
 
-#nsteps = 1000000
-nsteps = 1
+nsteps = 1000000
 report_interval = min(nsteps,1000)
 simulation.context.setVelocitiesToTemperature(300*unit.kelvin)
 #simulation.reporters.append(app.PDBReporter('output.pdb', report_interval))
@@ -411,12 +407,13 @@ os.remove("tmp.pdb")
 
 
 # Note: to ouput a parmtop file, use ParMed - which requires a conversion to non-rigid Water
+#       Reason: PDB files are often used to provide a topology file to MDTraj.
+#           However, it would seem that when the list of residues is long (e.g. water box) PDB file limits imprede.
 tmpSystem = forcefield.createSystem (simulation.topology, rigidWater=False)
 positions = simulation.context.getState(getPositions=True).getPositions()   # update to remove enforcePeriodicBox=True
 structure = pmd.openmm.topsystem.load_topology(simulation.topology, system=tmpSystem, xyz=positions)
 structure.save("output.prmtop", format="amber") 
 structure.save("output.inpcrd", format="rst7") 
-
 
 sys.exit()
 

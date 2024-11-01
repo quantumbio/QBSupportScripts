@@ -15,11 +15,18 @@ trajLabel2 = trajFile2
 
 # Load two trajectories
 input_trajectory_1 = md.load(trajFile1,top=topoFile1)
+
+# Print some basic information about the loaded trajectory
+print("Number of frames (1):", input_trajectory_1.n_frames)
+print("Number of atoms (1):", input_trajectory_1.n_atoms)
+
 input_trajectory_2 = md.load(trajFile2,top=topoFile2)
+print("Number of frames (2):", input_trajectory_1.n_frames)
+print("Number of atoms (2):", input_trajectory_1.n_atoms)
 
 # Select protein atoms (exclude water)
-protein_atoms_1 = input_trajectory_1.topology.select("protein")
-protein_atoms_2 = input_trajectory_2.topology.select("protein")
+protein_atoms_1 = input_trajectory_1.topology.select("not (resname HOH CL NA)")
+protein_atoms_2 = input_trajectory_2.topology.select("not (resname HOH CL NA)")
 
 # Slice the trajectories to include only protein atoms
 trajectory_1 = input_trajectory_1.atom_slice(protein_atoms_1)
@@ -28,8 +35,8 @@ trajectory_2 = input_trajectory_2.atom_slice(protein_atoms_2)
 # ---------------------------------------
 # Compute RMSF for both trajectories
 # ---------------------------------------
-ca_indices_1 = trajectory_1.topology.select("protein and name CA")
-ca_indices_2 = trajectory_2.topology.select("protein and name CA")
+ca_indices_1 = trajectory_1.topology.select("not (resname HOH CL NA) and name CA")
+ca_indices_2 = trajectory_2.topology.select("not (resname HOH CL NA) and name CA")
 
 # Compute RMSF for alpha carbons only (for both trajectories)
 rmsf_1 = np.sqrt(np.mean((trajectory_1.xyz[:, ca_indices_1, :] - np.mean(trajectory_1.xyz[:, ca_indices_1, :], axis=0))**2, axis=0))
