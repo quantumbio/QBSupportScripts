@@ -4,6 +4,46 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy.stats import ks_2samp  # For Kolmogorov-Smirnov test
 import sys
+from Bio.Align import PairwiseAligner
+
+# With the need to perform sequence analysis, DSSP, etc, we need to rename our residues to match the standards.
+#       This renaming should account for not only the A, B, and C (etc) suffixes added to the residue names but equivelentces like HIE, HID, and HIP
+residue_mapping = {
+    # Standard amino acids
+    'ALA': 'ALA', 'ARG': 'ARG', 'ASN': 'ASN', 'ASP': 'ASP', 'CYS': 'CYS',
+    'GLU': 'GLU', 'GLN': 'GLN', 'GLY': 'GLY', 'HIS': 'HIS', 'ILE': 'ILE',
+    'LEU': 'LEU', 'LYS': 'LYS', 'MET': 'MET', 'PHE': 'PHE', 'PRO': 'PRO',
+    'SER': 'SER', 'THR': 'THR', 'TRP': 'TRP', 'TYR': 'TYR', 'VAL': 'VAL',
+
+    # Amber protonation states
+    'HIE': 'HIS', 'HID': 'HIS', 'HIP': 'HIS',  # Histidine
+    'CYX': 'CYS',  # Cysteine
+    'GLH': 'GLU',  # Glutamate
+    'ASH': 'ASP',  # Aspartate
+}
+
+def standardize_residue_names(trajectory):
+    # Create a new list for the standardized residue names
+    standardized_residues = []
+    
+    for residue in trajectory.topology.residues:
+        residue_name = residue.name
+        # Only remove the last character if the length is greater than 3
+        if len(residue_name) > 3:
+            trimmed_residue_name = residue_name[:-1]  # Remove the last character
+        else:
+            trimmed_residue_name = residue_name
+        
+        # Map the trimmed residue name to the standard name
+        standardized_name = residue_mapping.get(trimmed_residue_name, None)
+
+        # Print if there is no match in the mapping (excluding solvent)
+        if standardized_name is None and trimmed_residue_name not in ["HOH", "NA", "CL"]:
+            print(f"Warning: Unmatched residue name '{trimmed_residue_name}' in trajectory.")
+        
+        standardized_residues.append(standardized_name if standardized_name is not None else trimmed_residue_name)
+    
+    return standardized_residues
 
 trajFile1 = sys.argv[1]
 topoFile1 = sys.argv[2]
@@ -21,8 +61,48 @@ print("Number of frames (1):", input_trajectory_1.n_frames)
 print("Number of atoms (1):", input_trajectory_1.n_atoms)
 
 input_trajectory_2 = md.load(trajFile2,top=topoFile2)
-print("Number of frames (2):", input_trajectory_1.n_frames)
-print("Number of atoms (2):", input_trajectory_1.n_atoms)
+print("Number of frames (2):", input_trajectory_2.n_frames)
+print("Number of atoms (2):", input_trajectory_2.n_atoms)
+
+# Standardize residue names
+standardized_residues_1 = standardize_residue_names(input_trajectory_1)
+standardized_residues_2 = standardize_residue_names(input_trajectory_2)
+
+# Create an aligner
+aligner = PairwiseAligner()
+
+# Define a set of valid standard residues from the residue_mapping keys
+valid_residues = set(residue_mapping.keys())
+
+# Filter to keep only standardized amino acid residues for alignment
+filtered_residues_1 = [res for res in standardized_residues_1 if res in valid_residues]
+filtered_residues_2 = [res for res in standardized_residues_2 if res in valid_residues]
+
+# Convert lists of filtered residues to strings for alignment
+sequence_1 = "".join(filtered_residues_1)
+sequence_2 = "".join(filtered_residues_2)
+
+# Perform the alignment with the filtered sequences
+alignment = aligner.align(sequence_1, sequence_2)
+
+# Assuming we want the first alignment result
+aligned_seq_1 = alignment[0].target  # The aligned sequence from sequence_1
+aligned_seq_2 = alignment[0].query   # The aligned sequence from sequence_2
+
+# Convert the aligned sequences to strings if they are still in array form
+aligned_seq_1_str = ''.join([str(res) for res in aligned_seq_1])
+aligned_seq_2_str = ''.join([str(res) for res in aligned_seq_2])
+
+# Print the aligned sequences for verification
+#print("Aligned Sequence 1:", aligned_seq_1_str)
+#print("Aligned Sequence 2:", aligned_seq_2_str)
+
+# Replace the residue names in the topology
+for residue, new_name in zip(input_trajectory_1.topology.residues, standardized_residues_1):
+    residue.name = new_name
+
+for residue, new_name in zip(input_trajectory_2.topology.residues, standardized_residues_2):
+    residue.name = new_name
 
 # Select protein atoms (exclude water)
 protein_atoms_1 = input_trajectory_1.topology.select("not (resname HOH CL NA)")
@@ -32,11 +112,18 @@ protein_atoms_2 = input_trajectory_2.topology.select("not (resname HOH CL NA)")
 trajectory_1 = input_trajectory_1.atom_slice(protein_atoms_1)
 trajectory_2 = input_trajectory_2.atom_slice(protein_atoms_2)
 
+# Align based on the CA carbons
+ca_indices_1 = trajectory_1.topology.select("protein and name CA")
+ca_indices_2 = trajectory_2.topology.select("protein and name CA")
+trajectory_2 = trajectory_2.superpose(trajectory_1, atom_indices=ca_indices_1)
+
+# Create masks for non-gap residues
+mask_1 = np.isin(trajectory_1.topology.residues, trajectory_1.topology.select("not (resname HOH CL NA)"))
+mask_2 = np.isin(trajectory_2.topology.residues, trajectory_2.topology.select("not (resname HOH CL NA)"))
+
 # ---------------------------------------
 # Compute RMSF for both trajectories
 # ---------------------------------------
-ca_indices_1 = trajectory_1.topology.select("not (resname HOH CL NA) and name CA")
-ca_indices_2 = trajectory_2.topology.select("not (resname HOH CL NA) and name CA")
 
 # Compute RMSF for alpha carbons only (for both trajectories)
 rmsf_1 = np.sqrt(np.mean((trajectory_1.xyz[:, ca_indices_1, :] - np.mean(trajectory_1.xyz[:, ca_indices_1, :], axis=0))**2, axis=0))
@@ -84,7 +171,11 @@ std_rg_2 = np.std(rg_2)
 
 # Kolmogorov-Smirnov test on Rg values
 ks_stat_rg, p_value_rg = ks_2samp(rg_1, rg_2)
-print(f"K-S test for Radius of Gyration: D = {ks_stat_rg}, p-value = {p_value_rg}")
+
+# Report results
+print(f"Trajectory 1: Average Rg = {avg_rg_1:.3f}, Standard Deviation = {std_rg_1:.3f}")
+print(f"Trajectory 2: Average Rg = {avg_rg_2:.3f}, Standard Deviation = {std_rg_2:.3f}")
+print(f"K-S test for Rg: D = {ks_stat_rg:.3f}, p-value = {p_value_rg:.3e}")
 
 plt.figure()
 plt.plot(rg_1, label=trajLabel1, color='b')
