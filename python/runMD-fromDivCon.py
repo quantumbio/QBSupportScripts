@@ -58,6 +58,11 @@ import importlib.resources
 import mdtraj as md
 import time
 
+minimize_nsteps     = round (5000      /   10)
+nvt_equil_nsteps    = round (100000    /   10)
+ntp_equil_nsteps    = round (100000    /   10)
+production_nsteps   = round (1000000   /   100)
+
 # Load the Amber topology and coordinate files
 prmtopFile = sys.argv[1]
 inpcrdFile = sys.argv[2]
@@ -346,65 +351,174 @@ simulation = app.Simulation(modeller.topology, system, integrator)
 # Set initial positions from Amber coordinates
 simulation.context.setPositions(modeller.positions)
 
+
+# Double check system
+# Extract the system from the simulation
+system_tmp = simulation.system
+
+# Identify the HarmonicBondForce (which stores bonded interactions)
+bond_force = None
+for i in range(system_tmp.getNumForces()):
+    force = system_tmp.getForce(i)
+    if isinstance(force, mm.HarmonicBondForce):
+        bond_force = force
+        break
+
+# Ensure bond force is found
+if bond_force is not None:
+    total_bonds = bond_force.getNumBonds()
+    missing_bond_count = 0
+
+    # Iterate over all bonds in the system_tmp
+    for i in range(total_bonds):
+        particle1, particle2, bond_length, bond_k = bond_force.getBondParameters(i)
+
+        # Check if the bond force constant (bond_k) is zero or missing
+        if bond_k._value == 0.0:
+            missing_bond_count += 1
+
+    # Compute missing bond percentage
+    missing_percentage = (missing_bond_count / total_bonds) * 100 if total_bonds > 0 else 0
+
+    # Print bond report
+    print(f"Total number of bonds in the simulation: {total_bonds}")
+    print(f"Number of bonds with missing force constants: {missing_bond_count}")
+    print(f"Percentage of missing bond parameters: {missing_percentage:.2f}%")
+else:
+    print("No HarmonicBondForce found in the simulation system_tmp.")
+
+
+
 # Minimize energy
-nsteps = 5000
-print(f'Minimizing {nsteps} steps ...', flush=True)
+print(f'Minimizing {minimize_nsteps} steps ...', flush=True)
 start_time = time.time()
-simulation.minimizeEnergy(maxIterations=nsteps)
+
+# Minimize until energy convergence
+prev_energy = float('inf')
+tolerance = 10.0  # kJ/mol threshold for convergence
+for i in range(0, minimize_nsteps, 500):
+    simulation.minimizeEnergy(maxIterations=500)
+    state = simulation.context.getState(getEnergy=True)
+    energy = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+    if abs(prev_energy - energy) < tolerance:
+        print(f'Converged (tolerance: {tolerance:.2f} kJ/mol) at step: {i}')
+        break
+    prev_energy = energy
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
-positions = simulation.context.getState(getPositions=True,enforcePeriodicBox=True).getPositions()
-app.PDBFile.writeFile(simulation.topology, positions, open('tmp.pdb', 'w'))
-t = md.load('tmp.pdb')
-t.image_molecules(inplace=True,make_whole=True)
-t.save_pdb('minimized_with_unique_residues.pdb')
-os.remove("tmp.pdb")
+def save_imaged_pdb(simulation, filename):
+    """
+    Extracts topology and positions from an OpenMM simulation, applies imaging, and saves a PDB file.
+    
+    Parameters:
+    - simulation: OpenMM Simulation object
+    - filename: str, Output filename for the PDB file
+    """
+    # Extract topology from OpenMM simulation
+    topology = md.Topology.from_openmm(simulation.topology)
 
-nsteps = 100000
-print (f'Equilibrating (NVT) - {nsteps * 0.002} ps ....', flush=True)
+    # Get positions and periodic box vectors from OpenMM
+    state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
+    positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)  # Convert to NumPy (nm)
+
+    # Get periodic box vectors
+    box_vectors = state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(unit.nanometers)  # Convert to nm
+    box_lengths = np.array([box_vectors[0][0], box_vectors[1][1], box_vectors[2][2]])  # Extract box dimensions
+
+    # OpenMM assumes an orthorhombic box, so angles are always 90 degrees
+    box_angles = np.array([[90.0, 90.0, 90.0]])  # Degrees
+
+    # Create MDTraj trajectory with periodic box information
+    traj = md.Trajectory(positions[np.newaxis, :, :], topology)
+    traj.unitcell_lengths = box_lengths[np.newaxis, :]
+    traj.unitcell_angles = box_angles  # Explicitly set unit cell angles
+
+    # Ensure molecules are imaged correctly
+    traj.image_molecules(inplace=True, make_whole=True)
+
+    # Save to PDB
+    traj.save_pdb(filename)
+
+    print(f"Saved imaged PDB: {filename}")
+
+save_imaged_pdb(simulation,"minimized_with_unique_residues.pdb")
+
+# Save initial state to XML
+with open("initial_state.xml", "w") as f:
+    f.write(mm.XmlSerializer.serialize(simulation.context.getState(getPositions=True, getVelocities=True, enforcePeriodicBox=True)))
+
+def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_steps=100000, report_interval=1000):
+    """Monitor RMSD to determine equilibration convergence."""
+    rmsd_values = []
+    converged = False
+
+    for step in range(0, max_steps, report_interval):
+        simulation.step(report_interval)
+
+        # Extract positions and save temporary XML
+        state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
+        with open("tmp_state.xml", "w") as f:
+            f.write(mm.XmlSerializer.serialize(state))
+
+        # Load reference state
+        with open(reference_xml, "r") as f:
+            reference_state = mm.XmlSerializer.deserialize(f.read())
+
+        ref_positions = np.array(reference_state.getPositions(asNumpy=True))
+        cur_positions = np.array(state.getPositions(asNumpy=True))
+        rmsd = np.sqrt(np.mean((cur_positions - ref_positions) ** 2))
+        rmsd_values.append(rmsd)
+
+        print(f"Step {step + report_interval}: RMSD = {rmsd:.3f} nm", flush=True)
+
+        if len(rmsd_values) > 5 and all(r < threshold for r in rmsd_values[-5:]):
+            print(f'Equilibration converged at step {step + report_interval} with RMSD {rmsd:.3f} nm')
+            converged = True
+            break
+
+    os.remove("tmp_state.xml")
+    if not converged:
+        print(f"Maximum equilibration steps {max_steps} reached without full convergence.")
+
+# NVT Equilibration with RMSD monitoring
+print('Equilibrating (NVT) with RMSD monitoring...', flush=True)
 start_time = time.time()
-simulation.step(nsteps)  # NVT equilibration
+monitor_rmsd_equilibration(simulation, "initial_state.xml", 0.05, nvt_equil_nsteps)
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
-nsteps = 100000
-print (f'Equilibrating (NPT) - {nsteps * 0.002} ps ....', flush=True)
-system.addForce(mm.MonteCarloBarostat(1*unit.atmospheres, 300*unit.kelvin, 25))
+# Save the state after NVT equilibration
+with open("nvt_equilibrated.xml", "w") as f:
+    f.write(mm.XmlSerializer.serialize(simulation.context.getState(getPositions=True, getVelocities=True, enforcePeriodicBox=True)))
+    
+# NPT Equilibration with RMSD monitoring
+print('Equilibrating (NPT) with RMSD monitoring...', flush=True)
+system.addForce(mm.MonteCarloBarostat(1 * unit.atmospheres, 300 * unit.kelvin, 25))
 simulation.context.reinitialize(preserveState=True)
 start_time = time.time()
-simulation.step(nsteps)  # NPT equilibration
+monitor_rmsd_equilibration(simulation, "nvt_equilibrated.xml", 0.05, ntp_equil_nsteps)
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
-positions = simulation.context.getState(getPositions=True,enforcePeriodicBox=True).getPositions()
-app.PDBFile.writeFile(simulation.topology, positions, open('tmp.pdb', 'w'))
-t = md.load('tmp.pdb')
-t.image_molecules(inplace=True,make_whole=True)
-t.save_pdb('equilibrated_with_NVT+NPT.pdb')
-os.remove("tmp.pdb")
+# Save final equilibrated positions
+save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
-nsteps = 1000000
-report_interval = min(nsteps,1000)
+report_interval = min(production_nsteps,1000)
 simulation.context.setVelocitiesToTemperature(300*unit.kelvin)
 #simulation.reporters.append(app.PDBReporter('output.pdb', report_interval))
 simulation.reporters.append(app.StateDataReporter(sys.stdout, report_interval, step=True, potentialEnergy=True, temperature=True))
 simulation.reporters.append(app.StateDataReporter('energies.csv', report_interval, step=True, potentialEnergy=True, temperature=True))
 simulation.reporters.append(app.DCDReporter('output.dcd', report_interval))
-print (f'Running Production NPT Simulation - {nsteps * 0.002} ps ....', flush=True)
+print (f'Running Production NPT Simulation - {production_nsteps * 0.002} ps ....', flush=True)
 start_time = time.time()
-simulation.step(nsteps)
+simulation.step(production_nsteps)
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
-positions = simulation.context.getState(getPositions=True,enforcePeriodicBox=True).getPositions()
-app.PDBFile.writeFile(simulation.topology, positions, open('tmp.pdb', 'w'))
-t = md.load('tmp.pdb')
-t.image_molecules(inplace=True,make_whole=True)
-filename = f'final-{nsteps * 0.002}ps.pdb'  # Format to one decimal place
-t.save_pdb(filename)
-os.remove("tmp.pdb")
-
+# Save to PDB
+filename = f'final-{production_nsteps * 0.002}ps.pdb'  # Format to one decimal place
+save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
 # Note: to ouput a parmtop file, use ParMed - which requires a conversion to non-rigid Water
 #       Reason: PDB files are often used to provide a topology file to MDTraj.
