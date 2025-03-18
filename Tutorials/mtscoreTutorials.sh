@@ -64,7 +64,7 @@ rm -rf ${WORKDIR}/MTScoreES ; mkdir -p ${WORKDIR}/MTScoreES ; cd ${WORKDIR}/MTSc
 wget http://downloads.quantumbioinc.com/media/tutorials/MT/4w7t_protein.pdb
 wget http://downloads.quantumbioinc.com/media/tutorials/MT/4w7t_ligand.mol2
 
-${DIVCON_BIN} 4w7t_protein.pdb --ligand 4w7t_ligand.mol2 --mtscore endstate
+${DIVCON_BIN} 4w7t_protein.pdb --ligand 4w7t_ligand.mol2 -h amberff14sb --mtscore endstate
 
 echo "Third Tutorial: 3Step MTCS+MTScoreE (Ensemble) with an External Docker"
 rm -rf ${WORKDIR}/3step ; mkdir -p ${WORKDIR}/3step ; cd ${WORKDIR}/3step
