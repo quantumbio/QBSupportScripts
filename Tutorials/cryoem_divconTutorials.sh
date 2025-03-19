@@ -72,6 +72,25 @@ wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutori
 
 $QBHOME/bin/qmechanic 7jsy+H.pdb emd_22463.map --resolution 1.8 --experiment cryoEM --ligand /A/I3C/501// --protomer [-1..1] /A/I3C/501// --flip on --chirality on --np 8 -h amberff14sb --dock LIGAND --xmodescore opt all target 40 0.1 -v2
 #
+
+echo "Tutorial #5: Protonation of Cryo_EM Structure with DivCon: PDBid:7w9w"
+tutorFolder=cryoEM_DivCon_prot_7w9w
+rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
+
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/CryoEM/7w9w.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/CryoEM/emd_32377.map
+
+$QBHOME/bin/qmechanic 7w9w.pdb emd_32377.map --resolution 2.0 --experiment cryoEM --prepare -p 7w9w+H.pdb -h amberff14sb -O -v2 --np 2
+
+echo "Tutorial #6: Protonation and Missing Loops building of Cryo_EM Structure with DivCon: PDBid:7efc"
+tutorFolder=cryoEM_DivCon_gaps_7efc
+rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
+
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/CryoEM/7efc.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/CryoEM/emd_31083.map
+
+$QBHOME/bin/qmechanic 7efc.pdb emd_31083.map --resolution 1.7 --experiment cryoEM --prepare all -p 7efc+H.pdb -h amberff14sb -O -v2 --np 2
+
 currentDate=`date`
 echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
 
