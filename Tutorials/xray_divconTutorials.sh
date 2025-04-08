@@ -76,9 +76,9 @@ tutorFolder=xmodeScore_1bzc
 rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/1bzc+H.pdb
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/1bzc.mtz
-
+export MT_ALLOW_MTDOCK=1
 $QBHOME/bin/qbphenix --pdbFile 1bzc+H.pdb --sfFile 1bzc.mtz --XmodeScore --protonation Skip --protomers "0" --exploreFlip --exploreChiral --exploreDocking --engine divcon --protonateTautomers divcon --qmMethod pm6 --mmMethod amberff14sb --nSmallCycles 40 --region-radius 3.0 --selection "resname TPI and resid 902 and chain A" --dir testXmode --Nproc 16
-
+unset MT_ALLOW_MTDOCK
 echo "Tutorial #6: Multi-Blob Docking PDBid:4o9s"
 tutorFolder=multiBlob_4o9s
 rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
