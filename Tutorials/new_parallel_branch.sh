@@ -11,6 +11,8 @@ fi
 DIVCON=${QBHOME}/bin/qmechanic
 WORKDIR=${PWD}
 
+export MT_ALLOW_MTDOCK=1    # For these tests, MTDock is required.
+
 # Density-driven docking: known pocket location 
 #   * This is effectively re-docking of the ligand in density.
 #   * We use the same appraoch we have always used in which the placed ligand defines the pocket.
