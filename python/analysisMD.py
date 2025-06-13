@@ -1,232 +1,305 @@
+#!/usr/bin/env python3
+"""
+Compare two MD trajectories:
+
+* Standardise residue names (handles Amber protonation codes).
+* Align sequences (one‑letter codes) and superpose on Cα atoms.
+* Compute per‑residue RMSF, radius of gyration, DSSP.
+* Perform Kolmogorov–Smirnov tests and save comparison plots.
+
+The script accepts plain or .gz‑compressed files; compressed inputs
+are transparently decompressed to temporary files before loading.
+"""
+
+from __future__ import annotations
+
+import argparse
+import gzip
+import logging
+import os
+import re
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+from typing import List
+
 import mdtraj as md
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
-from scipy.stats import ks_2samp  # For Kolmogorov-Smirnov test
-import sys
+from scipy.stats import ks_2samp
 from Bio.Align import PairwiseAligner
+from Bio.Data import IUPACData
 
-# With the need to perform sequence analysis, DSSP, etc, we need to rename our residues to match the standards.
-#       This renaming should account for not only the A, B, and C (etc) suffixes added to the residue names but equivelentces like HIE, HID, and HIP
+###############################################################################
+# ---------------------------  CONFIGURATION  ---------------------------------
+###############################################################################
+
+# Map non‑standard / protonation‑state names to canonical 3‑letter codes.
 residue_mapping = {
-    # Standard amino acids
-    'ALA': 'ALA', 'ARG': 'ARG', 'ASN': 'ASN', 'ASP': 'ASP', 'CYS': 'CYS',
-    'GLU': 'GLU', 'GLN': 'GLN', 'GLY': 'GLY', 'HIS': 'HIS', 'ILE': 'ILE',
-    'LEU': 'LEU', 'LYS': 'LYS', 'MET': 'MET', 'PHE': 'PHE', 'PRO': 'PRO',
-    'SER': 'SER', 'THR': 'THR', 'TRP': 'TRP', 'TYR': 'TYR', 'VAL': 'VAL',
+    # standard AAs
+    "ALA": "ALA", "ARG": "ARG", "ASN": "ASN", "ASP": "ASP", "CYS": "CYS",
+    "GLU": "GLU", "GLN": "GLN", "GLY": "GLY", "HIS": "HIS", "ILE": "ILE",
+    "LEU": "LEU", "LYS": "LYS", "MET": "MET", "PHE": "PHE", "PRO": "PRO",
+    "SER": "SER", "THR": "THR", "TRP": "TRP", "TYR": "TYR", "VAL": "VAL",
 
-    # Amber protonation states
-    'HIE': 'HIS', 'HID': 'HIS', 'HIP': 'HIS',  # Histidine
-    'CYX': 'CYS',  # Cysteine
-    'GLH': 'GLU',  # Glutamate
-    'ASH': 'ASP',  # Aspartate
+    # Amber protonation / variants
+    "HIE": "HIS", "HID": "HIS", "HIP": "HIS",  # Histidine
+    "CYX": "CYS",                              # Disulfide Cys
+    "GLH": "GLU",                              # Protonated Glu
+    "ASH": "ASP",                              # Protonated Asp
 }
 
-def standardize_residue_names(trajectory):
-    # Create a new list for the standardized residue names
-    standardized_residues = []
-    
-    for residue in trajectory.topology.residues:
-        residue_name = residue.name
-        # Only remove the last character if the length is greater than 3
-        if len(residue_name) > 3:
-            trimmed_residue_name = residue_name[:-1]  # Remove the last character
-        else:
-            trimmed_residue_name = residue_name
+aa3to1 = {k.upper(): v for k, v in IUPACData.protein_letters_3to1_extended.items()}
+
+###############################################################################
+# ---------------------------  HELPER FUNCTIONS  ------------------------------
+###############################################################################
+
+
+def decompress_if_gz(path: Path) -> Path:
+    """
+    Return a path to an uncompressed copy of *path*.
+
+    If *path* ends with '.gz', its contents are decompressed into a named
+    temporary file (kept until program exit).  Otherwise the original path is
+    returned unchanged.
+    """
+    if not path.suffix == ".gz":
+        return path
+
+    # Determine original (undecompressed) extension (e.g. '.xtc', '.pdb')
+    orig_suffix = "".join(path.stem.split(".")[1:]) or path.stem.split(".")[0]
+    tmp = tempfile.NamedTemporaryFile(
+        delete=False, suffix=f".{orig_suffix}", prefix="mdtraj_"
+    )
+    logging.info("Decompressing %s → %s", path, tmp.name)
+    with gzip.open(path, "rb") as gz_in, open(tmp.name, "wb") as out:
+        shutil.copyfileobj(gz_in, out)
+    return Path(tmp.name)
+
+
+def trim_to_three_letters(name: str) -> str:
+    """
+    Keep the *first* three consecutive uppercase letters of *name*.
+
+    Examples
+    --------
+    'LYS1' → 'LYS'
+    'CYX'  → 'CYX'
+    'GLH'  → 'GLH'
+    'SEP'  → 'SEP'
+    """
+    m = re.match(r"([A-Z]{3})", name.upper())
+    return m.group(1) if m else name[:3].upper()
+
+
+def standardise_residue_names(traj: md.Trajectory) -> List[str]:
+    """Return list of canonical 3‑letter codes corresponding to *traj* residues."""
+    std: List[str] = []
+    for res in traj.topology.residues:
+        core = trim_to_three_letters(res.name)
+        mapped = residue_mapping.get(core, core)
+        if mapped not in residue_mapping.values() and mapped not in {"HOH", "NA", "CL"}:
+            logging.warning("Unmatched residue name '%s'", res.name)
+        std.append(mapped)
+
+    return std
+
+
+def to_one_letter(seq3: List[str]) -> str:
+    """Translate 3‑letter codes → one‑letter codes, dropping unknowns."""
+    letters: List[str] = []
+    for aa in seq3:
+        letter = aa3to1.get(aa, None)
+        if letter:
+            letters.append(letter)
+    return "".join(letters)
+
+
+def load_trajectory(traj_path: Path, top_path: Path) -> md.Trajectory:
+    """Load a trajectory with MDTraj, printing basic info."""
+    traj = md.load(traj_path, top=top_path)
+    logging.info("Loaded %s | frames: %d | atoms: %d",
+                 traj_path.name, traj.n_frames, traj.n_atoms)
+    return traj
+
+
+def compute_rmsf(traj: md.Trajectory, ca_idx: np.ndarray) -> np.ndarray:
+    """
+    Compute RMSF per Cα atom (Å) for *traj*.
+
+    MDTraj returns nm; convert to Å for easier human digestion.
+    """
+    rmsf = md.rmsf(traj, reference=traj, atom_indices=ca_idx)  # nm
+    return rmsf * 10.0  # → Å
+
+
+###############################################################################
+# -------------------------------  MAIN  --------------------------------------
+###############################################################################
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Compare two MD trajectories (RMSF, Rg, DSSP).")
+    parser.add_argument("traj1", type=Path, help="Trajectory 1 file  (DCD/XTC/… or .gz)")
+    parser.add_argument("top1",  type=Path, help="Topology    1 file  (PDB/PRMTOP/… or .gz)")
+    parser.add_argument("traj2", type=Path, help="Trajectory 2 file  (DCD/XTC/… or .gz)")
+    parser.add_argument("top2",  type=Path, help="Topology    2 file  (PDB/PRMTOP/… or .gz)")
+    parser.add_argument("-o", "--out-prefix", default="comparison",
+                        help="Prefix for output PDFs (default: %(default)s)")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="Reduce log output.")
+    parser.add_argument("--label1", default="Complete Structure",
+                        help="Label for trajectory 1 (default: %(default)s)")
+    parser.add_argument("--label2", default="Published Structure",
+                        help="Label for trajectory 2 (default: %(default)s)")
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.WARNING if args.quiet else logging.INFO,
+        format="%(levelname)s: %(message)s")
+
+    # Track any temporary files we create so we can delete them later.
+    temp_paths: List[Path] = []
+    try:
+        traj1_path = decompress_if_gz(args.traj1)
+        top1_path  = decompress_if_gz(args.top1)
+        traj2_path = decompress_if_gz(args.traj2)
+        top2_path  = decompress_if_gz(args.top2)
+        temp_paths.extend(p for p in (traj1_path, top1_path, traj2_path, top2_path)
+                          if p != args.traj1 and p != args.top1 and p != args.traj2 and p != args.top2)
+
+        # Load trajectories
+        t1_raw = load_trajectory(traj1_path, top1_path)
+        t2_raw = load_trajectory(traj2_path, top2_path)
+
+        # ---------------------------------------------------------------------
+        # Standardise residue names and update topology (in‑place for MDTraj).
+        # ---------------------------------------------------------------------
+        std1 = standardise_residue_names(t1_raw)
+        std2 = standardise_residue_names(t2_raw)
+        for res, new in zip(t1_raw.topology.residues, std1):
+            res.name = new
+        for res, new in zip(t2_raw.topology.residues, std2):
+            res.name = new
+
+        # ---------------------------------------------------------------------
+        # Sequence alignment (one‑letter codes)
+        # ---------------------------------------------------------------------
+        seq1 = to_one_letter(std1)
+        seq2 = to_one_letter(std2)
+        aligner = PairwiseAligner()
+        aln = aligner.align(seq1, seq2)[0]
+        logging.info("Global alignment score: %.2f  length: %d",
+                     aln.score, aln.shape[1])
+
+        # -----------------------------------------------------------------
+        # Keep *protein only* (drops solvent ions AND ligands/ cofactors)
+        # -----------------------------------------------------------------
+        prot_atoms_1 = [a.index for a in t1_raw.topology.atoms if a.residue.is_protein]
+        prot_atoms_2 = [a.index for a in t2_raw.topology.atoms if a.residue.is_protein]
         
-        # Map the trimmed residue name to the standard name
-        standardized_name = residue_mapping.get(trimmed_residue_name, None)
+        t1 = t1_raw.atom_slice(prot_atoms_1)
+        t2 = t2_raw.atom_slice(prot_atoms_2)
+#        prot_sel = "not (resname HOH CL NA)"
+#        t1 = t1_raw.atom_slice(t1_raw.topology.select(prot_sel))
+#        t2 = t2_raw.atom_slice(t2_raw.topology.select(prot_sel))
 
-        # Print if there is no match in the mapping (excluding solvent)
-        if standardized_name is None and trimmed_residue_name not in ["HOH", "NA", "CL"]:
-            print(f"Warning: Unmatched residue name '{trimmed_residue_name}' in trajectory.")
-        
-        standardized_residues.append(standardized_name if standardized_name is not None else trimmed_residue_name)
-    
-    return standardized_residues
+        # ---------------------------------------------------------------------
+        # Superpose on Cα atoms
+        # ---------------------------------------------------------------------
+        ca1 = t1.topology.select("protein and name CA")
+        ca2 = t2.topology.select("protein and name CA")
+        common_len = min(len(ca1), len(ca2))
+        if common_len == 0:
+            logging.error("No shared Cα atoms found; aborting.")
+            sys.exit(1)
+        t2.superpose(t1, atom_indices=ca2[:common_len], ref_atom_indices=ca1[:common_len])
 
-trajFile1 = sys.argv[1]
-topoFile1 = sys.argv[2]
-trajFile2 = sys.argv[3]
-topoFile2 = sys.argv[4]
+        # ---------------------------------------------------------------------
+        # RMSF
+        # ---------------------------------------------------------------------
+        rmsf1 = compute_rmsf(t1, ca1[:common_len])
+        rmsf2 = compute_rmsf(t2, ca2[:common_len])
 
-trajLabel1 = trajFile1
-trajLabel2 = trajFile2
+        avg1, std1_r = rmsf1.mean(), rmsf1.std()
+        avg2, std2_r = rmsf2.mean(), rmsf2.std()
+        ks_rmsf = ks_2samp(rmsf1, rmsf2)
 
-# Load two trajectories
-input_trajectory_1 = md.load(trajFile1,top=topoFile1)
+        logging.info("RMSF Å | %s mean %.3f ± %.3f, %s mean %.3f ± %.3f, "
+                     "KS‑p %.3e", args.label1, avg1, std1_r, args.label2, avg2, std2_r, ks_rmsf.pvalue)
 
-# Print some basic information about the loaded trajectory
-print("Number of frames (1):", input_trajectory_1.n_frames)
-print("Number of atoms (1):", input_trajectory_1.n_atoms)
+        # Plot RMSF
+        plt.figure()
+        plt.plot(np.arange(common_len), rmsf1, label=args.label1)
+        plt.plot(np.arange(common_len), rmsf2, label=args.label2)
+        plt.xlabel("Cα index (aligned)")
+        plt.ylabel("RMSF (Å)")
+        plt.title(f"RMSF per residue   KS p={ks_rmsf.pvalue:.3e}")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{args.out_prefix}_rmsf.pdf", dpi=300)
+        plt.close()
 
-input_trajectory_2 = md.load(trajFile2,top=topoFile2)
-print("Number of frames (2):", input_trajectory_2.n_frames)
-print("Number of atoms (2):", input_trajectory_2.n_atoms)
+        # ---------------------------------------------------------------------
+        # Radius of gyration
+        # ---------------------------------------------------------------------
+        rg1 = md.compute_rg(t1) * 10.0  # nm→Å
+        rg2 = md.compute_rg(t2) * 10.0
+        ks_rg = ks_2samp(rg1, rg2)
 
-# Standardize residue names
-standardized_residues_1 = standardize_residue_names(input_trajectory_1)
-standardized_residues_2 = standardize_residue_names(input_trajectory_2)
+        logging.info("Rg Å | %s mean %.2f ± %.2f, %s mean %.2f ± %.2f, "
+                     "KS‑p %.3e", args.label1, rg1.mean(), rg1.std(), args.label2, rg2.mean(), rg2.std(),
+                     ks_rg.pvalue)
 
-# Create an aligner
-aligner = PairwiseAligner()
+        plt.figure()
+        plt.plot(rg1, label=args.label1)
+        plt.plot(rg2, label=args.label2)
+        plt.xlabel("Frame")
+        plt.ylabel("Radius of gyration (Å)")
+        plt.title(f"Radius of gyration   KS p={ks_rg.pvalue:.3e}")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{args.out_prefix}_rg.pdf", dpi=300)
+        plt.close()
 
-# Define a set of valid standard residues from the residue_mapping keys
-valid_residues = set(residue_mapping.keys())
+        # ---------------------------------------------------------------------
+        # DSSP analysis (optional – requires DSSP binary)
+        # ---------------------------------------------------------------------
+        try:
+            ss1 = md.compute_dssp(t1)
+            ss2 = md.compute_dssp(t2)
+            struct_map = {'H': 0, 'E': 1, 'C': 2, 'G': 3, 'I': 4, 'B': 5, 'T': 6, 'S': 7}
+            ss_num1 = np.vectorize(struct_map.get)(ss1)
+            ss_num2 = np.vectorize(struct_map.get)(ss2)
 
-# Filter to keep only standardized amino acid residues for alignment
-filtered_residues_1 = [res for res in standardized_residues_1 if res in valid_residues]
-filtered_residues_2 = [res for res in standardized_residues_2 if res in valid_residues]
+            import seaborn as sns  # optional heavy import
 
-# Convert lists of filtered residues to strings for alignment
-sequence_1 = "".join(filtered_residues_1)
-sequence_2 = "".join(filtered_residues_2)
+            plt.figure(figsize=(10, 6))
+            for i, (ss, label) in enumerate([(ss_num1, args.label1),
+                                             (ss_num2, args.label2)], 1):
+                plt.subplot(2, 1, i)
+                sns.heatmap(ss.T, cbar=i == 1, cmap="tab20",
+                            cbar_kws={"label": "DSSP code"})
+                plt.ylabel("Residue")
+                plt.xlabel("Frame")
+                plt.title(f"{label} – DSSP")
+            plt.tight_layout()
+            plt.savefig(f"{args.out_prefix}_dssp.pdf", dpi=300)
+            plt.close()
+        except Exception as e:
+            logging.warning("DSSP calculation skipped (%s)", e)
 
-# Perform the alignment with the filtered sequences
-alignment = aligner.align(sequence_1, sequence_2)
+    finally:
+        # Clean up any temporary decompressed files.
+        for p in temp_paths:
+            try:
+                p.unlink()
+            except Exception:
+                pass
 
-# Assuming we want the first alignment result
-aligned_seq_1 = alignment[0].target  # The aligned sequence from sequence_1
-aligned_seq_2 = alignment[0].query   # The aligned sequence from sequence_2
 
-# Convert the aligned sequences to strings if they are still in array form
-aligned_seq_1_str = ''.join([str(res) for res in aligned_seq_1])
-aligned_seq_2_str = ''.join([str(res) for res in aligned_seq_2])
-
-# Print the aligned sequences for verification
-#print("Aligned Sequence 1:", aligned_seq_1_str)
-#print("Aligned Sequence 2:", aligned_seq_2_str)
-
-# Replace the residue names in the topology
-for residue, new_name in zip(input_trajectory_1.topology.residues, standardized_residues_1):
-    residue.name = new_name
-
-for residue, new_name in zip(input_trajectory_2.topology.residues, standardized_residues_2):
-    residue.name = new_name
-
-# Select protein atoms (exclude water)
-protein_atoms_1 = input_trajectory_1.topology.select("not (resname HOH CL NA)")
-protein_atoms_2 = input_trajectory_2.topology.select("not (resname HOH CL NA)")
-
-# Slice the trajectories to include only protein atoms
-trajectory_1 = input_trajectory_1.atom_slice(protein_atoms_1)
-trajectory_2 = input_trajectory_2.atom_slice(protein_atoms_2)
-
-# Align based on the CA carbons
-ca_indices_1 = trajectory_1.topology.select("protein and name CA")
-ca_indices_2 = trajectory_2.topology.select("protein and name CA")
-trajectory_2 = trajectory_2.superpose(trajectory_1, atom_indices=ca_indices_1)
-
-# Create masks for non-gap residues
-mask_1 = np.isin(trajectory_1.topology.residues, trajectory_1.topology.select("not (resname HOH CL NA)"))
-mask_2 = np.isin(trajectory_2.topology.residues, trajectory_2.topology.select("not (resname HOH CL NA)"))
-
-# ---------------------------------------
-# Compute RMSF for both trajectories
-# ---------------------------------------
-
-# Compute RMSF for alpha carbons only (for both trajectories)
-rmsf_1 = np.sqrt(np.mean((trajectory_1.xyz[:, ca_indices_1, :] - np.mean(trajectory_1.xyz[:, ca_indices_1, :], axis=0))**2, axis=0))
-rmsf_2 = np.sqrt(np.mean((trajectory_2.xyz[:, ca_indices_2, :] - np.mean(trajectory_2.xyz[:, ca_indices_2, :], axis=0))**2, axis=0))
-
-# Average over dimensions (x, y, z)
-rmsf_per_residue_1 = np.sqrt(np.sum(rmsf_1**2, axis=1))
-rmsf_per_residue_2 = np.sqrt(np.sum(rmsf_2**2, axis=1))
-
-# Calculate average and standard deviation
-avg_rmsf_1 = np.mean(rmsf_per_residue_1)
-std_rmsf_1 = np.std(rmsf_per_residue_1)
-avg_rmsf_2 = np.mean(rmsf_per_residue_2)
-std_rmsf_2 = np.std(rmsf_per_residue_2)
-
-# Kolmogorov-Smirnov test on RMSF values
-ks_stat_rmsf, p_value_rmsf = ks_2samp(rmsf_per_residue_1, rmsf_per_residue_2)
-
-# Report results
-print(f"Trajectory 1: Average RMSF = {avg_rmsf_1:.3f}, Standard Deviation = {std_rmsf_1:.3f}")
-print(f"Trajectory 2: Average RMSF = {avg_rmsf_2:.3f}, Standard Deviation = {std_rmsf_2:.3f}")
-print(f"K-S test for RMSF: D = {ks_stat_rmsf}, p-value = {p_value_rmsf}")
-
-# Plot RMSF for both trajectories
-plt.figure()
-plt.plot(ca_indices_1, rmsf_per_residue_1, label=trajLabel1, color='b')
-plt.plot(ca_indices_2, rmsf_per_residue_2, label=trajLabel2, color='r')
-plt.xlabel('Residue Index (Alpha Carbon)')
-plt.ylabel('RMSF (nm)')
-plt.title(f'Root Mean Square Fluctuation per Residue\nK-S test p-value: {p_value_rmsf:.4f}')
-plt.legend()
-plt.savefig('rmsf_comparison.pdf', dpi=300, bbox_inches='tight')
-
-# ---------------------------------------
-# Compute Radius of Gyration (Rg) for both trajectories
-# ---------------------------------------
-rg_1 = md.compute_rg(trajectory_1)
-rg_2 = md.compute_rg(trajectory_2)
-
-# Calculate average and standard deviation of Rg
-avg_rg_1 = np.mean(rg_1)
-std_rg_1 = np.std(rg_1)
-avg_rg_2 = np.mean(rg_2)
-std_rg_2 = np.std(rg_2)
-
-# Kolmogorov-Smirnov test on Rg values
-ks_stat_rg, p_value_rg = ks_2samp(rg_1, rg_2)
-
-# Report results
-print(f"Trajectory 1: Average Rg = {avg_rg_1:.3f}, Standard Deviation = {std_rg_1:.3f}")
-print(f"Trajectory 2: Average Rg = {avg_rg_2:.3f}, Standard Deviation = {std_rg_2:.3f}")
-print(f"K-S test for Rg: D = {ks_stat_rg:.3f}, p-value = {p_value_rg:.3e}")
-
-plt.figure()
-plt.plot(rg_1, label=trajLabel1, color='b')
-plt.plot(rg_2, label=trajLabel2, color='r')
-plt.xlabel('Frame (time)')
-plt.ylabel('Radius of Gyration (nm)')
-plt.title(f'Radius of Gyration Over Time\nK-S test p-value: {p_value_rg:.4f}')
-plt.legend()
-plt.savefig('rg_comparison.pdf', dpi=300, bbox_inches='tight')
-
-sys.exit()
-
-# ---------------------------------------
-# Compute Secondary Structure (DSSP) for both trajectories
-# ---------------------------------------
-ss_1 = md.compute_dssp(trajectory_1)
-ss_2 = md.compute_dssp(trajectory_2)
-
-# DSSP structure mapping
-structure_mapping = {'H': 0, 'E': 1, 'C': 2, 'G': 3, 'I': 4, 'B': 5, 'T': 6, 'S': 7}
-structure_labels = ['Helix (H)', 'Beta sheet (E)', 'Coil (C)', '3-10 Helix (G)', 'Pi Helix (I)', 
-                    'Beta Bridge (B)', 'Turn (T)', 'Bend (S)']
-
-# Convert DSSP characters to numerical values
-ss_numeric_1 = np.array([[structure_mapping[ss_elem] for ss_elem in frame] for frame in ss_1])
-ss_numeric_2 = np.array([[structure_mapping[ss_elem] for ss_elem in frame] for frame in ss_2])
-
-# Create heatmap for Trajectory 1
-plt.figure(figsize=(12, 6))
-plt.subplot(2, 1, 1)
-sns.heatmap(ss_numeric_1.T, cmap='tab20', cbar_kws={'ticks': list(structure_mapping.values()), 
-                                                    'label': 'Secondary Structure'},
-            yticklabels=False)
-plt.xlabel('Frame (time)')
-plt.ylabel('Residue')
-plt.title(f"{trajLabel1}: Secondary Structure Evolution")
-
-# Create heatmap for Trajectory 2
-plt.subplot(2, 1, 2)
-sns.heatmap(ss_numeric_2.T, cmap='tab20', cbar_kws={'ticks': list(structure_mapping.values()), 
-                                                    'label': 'Secondary Structure'},
-            yticklabels=False)
-plt.xlabel('Frame (time)')
-plt.ylabel('Residue')
-plt.title(f"{trajLabel2}: Secondary Structure Evolution")
-
-# Customize colorbar to show structure labels instead of numbers
-cbar = plt.gca().collections[0].colorbar
-cbar.set_ticks(list(structure_mapping.values()))
-cbar.set_ticklabels(structure_labels)
-
-# Save the DSSP heatmap comparison
-plt.savefig('dssp_comparison.pdf', dpi=300, bbox_inches='tight')
-
+if __name__ == "__main__":
+    main()
