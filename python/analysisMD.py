@@ -10,29 +10,82 @@ molecular dynamics (MD) trajectories — typically a "Complete Structure" vs a
 Outputs
 -------
 1. Full RMSF (all protein residues)                    → *_rmsf_full.pdf
-2. Aligned‑core RMSF (based on sequence alignment)     → *_rmsf_aligned.pdf
+2. Aligned-core RMSF (based on sequence alignment)     → *_rmsf_aligned.pdf
 3. Radius of gyration (Rg) over time                   → *_rg.pdf
 4. Backbone RMSD vs time                               → *_rmsd_time.pdf
-5. k‑means cluster population bar‑chart (CA-RMSD)      → *_cluster_populations.pdf
+5. k-means cluster population bar chart (CA-RMSD)      → *_cluster_populations.pdf
 6. PCA scatter plot (PC1 vs PC2, aligned Cα)           → *_pca_scatter.pdf
 7. PCA variance and spread summary                     → printed to screen
-8. Persistent hydrogen bonds (≥30 % occupancy)         → *_hbonds_persistent.csv
+8. Persistent hydrogen bonds (≥30% occupancy)          → *_hbonds_persistent.csv
    - Includes top 20 persistent H-bonds printed to screen
    - Summary of shared vs exclusive bonds also printed
 9. DSSP secondary structure heatmaps                   → *_dssp.pdf
 10. DSSP difference map (per-residue disagreement)     → *_dssp_difference.pdf
-11. Production simulation summary (if OUT.gz provided) → printed to screen
-   - Includes total simulated time, avg. energy, temperature, and drift
+11. OUT.gz production summary (if provided)            → printed to screen
+   - Includes simulated time, avg. energy, temperature, and energy drift
+12. JSON summary for all metrics                       → *_summary.json
+   - See field descriptions below
 
-All quantitative comparisons (RMSF, Rg, etc.) include KS-test p-values.
-All file inputs may be gzip-compressed (.gz); extension is used to detect format.
+JSON Output Description
+-----------------------
+The *_summary.json file contains a structured record of all computed metrics:
+{
+  "label1": Name of trajectory 1,
+  "label2": Name of trajectory 2,
+
+  "rmsf": {
+    "full":     {mean1, std1, mean2, std2, ks_p},
+    "aligned":  {mean1, std1, mean2, std2, ks_p}
+  },
+
+  "rg": {mean1, std1, mean2, std2, ks_p},
+
+  "pca": {
+    "explained_variance": [PC1%, PC2%],
+    "std_pc1": [traj1_sd, traj2_sd],
+    "std_pc2": [traj1_sd, traj2_sd],
+    "centroid_distance": Euclidean distance between PCA centroids
+  },
+
+  "clustering": {
+    "k": number of clusters chosen,
+    "populations": {
+      "label1": cluster sizes for trajectory 1,
+      "label2": cluster sizes for trajectory 2
+    }
+  },
+
+  "hbonds": {
+    "n1": persistent H-bonds in traj1 (≥30%),
+    "n2": persistent H-bonds in traj2 (≥30%),
+    "shared": number of H-bonds shared between both,
+    "exclusive1": only in traj1,
+    "exclusive2": only in traj2
+  },
+
+  "dssp_diff": {
+    "residues_differing_gt_50pct": number of aligned residues with structural disagreement >50% of frames
+  },
+
+  "out1_summary": {
+    "total_ps": total simulated time (ps),
+    "avg_energy": mean potential energy (kJ/mol),
+    "std_energy": std deviation of energy,
+    "avg_temp": average temperature (K),
+    "std_temp": temperature fluctuations
+  },
+
+  "out2_summary": {
+    (same keys as out1_summary)
+  }
+}
 
 Usage
 -----
 Basic:
     python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz
 
-With optional OUT.gz files (to include simulation summary):
+With optional OUT.gz files (adds simulation summary):
     python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz \
         --out1 OUT1.gz --out2 OUT2.gz
 
@@ -49,14 +102,15 @@ Developer Notes
 - PCA and clustering use scikit-learn (requires installation).
 - Hydrogen bond persistence is based on MDTraj’s Wernet-Nilsson criteria.
 - DSSP analysis requires the DSSP binary (e.g., `conda install -c salilab dssp`).
-- Parsing of OUT.gz files assumes a 3-column CSV: step, energy, temperature.
+- OUT.gz files are parsed as CSV with 3 columns: step, potential energy, temperature.
+- The *_summary.json file is meant for multi-run batch comparison and summary scripts.
 
 Dependencies:
     mdtraj, numpy, matplotlib, seaborn, Bio, scikit-learn, gzip
 
 Recommended:
-    Use this script to benchmark trajectory stability and structural reliability
-    prior to ensemble averaging, free energy calculations, or scoring.
+    Use this script to benchmark MD stability, convergence, and reliability prior
+    to ensemble averaging, binding free energy calculations, or scoring pipelines.
 """
 
 from __future__ import annotations
