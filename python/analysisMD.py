@@ -41,22 +41,20 @@ aa3to1 = {k.upper(): v for k, v in IUPACData.protein_letters_3to1_extended.items
 _trim3 = re.compile(r"([A-Z]{3})").match
 
 # ──────────────────────────  HELPERS  ────────────────────────────────────────
-def decompress_if_gz(path: Path) -> Path:
-    """
-    If path ends in .gz, decompress it to a temp file preserving the inner file extension.
-    Otherwise return path unchanged.
-    """
+def decompress_if_gz(path: Path, tmp_files: list[Path]) -> Path:
     if path.suffix != ".gz":
         return path
 
-    # Extract the real filename from .gz (e.g., output.dcd.gz -> .dcd)
-    # Handle double extensions like .pdb.gz or .dcd.gz
+    # Extract extension from e.g. output.dcd.gz → .dcd
     inner_ext = "".join(Path(path.stem).suffixes) or ".dat"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=inner_ext, prefix="mdtraj_")
-    logging.info("Decompressing %s → %s", path, tmp.name)
     with gzip.open(path, "rb") as gz_in, open(tmp.name, "wb") as out:
         shutil.copyfileobj(gz_in, out)
-    return Path(tmp.name)
+
+    tmp_path = Path(tmp.name)
+    logging.info("Decompressing %s → %s", path, tmp_path)
+    tmp_files.append(tmp_path)
+    return tmp_path
 
 def trim3(name:str)->str:
     m=_trim3(name.upper()); return m.group(1) if m else name[:3].upper()
@@ -106,10 +104,13 @@ def main()->None:
 
     tmp_files=[]
     try:
-        t1=load_traj(decompress_if_gz(Path(args.traj1)),
-                     decompress_if_gz(Path(args.top1)))
-        t2=load_traj(decompress_if_gz(Path(args.traj2)),
-                     decompress_if_gz(Path(args.top2)))
+        traj1_path = decompress_if_gz(Path(args.traj1), tmp_files)
+        top1_path  = decompress_if_gz(Path(args.top1), tmp_files)
+        traj2_path = decompress_if_gz(Path(args.traj2), tmp_files)
+        top2_path  = decompress_if_gz(Path(args.top2), tmp_files)
+        
+        t1 = load_traj(traj1_path, top1_path)
+        t2 = load_traj(traj2_path, top2_path)
 
         # Standardise residue names
         standardise_names(t1); standardise_names(t2)
@@ -325,8 +326,10 @@ def main()->None:
 
     finally:
         for f in tmp_files:
-            try: Path(f).unlink()
-            except Exception: pass
+            try:
+                f.unlink(missing_ok=True)  # Python 3.8+
+            except Exception as e:
+                logging.warning("Could not delete temp file %s: %s", f, e)
 
 if __name__=="__main__":
     main()
