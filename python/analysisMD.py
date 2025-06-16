@@ -1,19 +1,62 @@
 #!/usr/bin/env python3
 """
-Comprehensive comparison of two MD trajectories
+Comprehensive Comparison of Two MD Trajectories
 ===============================================
+
+This script performs an extensive structural and energetic comparison between two
+molecular dynamics (MD) trajectories — typically a "Complete Structure" vs a
+"Published Structure" — to evaluate relative stability, convergence, and predictive utility.
+
 Outputs
 -------
-1. Full RMSF (all protein residues)                → *_rmsf_full.pdf
-2. Aligned‑core RMSF                               → *_rmsf_aligned.pdf
-3. Radius of gyration                              → *_rg.pdf
-4. Backbone RMSD vs time                           → *_rmsd_time.pdf
-5. k‑means cluster population bar‑chart            → *_cluster_populations.pdf
-6. PCA (first two PCs, aligned Cα)                 → *_pca_scatter.pdf
-7. Persistent hydrogen bonds (≥30 % occupancy)     → *_hbonds_persistent.csv
-8. DSSP heat‑map (if DSSP binary is present)       → *_dssp.pdf
-All numeric comparisons are logged with KS‑tests.
-Handles .gz‑compressed inputs transparently.
+1. Full RMSF (all protein residues)                    → *_rmsf_full.pdf
+2. Aligned‑core RMSF (based on sequence alignment)     → *_rmsf_aligned.pdf
+3. Radius of gyration (Rg) over time                   → *_rg.pdf
+4. Backbone RMSD vs time                               → *_rmsd_time.pdf
+5. k‑means cluster population bar‑chart (CA-RMSD)      → *_cluster_populations.pdf
+6. PCA scatter plot (PC1 vs PC2, aligned Cα)           → *_pca_scatter.pdf
+7. PCA variance and spread summary                     → printed to screen
+8. Persistent hydrogen bonds (≥30 % occupancy)         → *_hbonds_persistent.csv
+   - Includes top 20 persistent H-bonds printed to screen
+   - Summary of shared vs exclusive bonds also printed
+9. DSSP secondary structure heatmaps                   → *_dssp.pdf
+10. DSSP difference map (per-residue disagreement)     → *_dssp_difference.pdf
+11. Production simulation summary (if OUT.gz provided) → printed to screen
+   - Includes total simulated time, avg. energy, temperature, and drift
+
+All quantitative comparisons (RMSF, Rg, etc.) include KS-test p-values.
+All file inputs may be gzip-compressed (.gz); extension is used to detect format.
+
+Usage
+-----
+Basic:
+    python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz
+
+With optional OUT.gz files (to include simulation summary):
+    python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz \
+        --out1 OUT1.gz --out2 OUT2.gz
+
+Optional labels for reporting:
+    --label1 "Complete Structure" --label2 "Published Structure"
+
+Output prefix (e.g., "1kzn_comparison"):
+    -o 1kzn_comparison
+
+Developer Notes
+---------------
+- All temporary decompressed files are tracked and deleted on exit.
+- Sequence alignment is performed using Biopython’s PairwiseAligner.
+- PCA and clustering use scikit-learn (requires installation).
+- Hydrogen bond persistence is based on MDTraj’s Wernet-Nilsson criteria.
+- DSSP analysis requires the DSSP binary (e.g., `conda install -c salilab dssp`).
+- Parsing of OUT.gz files assumes a 3-column CSV: step, energy, temperature.
+
+Dependencies:
+    mdtraj, numpy, matplotlib, seaborn, Bio, scikit-learn, gzip
+
+Recommended:
+    Use this script to benchmark trajectory stability and structural reliability
+    prior to ensemble averaging, free energy calculations, or scoring.
 """
 
 from __future__ import annotations
@@ -64,9 +107,11 @@ def standardise_names(traj: md.Trajectory)->None:
         core = residue_mapping.get(trim3(res.name), trim3(res.name))
         res.name = core
 
-def load_traj(traj:Path, top:Path)->md.Trajectory:
+def load_traj(traj: Path, top: Path) -> md.Trajectory:
     t = md.load(traj, top=top)
-    logging.info("Loaded %-20s  frames:%5d  atoms:%d", traj.name, t.n_frames, t.n_atoms)
+    n_residues = t.topology.n_residues
+    logging.info("Loaded %-20s  frames:%5d  atoms:%6d  residues:%4d",
+                 traj.name, t.n_frames, t.n_atoms, n_residues)
     return t
 
 def seq_and_ca(traj: md.Trajectory)->Tuple[str,List[int]]:
@@ -87,6 +132,66 @@ def compute_rmsf(traj: md.Trajectory, idx: np.ndarray)->np.ndarray:
 
 def safe(label:str)->str:  # filename‑safe
     return re.sub(r"[^A-Za-z0-9]+","_",label.strip()).lower()
+    
+def parse_out_file(out_gz_path: Path):
+    """
+    Parse OUT.gz file for energy and temperature summary.
+    """
+    import gzip
+    steps, energies, temps = [], [], []
+
+    try:
+        with gzip.open(out_gz_path, 'rt') as fh:
+            for line in fh:
+                if line.strip().startswith('#') or not line.strip():
+                    continue
+                parts = line.strip().split(',')
+                if len(parts) == 3 and parts[0].strip().isdigit():
+                    try:
+                        steps.append(int(parts[0]))
+                        energies.append(float(parts[1]))
+                        temps.append(float(parts[2]))
+                    except ValueError:
+                        continue
+    except Exception as e:
+        logging.warning("Failed to parse OUT.gz: %s", e)
+        return None
+
+    if not steps:
+        return None
+
+    interval = steps[1] - steps[0] if len(steps) > 1 else 1000
+    total_ps = steps[-1] * (interval / 1000)
+
+    return {
+        "n_steps": len(steps),
+        "total_ps": total_ps,
+        "avg_energy": np.mean(energies),
+        "std_energy": np.std(energies),
+        "avg_temp": np.mean(temps),
+        "std_temp": np.std(temps)
+    }
+
+def print_sim_summary(label: str, data: dict):
+    if not data:
+        print(f"\nSimulation Summary: {label}")
+        print("  No valid OUT.gz data found.")
+        return
+
+    print(f"\nSimulation Summary: {label}")
+    print(f"  Total simulated time     : {data['total_ps']:.1f} ps ({data['total_ps'] / 1000:.2f} ns)")
+    print(f"  Number of steps reported : {data['n_steps']}")
+    print(f"  Avg. potential energy    : {data['avg_energy']:.1f} ± {data['std_energy']:.1f} kJ/mol")
+    print(f"  Avg. temperature         : {data['avg_temp']:.1f} ± {data['std_temp']:.1f} K")
+
+    drift_ratio = data['std_energy'] / abs(data['avg_energy'])
+    if drift_ratio < 0.01:
+        print("  Energy drift             : Stable (std dev < 1%)")
+    elif drift_ratio < 0.03:
+        print("  Energy drift             : Mild instability (std dev ~2%)")
+    else:
+        print("  Energy drift             : Significant (std dev > 3%)")
+
 
 # ──────────────────────────  MAIN  ───────────────────────────────────────────
 def main()->None:
@@ -96,6 +201,8 @@ def main()->None:
     ap.add_argument("-o","--out-prefix", default="comparison")
     ap.add_argument("--label1", default="Complete Structure")
     ap.add_argument("--label2", default="Published Structure")
+    ap.add_argument("--out1", type=Path, help="OUT.gz file for trajectory 1 (optional)")
+    ap.add_argument("--out2", type=Path, help="OUT.gz file for trajectory 2 (optional)")
     ap.add_argument("-q","--quiet",action="store_true")
     args=ap.parse_args()
 
@@ -261,6 +368,27 @@ def main()->None:
         plt.savefig(f"{args.out_prefix}_pca_scatter.pdf", dpi=300)
         plt.close()
 
+        # Variance explained
+        var_exp = pca.explained_variance_ratio_
+        print("\nPrincipal Component Variance Explained:")
+        print(f"  PC1: {var_exp[0]*100:.1f}%")
+        print(f"  PC2: {var_exp[1]*100:.1f}%")
+        
+        # Spread in PCA space
+        def pca_stats(pc):
+            return np.std(pc[:, 0]), np.std(pc[:, 1]), np.mean(pc[:, 0]), np.mean(pc[:, 1])
+        
+        sd1_pc1, sd1_pc2, mu1_pc1, mu1_pc2 = pca_stats(pc1)
+        sd2_pc1, sd2_pc2, mu2_pc1, mu2_pc2 = pca_stats(pc2)
+        
+        print("\nConformational spread (std. dev. along PC1/PC2):")
+        print(f"  {args.label1:<18} PC1={sd1_pc1:.2f}  PC2={sd1_pc2:.2f}")
+        print(f"  {args.label2:<18} PC1={sd2_pc1:.2f}  PC2={sd2_pc2:.2f}")
+        
+        # Distance between PCA centroids
+        centroid_dist = np.linalg.norm([mu1_pc1 - mu2_pc1, mu1_pc2 - mu2_pc2])
+        print(f"\nCentroid distance (Complete vs Published): {centroid_dist:.2f}\n")
+
         # ───────── Hydrogen‑bond persistence ─────────
         hb1 = md.wernet_nilsson(prot1, periodic=False, sidechain_only=False)
         hb2 = md.wernet_nilsson(prot2, periodic=False, sidechain_only=False)
@@ -306,12 +434,42 @@ def main()->None:
         else:
             logging.info("No hydrogen bonds ≥30%% occupancy in either trajectory")
 
-        # ───────── DSSP heat‑map (unchanged) ─────────
+        # Print summary table to screen
+        top_n = 20
+        sorted_persistent = sorted(persistent.items(), key=lambda x: -max(x[1]))
+        
+        print("\nTop persistent hydrogen bonds (≥30% occupancy in either trajectory):")
+        print(f"{'Donor':<18} → {'Acceptor':<18} | {args.label1:^18} | {args.label2:^18}")
+        print("-" * 70)
+        
+        for (don_idx, acc_idx), (f1, f2) in sorted(persistent.items(), key=lambda x: -max(x[1]))[:20]:
+            top_d = prot1 if don_idx < prot1.n_atoms else prot2
+            top_a = prot1 if acc_idx < prot1.n_atoms else prot2
+            don_res = top_d.topology.atom(don_idx).residue
+            acc_res = top_a.topology.atom(acc_idx).residue
+            print(f"{str(don_res):<18} → {str(acc_res):<18} | {f1:>8.2f}         | {f2:>8.2f}")
+        
+        # Summary stats
+        n1 = sum(1 for v in persistent.values() if v[0] >= 0.30)
+        n2 = sum(1 for v in persistent.values() if v[1] >= 0.30)
+        shared = sum(1 for v in persistent.values() if v[0] >= 0.30 and v[1] >= 0.30)
+        only1 = sum(1 for v in persistent.values() if v[0] >= 0.30 and v[1] < 0.30)
+        only2 = sum(1 for v in persistent.values() if v[1] >= 0.30 and v[0] < 0.30)
+        
+        print(f"\n{args.label1}: {n1} persistent H-bonds (≥30%)")
+        print(f"{args.label2}: {n2} persistent H-bonds (≥30%)")
+        print(f"Shared: {shared}")
+        print(f"Exclusive to {args.label1}: {only1}")
+        print(f"Exclusive to {args.label2}: {only2}\n")
+
+        # ───────── DSSP heat‑map ─────────
         try:
-            ss1 = md.compute_dssp(prot1); ss2 = md.compute_dssp(prot2)
+            ss1 = md.compute_dssp(prot1)
+            ss2 = md.compute_dssp(prot2)
             struct_map={'H':0,'E':1,'C':2,'G':3,'I':4,'B':5,'T':6,'S':7}
             ss_num1=np.vectorize(struct_map.get)(ss1)
             ss_num2=np.vectorize(struct_map.get)(ss2)
+        
             import seaborn as sns
             plt.figure(figsize=(10,6))
             for i,(ss,label) in enumerate([(ss_num1,args.label1),(ss_num2,args.label2)],1):
@@ -320,9 +478,47 @@ def main()->None:
                             cbar_kws={"label":"DSSP"})
                 plt.ylabel("Residue"); plt.xlabel("Frame")
                 plt.title(f"{label} – DSSP")
-            plt.tight_layout(); plt.savefig(f"{args.out_prefix}_dssp.pdf",dpi=300); plt.close()
+            plt.tight_layout()
+            plt.savefig(f"{args.out_prefix}_dssp.pdf", dpi=300)
+            plt.close()
+        
+            # Difference map (on aligned residues only)
+            r1_idx = [prot1.topology.atom(i).residue.index for i in m1]
+            r2_idx = [prot2.topology.atom(i).residue.index for i in m2]
+            aligned_ss1 = ss1[:, r1_idx]
+            aligned_ss2 = ss2[:, r2_idx]
+            dssp_diff = (aligned_ss1 != aligned_ss2).astype(np.int_)
+        
+            plt.figure(figsize=(12, 6))
+            sns.heatmap(dssp_diff.T, cmap="Reds", cbar_kws={"label": "Mismatch (1 = different)"})
+            plt.xlabel("Frame")
+            plt.ylabel("Aligned residue index")
+            plt.title("DSSP secondary structure difference (Complete vs Published)")
+            plt.tight_layout()
+            plt.savefig(f"{args.out_prefix}_dssp_difference.pdf", dpi=300)
+            plt.close()
+        
+            diff_summary = dssp_diff.mean(axis=0)
+            n_disagree = np.sum(diff_summary > 0.5)
+            print(f"\n{n_disagree} aligned residues differed in secondary structure "
+                  f"in >50% of frames.\n")
+        
         except Exception as e:
-            logging.warning("DSSP calculation skipped (%s)",e)
+            logging.warning("DSSP calculation failed (%s)", e)
+
+        # ───────── Simulation summary from OUT.gz (optional) ─────────
+        if args.out1 or args.out2:
+            print("\n" + "=" * 60)
+            print("Production Energy & Temperature Summary")
+            print("=" * 60)
+        
+        if args.out1:
+            out1_data = parse_out_file(args.out1)
+            print_sim_summary(args.label1, out1_data)
+        
+        if args.out2:
+            out2_data = parse_out_file(args.out2)
+            print_sim_summary(args.label2, out2_data)
 
     finally:
         for f in tmp_files:
