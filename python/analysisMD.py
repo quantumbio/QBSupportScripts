@@ -72,6 +72,7 @@ from Bio.Align import PairwiseAligner
 from Bio.Data import IUPACData
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
+import json
 
 # ─────────────────────────────  CONFIG  ──────────────────────────────────────
 residue_mapping = {             # standard 3‑letter + Amber variants
@@ -505,7 +506,51 @@ def main()->None:
         
         except Exception as e:
             logging.warning("DSSP calculation failed (%s)", e)
-
+        
+        summary = {
+            "label1": args.label1,
+            "label2": args.label2,
+            "rmsf": {
+                "full": {
+                    "mean1": float(rmsf1_full.mean()), "std1": float(rmsf1_full.std()),
+                    "mean2": float(rmsf2_full.mean()), "std2": float(rmsf2_full.std()),
+                    "ks_p": float(ks_full.pvalue)
+                },
+                "aligned": {
+                    "mean1": float(rmsf1_aln.mean()), "std1": float(rmsf1_aln.std()),
+                    "mean2": float(rmsf2_aln.mean()), "std2": float(rmsf2_aln.std()),
+                    "ks_p": float(ks_aln.pvalue)
+                }
+            },
+            "rg": {
+                "mean1": float(rg1.mean()), "std1": float(rg1.std()),
+                "mean2": float(rg2.mean()), "std2": float(rg2.std()),
+                "ks_p": float(ks_rg.pvalue)
+            },
+            "pca": {
+                "explained_variance": [float(v) for v in var_exp],
+                "std_pc1": [float(sd1_pc1), float(sd2_pc1)],
+                "std_pc2": [float(sd1_pc2), float(sd2_pc2)],
+                "centroid_distance": float(centroid_dist)
+            },
+            "clustering": {
+                "k": k_opt,
+                "populations": {
+                    args.label1: list(map(int, pop1)),
+                    args.label2: list(map(int, pop2))
+                }
+            },
+            "hbonds": {
+                "n1": n1, "n2": n2,
+                "shared": shared,
+                "exclusive1": only1,
+                "exclusive2": only2
+            },
+            "dssp_diff": {
+                "residues_differing_gt_50pct": int(n_disagree)
+            }
+        }
+        
         # ───────── Simulation summary from OUT.gz (optional) ─────────
         if args.out1 or args.out2:
             print("\n" + "=" * 60)
@@ -514,11 +559,21 @@ def main()->None:
         
         if args.out1:
             out1_data = parse_out_file(args.out1)
+            if out1_data:
+                summary["out1_summary"] = {k: float(v) for k, v in out1_data.items()}
             print_sim_summary(args.label1, out1_data)
         
         if args.out2:
             out2_data = parse_out_file(args.out2)
+            if out2_data:
+                summary["out2_summary"] = {k: float(v) for k, v in out2_data.items()}
             print_sim_summary(args.label2, out2_data)
+
+
+        with open(f"{args.out_prefix}_summary.json", "w") as jfh:
+            json.dump(summary, jfh, indent=2)
+            logging.info("Wrote summary JSON to %s", f"{args.out_prefix}_summary.json")
+
 
     finally:
         for f in tmp_files:
