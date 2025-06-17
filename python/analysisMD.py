@@ -36,70 +36,87 @@ Outputs
 JSON Output Description
 -----------------------
 The *_summary.json file contains a structured record of all computed metrics:
+
 {
-  "label1": Name of trajectory 1,
-  "label2": Name of trajectory 2,
+  "label1": Name of trajectory 1 (e.g., "Complete Structure"),
+  "label2": Name of trajectory 2 (e.g., "Published Structure"),
 
   "rmsf": {
-    "full":     {mean1, std1, mean2, std2, ks_p},
-    "aligned":  {mean1, std1, mean2, std2, ks_p}
+    "full":     { "mean1", "std1", "mean2", "std2", "ks_p" },
+    "aligned":  { "mean1", "std1", "mean2", "std2", "ks_p" }
   },
 
-  "rg": {mean1, std1, mean2, std2, ks_p},
+  "rg": {
+    "mean1", "std1", "mean2", "std2", "ks_p"
+  },
 
   "pca": {
-    "explained_variance": [PC1%, PC2%],
-    "std_pc1": [traj1_sd, traj2_sd],
-    "std_pc2": [traj1_sd, traj2_sd],
+    "explained_variance": [ PC1%, PC2% ],
+    "std_pc1": [ traj1_std, traj2_std ],
+    "std_pc2": [ traj1_std, traj2_std ],
     "centroid_distance": Euclidean distance between PCA centroids
   },
 
   "clustering": {
-    "k": number of clusters chosen,
+    "k": number of clusters selected,
     "populations": {
-      "label1": cluster sizes for trajectory 1,
-      "label2": cluster sizes for trajectory 2
+      "label1": [ cluster sizes in traj1 ],
+      "label2": [ cluster sizes in traj2 ]
     }
   },
 
   "hbonds": {
     "n1": persistent H-bonds in traj1 (≥30%),
     "n2": persistent H-bonds in traj2 (≥30%),
-    "shared": number of H-bonds shared between both,
-    "exclusive1": only in traj1,
-    "exclusive2": only in traj2
+    "shared": number of shared persistent H-bonds,
+    "exclusive1": count only in traj1,
+    "exclusive2": count only in traj2
   },
 
+  "top_hbonds": [  # sorted by highest max persistence
+    {
+      "donor":    "A:ARG61",
+      "acceptor": "A:GLU35",
+      "label1":   1.00,
+      "label2":   1.00
+    },
+    ...
+  ],
+
   "dssp_diff": {
-    "residues_differing_gt_50pct": number of aligned residues with structural disagreement >50% of frames
+    "residues_differing_gt_50pct": Number of aligned residues whose secondary structure disagrees >50% of the time
   },
 
   "out1_summary": {
     "total_ps": total simulated time (ps),
     "avg_energy": mean potential energy (kJ/mol),
-    "std_energy": std deviation of energy,
-    "avg_temp": average temperature (K),
-    "std_temp": temperature fluctuations
+    "std_energy": std dev of potential energy,
+    "avg_temp": mean temperature (K),
+    "std_temp": temperature fluctuation
   },
 
   "out2_summary": {
-    (same keys as out1_summary)
+    (same fields as out1_summary)
   },
 
-  "ligand": {
-    "resname": ligand 3-letter code,
+  "ligand": {   # Included only if --ligand is provided AND the ligand is present in both structures
+    "resname": 3-letter residue name (e.g., "CBN"),
+
     "rmsd": {
-      "label1": {mean, std, max},
-      "label2": {mean, std, max}
+      "label1": { "mean", "std", "max" },
+      "label2": { "mean", "std", "max" }
     },
+
     "sasa": {
-      "label1": {mean, std},
-      "label2": {mean, std}
+      "label1": { "mean", "std" },
+      "label2": { "mean", "std" }
     },
+
     "rmsf": {
-      "label1": {mean, std, max},
-      "label2": {mean, std, max}
+      "label1": { "mean", "std", "max" },
+      "label2": { "mean", "std", "max" }
     },
+
     "hbond_persistence": [
       {
         "donor": "A:ARG32",
@@ -109,6 +126,7 @@ The *_summary.json file contains a structured record of all computed metrics:
       },
       ...
     ],
+
     "contact_fingerprint": [
       {
         "residue": "A:ASP17",
@@ -363,8 +381,6 @@ def main()->None:
         plt.legend(); plt.tight_layout()
         plt.savefig(f"{args.out_prefix}_rmsf_aligned.pdf",dpi=300); plt.close()
 
-        aligned_residues = [prot1.topology.atom(i).residue for i in m1]
-
         # ───────── Rg ─────────
         rg1=md.compute_rg(prot1)*10.0; rg2=md.compute_rg(prot2)*10.0
         ks_rg=ks_2samp(rg1,rg2)
@@ -391,6 +407,7 @@ def main()->None:
 
         # ───────── CLUSTERING (k‑means, CA‑RMSD feature matrix) ─────────
         min_frames = 10
+        k_opt, pop1, pop2 = None, [], []
         if prot1.n_frames >= min_frames and prot2.n_frames >= min_frames \
            and len(ca1_all) and len(ca2_all):
         
@@ -449,6 +466,8 @@ def main()->None:
             plt.savefig(f"{args.out_prefix}_cluster_populations.pdf", dpi=300)
             plt.close()
         else:
+            k_opt = None
+            pop1 = pop2 = []
             logging.warning("Clustering skipped: insufficient frames or atoms.")
 
         # ───────── PCA (aligned Cα only) ─────────
@@ -574,6 +593,7 @@ def main()->None:
         print(f"Exclusive to {args.label2}: {only2}\n")
 
         # ───────── DSSP heat‑map ─────────
+        n_disagree = 0
         try:
             ss1 = md.compute_dssp(prot1)
             ss2 = md.compute_dssp(prot2)
@@ -724,8 +744,8 @@ def main()->None:
             hb1_all = md.wernet_nilsson(traj_lp1)
             hb2_all = md.wernet_nilsson(traj_lp2)
             
-            def extract_ligand_hbonds(hb_frame_list, ligand_atoms, atom_offset=0):
-                ligand_set = set(a - atom_offset for a in ligand_atoms)
+            def extract_ligand_hbonds(hb_frame_list, ligand_slice_indices):
+                ligand_set = set(ligand_slice_indices)
                 counts = {}
                 n_frames = len(hb_frame_list)
                 for frame in hb_frame_list:
@@ -859,6 +879,21 @@ def main()->None:
                 "exclusive1": only1,
                 "exclusive2": only2
             },
+            "top_hbonds" : [
+                {
+                    "donor": f"{chr(65 + don_res.chain.index)}:{don_res.name}{don_res.resSeq}",
+                    "acceptor": f"{chr(65 + acc_res.chain.index)}:{acc_res.name}{acc_res.resSeq}",
+                    args.label1: float(f1),
+                    args.label2: float(f2)
+                }
+                for (don_idx, acc_idx), (f1, f2) in sorted_persistent
+                for don_res, acc_res in [
+                    (
+                        (prot1 if don_idx < prot1.n_atoms else prot2).topology.atom(don_idx).residue,
+                        (prot1 if acc_idx < prot1.n_atoms else prot2).topology.atom(acc_idx).residue
+                    )
+                ]
+            ],
             "dssp_diff": {
                 "residues_differing_gt_50pct": int(n_disagree)
             }
@@ -919,7 +954,7 @@ def main()->None:
                         args.label1: float(fp1[i]),
                         args.label2: float(fp2[i])
                     }
-                    for i, res in enumerate(aligned_residues)  # use aligned_residues here
+                    for i, res in enumerate(aligned_res1)  # use aligned_res1 here
                     if max(fp1[i], fp2[i]) > 0.3  # keep only significant contacts
                 ]
             }
