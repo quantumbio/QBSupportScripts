@@ -22,9 +22,16 @@ Outputs
 9. DSSP secondary structure heatmaps                   → *_dssp.pdf
 10. DSSP difference map (per-residue disagreement)     → *_dssp_difference.pdf
 11. OUT.gz production summary (if provided)            → printed to screen
-   - Includes simulated time, avg. energy, temperature, and energy drift
-12. JSON summary for all metrics                       → *_summary.json
-   - See field descriptions below
+    - Includes simulated time, avg. energy, temperature, and energy drift
+12. Ligand Stability Analysis (if --ligand supplied)   → printed to screen and saved as:
+    a. Ligand RMSD over time                           → *_ligand_rmsd.pdf
+    b. Ligand SASA over time                           → *_ligand_sasa.pdf
+    c. Ligand per-atom RMSF                            → *_ligand_rmsf.pdf
+    d. Ligand-pocket hydrogen bonds (≥30%)             → printed to screen
+    e. Ligand-residue contact fingerprint map          → printed to screen
+    f. All ligand data added to *_summary.json
+13. JSON summary for all metrics                       → *_summary.json
+    - See field descriptions below
 
 JSON Output Description
 -----------------------
@@ -77,6 +84,39 @@ The *_summary.json file contains a structured record of all computed metrics:
 
   "out2_summary": {
     (same keys as out1_summary)
+  },
+
+  "ligand": {
+    "resname": ligand 3-letter code,
+    "rmsd": {
+      "label1": {mean, std, max},
+      "label2": {mean, std, max}
+    },
+    "sasa": {
+      "label1": {mean, std},
+      "label2": {mean, std}
+    },
+    "rmsf": {
+      "label1": {mean, std, max},
+      "label2": {mean, std, max}
+    },
+    "hbond_persistence": [
+      {
+        "donor": "A:ARG32",
+        "acceptor": "B:GLU45",
+        "label1": 0.95,
+        "label2": 0.00
+      },
+      ...
+    ],
+    "contact_fingerprint": [
+      {
+        "residue": "A:ASP17",
+        "label1": 0.44,
+        "label2": 0.12
+      },
+      ...
+    ]
   }
 }
 
@@ -88,6 +128,10 @@ Basic:
 With optional OUT.gz files (adds simulation summary):
     python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz \
         --out1 OUT1.gz --out2 OUT2.gz
+
+With ligand analysis:
+    python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz \
+        --ligand LIG
 
 Optional labels for reporting:
     --label1 "Complete Structure" --label2 "Published Structure"
@@ -103,7 +147,8 @@ Developer Notes
 - Hydrogen bond persistence is based on MDTraj’s Wernet-Nilsson criteria.
 - DSSP analysis requires the DSSP binary (e.g., `conda install -c salilab dssp`).
 - OUT.gz files are parsed as CSV with 3 columns: step, potential energy, temperature.
-- The *_summary.json file is meant for multi-run batch comparison and summary scripts.
+- The ligand section requires --ligand RESNAME to be provided and found in both structures.
+- The *_summary.json file is suitable for downstream batch analysis.
 
 Dependencies:
     mdtraj, numpy, matplotlib, seaborn, Bio, scikit-learn, gzip
@@ -258,6 +303,7 @@ def main()->None:
     ap.add_argument("--label2", default="Published Structure")
     ap.add_argument("--out1", type=Path, help="OUT.gz file for trajectory 1 (optional)")
     ap.add_argument("--out2", type=Path, help="OUT.gz file for trajectory 2 (optional)")
+    ap.add_argument("--ligand", type=str, help="3-letter ligand residue name (e.g., CBN or LIG)")
     ap.add_argument("-q","--quiet",action="store_true")
     args=ap.parse_args()
 
@@ -316,6 +362,8 @@ def main()->None:
         plt.title(f"Aligned‑core RMSF  KS p={ks_aln.pvalue:.3e}")
         plt.legend(); plt.tight_layout()
         plt.savefig(f"{args.out_prefix}_rmsf_aligned.pdf",dpi=300); plt.close()
+
+        aligned_residues = [prot1.topology.atom(i).residue for i in m1]
 
         # ───────── Rg ─────────
         rg1=md.compute_rg(prot1)*10.0; rg2=md.compute_rg(prot2)*10.0
@@ -500,9 +548,17 @@ def main()->None:
         for (don_idx, acc_idx), (f1, f2) in sorted(persistent.items(), key=lambda x: -max(x[1]))[:20]:
             top_d = prot1 if don_idx < prot1.n_atoms else prot2
             top_a = prot1 if acc_idx < prot1.n_atoms else prot2
-            don_res = top_d.topology.atom(don_idx).residue
-            acc_res = top_a.topology.atom(acc_idx).residue
-            print(f"{str(don_res):<18} → {str(acc_res):<18} | {f1:>8.2f}         | {f2:>8.2f}")
+        
+            don_atom = top_d.topology.atom(don_idx)
+            acc_atom = top_a.topology.atom(acc_idx)
+        
+            don_res = don_atom.residue
+            acc_res = acc_atom.residue
+        
+            don_str = f"{chr(65 + don_res.chain.index)}:{don_res.name}{don_res.resSeq}"
+            acc_str = f"{chr(65 + acc_res.chain.index)}:{acc_res.name}{acc_res.resSeq}"
+        
+            print(f"{don_str:<18} → {acc_str:<18} | {f1:>8.2f}         | {f2:>8.2f}")
         
         # Summary stats
         n1 = sum(1 for v in persistent.values() if v[0] >= 0.30)
@@ -561,6 +617,209 @@ def main()->None:
         except Exception as e:
             logging.warning("DSSP calculation failed (%s)", e)
         
+
+        # ───────── Ligand detection or reporting ─────────
+        ligand_resname = args.ligand.upper() if args.ligand else None
+        
+        if ligand_resname:
+            ligand1 = t1.topology.select(f"resname {ligand_resname}")
+            ligand2 = t2.topology.select(f"resname {ligand_resname}")
+        
+            if len(ligand1) == 0 or len(ligand2) == 0:
+                print(f"\nWARNING: Ligand '{ligand_resname}' not found in one or both trajectories.\n")
+            else:
+                print(f"\nLigand '{ligand_resname}' found in both structures.")
+                print(f"  Complete Structure: {len(ligand1)} atoms")
+                print(f"  Published Structure: {len(ligand2)} atoms")
+                # Optional: Add analysis code here (RMSD, SASA, etc.)
+        else:
+            # No ligand specified — report all non-standard residues
+            def get_nonprotein_resnames(top):
+                return sorted(set(
+                    res.name for res in top.residues
+                    if not res.is_protein and res.name not in {"HOH", "NA", "CL"}
+                ))
+        
+            other1 = get_nonprotein_resnames(t1.topology)
+            other2 = get_nonprotein_resnames(t2.topology)
+            unknowns = sorted(set(other1) | set(other2))
+        
+            if unknowns:
+                print("\nLigand not specified.")
+                print("These are the unknown / non-protein residues found:")
+                print("  " + " ".join(unknowns) + "\n")
+            else:
+                print("\nLigand not specified, and no non-protein residues found.\n")
+
+        if ligand_resname and len(ligand1) > 0 and len(ligand2) > 0:
+            print("\nLigand Stability Analysis")
+            print("=" * 30)
+        
+            # Slice trajectories
+            lig_traj1 = t1.atom_slice(ligand1)
+            lig_traj2 = t2.atom_slice(ligand2)
+        
+            # ───── Ligand RMSD (vs. frame 0) ─────
+            lig_rmsd1 = md.rmsd(lig_traj1, lig_traj1, 0) * 10.0  # Å
+            lig_rmsd2 = md.rmsd(lig_traj2, lig_traj2, 0) * 10.0  # Å
+        
+            plt.figure()
+            plt.plot(lig_rmsd1, label=f"{args.label1}")
+            plt.plot(lig_rmsd2, label=f"{args.label2}")
+            plt.xlabel("Frame"); plt.ylabel("Ligand RMSD (Å)")
+            plt.title(f"Ligand RMSD (resname {ligand_resname})")
+            plt.legend(); plt.tight_layout()
+            plt.savefig(f"{args.out_prefix}_ligand_rmsd.pdf", dpi=300)
+            plt.close()
+        
+            print(f"  Ligand RMSD (Å):")
+            print(f"    {args.label1:<20} mean={lig_rmsd1.mean():.2f}  std={lig_rmsd1.std():.2f}  max={lig_rmsd1.max():.2f}")
+            print(f"    {args.label2:<20} mean={lig_rmsd2.mean():.2f}  std={lig_rmsd2.std():.2f}  max={lig_rmsd2.max():.2f}")
+        
+            # ───── Ligand SASA (Shrake-Rupley) ─────
+            sasa1 = md.shrake_rupley(lig_traj1).sum(axis=1)
+            sasa2 = md.shrake_rupley(lig_traj2).sum(axis=1)
+        
+            plt.figure()
+            plt.plot(sasa1, label=args.label1)
+            plt.plot(sasa2, label=args.label2)
+            plt.xlabel("Frame"); plt.ylabel("Ligand SASA (Å²)")
+            plt.title(f"Ligand Solvent Accessibility (resname {ligand_resname})")
+            plt.legend(); plt.tight_layout()
+            plt.savefig(f"{args.out_prefix}_ligand_sasa.pdf", dpi=300)
+            plt.close()
+        
+            print(f"  Ligand SASA (Å²):")
+            print(f"    {args.label1:<20} mean={sasa1.mean():.1f}  std={sasa1.std():.1f}")
+            print(f"    {args.label2:<20} mean={sasa2.mean():.1f}  std={sasa2.std():.1f}")
+        
+            # ───── Ligand RMSF (per atom) ─────
+            rmsf_lig1 = md.rmsf(lig_traj1, reference=lig_traj1) * 10.0
+            rmsf_lig2 = md.rmsf(lig_traj2, reference=lig_traj2) * 10.0
+        
+            plt.figure()
+            plt.plot(rmsf_lig1, label=args.label1)
+            plt.plot(rmsf_lig2, label=args.label2)
+            plt.xlabel("Ligand Atom Index"); plt.ylabel("RMSF (Å)")
+            plt.title(f"Ligand Atom Flexibility (RMSF)")
+            plt.legend(); plt.tight_layout()
+            plt.savefig(f"{args.out_prefix}_ligand_rmsf.pdf", dpi=300)
+            plt.close()
+
+            print("  Ligand RMSF:")
+            print(f"    {args.label1:<20} mean={rmsf_lig1.mean():.2f}  std={rmsf_lig1.std():.2f}  max={rmsf_lig1.max():.2f}")
+            print(f"    {args.label2:<20} mean={rmsf_lig2.mean():.2f}  std={rmsf_lig2.std():.2f}  max={rmsf_lig2.max():.2f}")
+
+            # ───── Ligand–Pocket H-bonds (≥30%) [Aligned Structures] ─────
+            print("\nLigand–Pocket H-bond Analysis")
+            print("=" * 30)
+            
+            # Union of protein + ligand (from ALIGNED prot1/prot2)
+            ligand_protein1 = np.unique(np.concatenate([prot1.topology.select("all"), ligand1]))
+            ligand_protein2 = np.unique(np.concatenate([prot2.topology.select("all"), ligand2]))
+            
+            traj_lp1 = t1.atom_slice(ligand_protein1)
+            traj_lp2 = t2.atom_slice(ligand_protein2)
+            
+            hb1_all = md.wernet_nilsson(traj_lp1)
+            hb2_all = md.wernet_nilsson(traj_lp2)
+            
+            def extract_ligand_hbonds(hb_frame_list, ligand_atoms, atom_offset=0):
+                ligand_set = set(a - atom_offset for a in ligand_atoms)
+                counts = {}
+                n_frames = len(hb_frame_list)
+                for frame in hb_frame_list:
+                    for hbond in frame:
+                        don, acc = map(int, hbond[[0, -1]])
+                        if don in ligand_set or acc in ligand_set:
+                            key = (don, acc)
+                            counts[key] = counts.get(key, 0) + 1
+                return {k: v / n_frames for k, v in counts.items()}
+            
+            # Map ligand atom indices to sliced traj index space
+            ligand1_map = np.where(np.isin(ligand_protein1, ligand1))[0]
+            ligand2_map = np.where(np.isin(ligand_protein2, ligand2))[0]
+            
+            lig_hb1 = extract_ligand_hbonds(hb1_all, ligand1_map)
+            lig_hb2 = extract_ligand_hbonds(hb2_all, ligand2_map)
+            
+            # Merge and filter shared H-bonds
+            lig_hb_shared = {
+                k: (lig_hb1.get(k, 0), lig_hb2.get(k, 0))
+                for k in set(lig_hb1) | set(lig_hb2)
+                if max(lig_hb1.get(k, 0), lig_hb2.get(k, 0)) >= 0.3
+            }
+            
+            if lig_hb_shared:
+                print(f"  {len(lig_hb_shared)} ligand–protein H-bonds ≥30% persistence")
+                for (don, acc), (f1, f2) in sorted(lig_hb_shared.items(), key=lambda x: -max(x[1])):
+                    # Use aligned trajectories for residue labeling
+                    don_atom = traj_lp1.topology.atom(don) if don < traj_lp1.n_atoms else traj_lp2.topology.atom(don)
+                    acc_atom = traj_lp1.topology.atom(acc) if acc < traj_lp1.n_atoms else traj_lp2.topology.atom(acc)
+                    r1 = don_atom.residue
+                    r2 = acc_atom.residue
+                    name1 = f"{chr(65 + r1.chain.index)}:{r1.name}{r1.resSeq}"
+                    name2 = f"{chr(65 + r2.chain.index)}:{r2.name}{r2.resSeq}"
+                    print(f"    {name1} ↔ {name2} | {args.label1}: {f1:.2f}  {args.label2}: {f2:.2f}")
+            else:
+                print("  No persistent ligand–pocket H-bonds found.")
+
+            # ───── Contact Fingerprint (aligned residues, ligand ↔ protein) ─────
+            cutoff_nm = 0.35                              # 3.5 Å
+            
+            # Aligned residue lists (built earlier from m1 / m2)
+            aligned_res1 = [t1.topology.atom(ca).residue for ca in m1]
+            aligned_res2 = [t2.topology.atom(ca).residue for ca in m2]
+            n_aligned    = len(aligned_res1)
+            
+            def build_unique_pairs(residues, ligand_atoms):
+                """Return (unique_pairs, residue_index_list)."""
+                seen = set()
+                pairs = []
+                res_cols = []
+                for i, res in enumerate(residues):
+                    for a in res.atoms:
+                        if a.element.symbol == 'H':
+                            continue                       # heavy atoms only
+                        for b in ligand_atoms:
+                            p = (a.index, b)
+                            if p in seen:                  # drop duplicate pair
+                                continue
+                            seen.add(p)
+                            pairs.append(list(p))
+                            res_cols.append(i)            # which residue owns this column
+                return pairs, np.array(res_cols, dtype=int)
+            
+            # ---- Complete Structure ---------------------------------------------------
+            pairs1, rescol1 = build_unique_pairs(aligned_res1, ligand1)
+            dist1, _ = md.compute_contacts(t1, pairs1, scheme='closest-heavy')
+            
+            # ---- Published Structure --------------------------------------------------
+            pairs2, rescol2 = build_unique_pairs(aligned_res2, ligand2)
+            dist2, _ = md.compute_contacts(t2, pairs2, scheme='closest-heavy')
+            
+            # ---- Occupancy (fraction of frames with any atom < cutoff) ----------------
+            fp1 = np.zeros(n_aligned)
+            fp2 = np.zeros(n_aligned)
+            
+            for i in range(n_aligned):
+                cols1 = np.where(rescol1 == i)[0]
+                cols2 = np.where(rescol2 == i)[0]
+                if cols1.size:
+                    fp1[i] = (dist1[:, cols1] < cutoff_nm).any(axis=1).mean()
+                if cols2.size:
+                    fp2[i] = (dist2[:, cols2] < cutoff_nm).any(axis=1).mean()
+            
+            # ---- Pretty print ---------------------------------------------------------
+            print("\nLigand–Residue Contact Fingerprint (aligned residues; contact ≥3.5 Å)")
+            print(f"{'Residue (Complete)':<22} | {args.label1:^6} | {args.label2:^6}")
+            print("-"*44)
+            for i, (r1, r2) in enumerate(zip(aligned_res1, aligned_res2)):
+                if max(fp1[i], fp2[i]) >= 0.30:           # show only “interesting” residues
+                    name1 = f"{chr(65 + r1.chain.index)}:{r1.name}{r1.resSeq}"
+                    name2 = f"{chr(65 + r2.chain.index)}:{r2.name}{r2.resSeq}"
+                    print(f"{name1:<22} | {fp1[i]:>5.2f} | {fp2[i]:>5.2f}   ({name2})")
+
         summary = {
             "label1": args.label1,
             "label2": args.label2,
@@ -604,6 +863,66 @@ def main()->None:
                 "residues_differing_gt_50pct": int(n_disagree)
             }
         }
+
+        # ───── Add Ligand Data to JSON Summary (if analyzed) ─────
+        if ligand_resname and len(ligand1) > 0 and len(ligand2) > 0:
+            summary["ligand"] = {
+                "resname": ligand_resname,
+                "rmsd": {
+                    args.label1: {
+                        "mean": float(lig_rmsd1.mean()),
+                        "std": float(lig_rmsd1.std()),
+                        "max": float(lig_rmsd1.max())
+                    },
+                    args.label2: {
+                        "mean": float(lig_rmsd2.mean()),
+                        "std": float(lig_rmsd2.std()),
+                        "max": float(lig_rmsd2.max())
+                    }
+                },
+                "sasa": {
+                    args.label1: {
+                        "mean": float(sasa1.mean()),
+                        "std": float(sasa1.std())
+                    },
+                    args.label2: {
+                        "mean": float(sasa2.mean()),
+                        "std": float(sasa2.std())
+                    }
+                },
+                "rmsf": {
+                    args.label1: {
+                        "mean": float(rmsf_lig1.mean()),
+                        "std": float(rmsf_lig1.std()),
+                        "max": float(rmsf_lig1.max())
+                    },
+                    args.label2: {
+                        "mean": float(rmsf_lig2.mean()),
+                        "std": float(rmsf_lig2.std()),
+                        "max": float(rmsf_lig2.max())
+                    }
+                },
+                "hbond_persistence": [
+                    {
+                        "donor": f"{chr(65 + t1.topology.atom(don).residue.chain.index)}:{t1.topology.atom(don).residue.name}{t1.topology.atom(don).residue.resSeq}" if don < t1.n_atoms else
+                                 f"{chr(65 + t2.topology.atom(don).residue.chain.index)}:{t2.topology.atom(don).residue.name}{t2.topology.atom(don).residue.resSeq}",
+                        "acceptor": f"{chr(65 + t1.topology.atom(acc).residue.chain.index)}:{t1.topology.atom(acc).residue.name}{t1.topology.atom(acc).residue.resSeq}" if acc < t1.n_atoms else
+                                    f"{chr(65 + t2.topology.atom(acc).residue.chain.index)}:{t2.topology.atom(acc).residue.name}{t2.topology.atom(acc).residue.resSeq}",
+                        args.label1: float(f1),
+                        args.label2: float(f2)
+                    }
+                    for (don, acc), (f1, f2) in lig_hb_shared.items()
+                ],
+                "contact_fingerprint": [
+                    {
+                        "residue": f"{chr(65 + res.chain.index)}:{res.name}{res.resSeq}",
+                        args.label1: float(fp1[i]),
+                        args.label2: float(fp2[i])
+                    }
+                    for i, res in enumerate(aligned_residues)  # use aligned_residues here
+                    if max(fp1[i], fp2[i]) > 0.3  # keep only significant contacts
+                ]
+            }
         
         # ───────── Simulation summary from OUT.gz (optional) ─────────
         if args.out1 or args.out2:
