@@ -21,16 +21,20 @@ Outputs
    - Summary of shared vs exclusive bonds also printed
 9. DSSP secondary structure heatmaps                   → *_dssp.pdf
 10. DSSP difference map (per-residue disagreement)     → *_dssp_difference.pdf
-11. OUT.gz production summary (if provided)            → printed to screen
+11. DCCM heatmaps (per trajectory, aligned Cα)         → *_dccm_ca_LABEL.pdf
+12. Differential DCCM (ΔDCCM heatmap)                  → *_dccm_delta.pdf
+13. Ligand–Loop DCCM (residue-level)                   → *_dccm_ligand_loop_residue.pdf
+14. OUT.gz production summary (if provided)            → printed to screen
     - Includes simulated time, avg. energy, temperature, and energy drift
-12. Ligand Stability Analysis (if --ligand supplied)   → printed to screen and saved as:
+15. Ligand Stability Analysis (if --ligand supplied)   → printed to screen and saved as:
     a. Ligand RMSD over time                           → *_ligand_rmsd.pdf
     b. Ligand SASA over time                           → *_ligand_sasa.pdf
     c. Ligand per-atom RMSF                            → *_ligand_rmsf.pdf
     d. Ligand-pocket hydrogen bonds (≥30%)             → printed to screen
     e. Ligand-residue contact fingerprint map          → printed to screen
-    f. All ligand data added to *_summary.json
-13. JSON summary for all metrics                       → *_summary.json
+    f. Ligand–Loop DCCM correlation summary            → printed to screen
+    g. All ligand data added to *_summary.json
+16. JSON summary for all metrics                       → *_summary.json
     - See field descriptions below
 
 JSON Output Description
@@ -87,16 +91,20 @@ The *_summary.json file contains a structured record of all computed metrics:
     "residues_differing_gt_50pct": Number of aligned residues whose secondary structure disagrees >50% of the time
   },
 
-  "out1_summary": {
-    "total_ps": total simulated time (ps),
-    "avg_energy": mean potential energy (kJ/mol),
-    "std_energy": std dev of potential energy,
-    "avg_temp": mean temperature (K),
-    "std_temp": temperature fluctuation
-  },
-
-  "out2_summary": {
-    (same fields as out1_summary)
+  "dccm_overall": {
+    "mean_delta": mean difference between DCCMs (Complete − Published),
+    "max_abs_delta": maximum |difference| between matrix values,
+    "alignment_length": number of aligned Cα atoms used,
+    "top_positive": {
+      "label1": [ { "res1", "res2", "corr" }, ... ],
+      "label2": [ { "res1", "res2", "corr" }, ... ]
+    },
+    "top_negative": {
+      "label1": [ { "res1", "res2", "corr" }, ... ],
+      "label2": [ { "res1", "res2", "corr" }, ... ]
+    },
+    "delta_top_positive": [ { "res1", "res2", "delta_corr" }, ... ],
+    "delta_top_negative": [ { "res1", "res2", "delta_corr" }, ... ]
   },
 
   "ligand": {   # Included only if --ligand is provided AND the ligand is present in both structures
@@ -134,8 +142,29 @@ The *_summary.json file contains a structured record of all computed metrics:
         "label2": 0.12
       },
       ...
-    ]
+    ],
+
+    "loop_dccm": {
+      "avg_corr": average ligand–loop correlation,
+      "max_abs_corr": strongest |correlation| observed,
+      "most_correlated": "A:VAL186",
+      "top_positive": [ { "residue", "corr" }, ... ],
+      "top_negative": [ { "residue", "corr" }, ... ]
+    }
+  },
+
+  "out1_summary": {
+    "total_ps": total simulated time (ps),
+    "avg_energy": mean potential energy (kJ/mol),
+    "std_energy": std dev of potential energy,
+    "avg_temp": mean temperature (K),
+    "std_temp": temperature fluctuation
+  },
+
+  "out2_summary": {
+    (same fields as out1_summary)
   }
+
 }
 
 Usage
@@ -164,9 +193,10 @@ Developer Notes
 - PCA and clustering use scikit-learn (requires installation).
 - Hydrogen bond persistence is based on MDTraj’s Wernet-Nilsson criteria.
 - DSSP analysis requires the DSSP binary (e.g., `conda install -c salilab dssp`).
+- DCCM analysis includes full Cα matrices, differential matrices, and ligand–loop cross-correlations.
 - OUT.gz files are parsed as CSV with 3 columns: step, potential energy, temperature.
 - The ligand section requires --ligand RESNAME to be provided and found in both structures.
-- The *_summary.json file is suitable for downstream batch analysis.
+- The *_summary.json file is suitable for downstream batch analysis and scoring frameworks.
 
 Dependencies:
     mdtraj, numpy, matplotlib, seaborn, Bio, scikit-learn, gzip
@@ -177,19 +207,29 @@ Recommended:
 """
 
 from __future__ import annotations
-import argparse, gzip, logging, os, re, shutil, sys, tempfile, csv
+
+# ─── Standard Library ────────────────────────────────────────────────────────
+import argparse
+import gzip
+import shutil
+import csv
+import logging
+import re
+import tempfile
 from pathlib import Path
 from typing import List, Tuple
+import json
 
+# ─── Third-Party Libraries ───────────────────────────────────────────────────
 import mdtraj as md
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from scipy.stats import ks_2samp
 from Bio.Align import PairwiseAligner
 from Bio.Data import IUPACData
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
-import json
 
 # ─────────────────────────────  CONFIG  ──────────────────────────────────────
 residue_mapping = {             # standard 3‑letter + Amber variants
@@ -200,6 +240,39 @@ residue_mapping = {             # standard 3‑letter + Amber variants
 }
 aa3to1 = {k.upper(): v for k, v in IUPACData.protein_letters_3to1_extended.items()}
 _trim3 = re.compile(r"([A-Z]{3})").match
+
+CONFIG = {
+    "rmsf_units": "angstrom",        # units to report RMSF (typically Å)
+    "rmsf_scale": 10.0,              # scale factor from nm to Å
+
+    "min_frames_for_clustering": 10,
+    "max_reference_frames": 50,
+    "max_clusters": 10,
+    "default_k_clusters": 5,
+
+    "top_n_persistent_hbonds": 20,
+    "hbond_threshold": 0.30,         # % persistence threshold
+
+    "dccm": {
+        "top_n": 5,                  # number of top DCCM pairs (positive/negative)
+        "ligand_loop_top_n": 5       # number of top ligand-loop residues to print
+    },
+
+    "contact_fingerprint": {
+        "distance_cutoff_nm": 0.35,  # 3.5 Å cutoff for defining contact
+        "min_occupancy": 0.30        # minimum contact occupancy to report
+    },
+
+    "plot": {
+        "dpi": 300,
+        "figsize": {
+            "dccm": (8, 6),
+            "ligand_loop": (5, 4),
+            "dssp": (10, 6),
+            "dssp_diff": (12, 6)
+        }
+    }
+}
 
 # ──────────────────────────  HELPERS  ────────────────────────────────────────
 def decompress_if_gz(path: Path, tmp_files: list[Path]) -> Path:
@@ -246,7 +319,7 @@ def seq_and_ca(traj: md.Trajectory)->Tuple[str,List[int]]:
     return "".join(seq), ca
 
 def compute_rmsf(traj: md.Trajectory, idx: np.ndarray)->np.ndarray:
-    return md.rmsf(traj, reference=traj, atom_indices=idx)*10.0  # nm→Å
+    return md.rmsf(traj, reference=traj, atom_indices=idx)*CONFIG["rmsf_scale"]  # nm→Å
 
 def safe(label:str)->str:  # filename‑safe
     return re.sub(r"[^A-Za-z0-9]+","_",label.strip()).lower()
@@ -255,7 +328,6 @@ def parse_out_file(out_gz_path: Path):
     """
     Parse OUT.gz file for energy and temperature summary.
     """
-    import gzip
     steps, energies, temps = [], [], []
 
     try:
@@ -358,7 +430,7 @@ def main()->None:
         plt.plot(rmsf1_full,label=args.label1); plt.plot(rmsf2_full,label=args.label2)
         plt.xlabel("Residue index"); plt.ylabel("RMSF (Å)")
         plt.title(f"Full RMSF  KS p={ks_full.pvalue:.3e}"); plt.legend(); plt.tight_layout()
-        plt.savefig(f"{args.out_prefix}_rmsf_full.pdf",dpi=300); plt.close()
+        plt.savefig(f"{args.out_prefix}_rmsf_full.pdf",dpi=CONFIG["plot"]["dpi"]); plt.close()
 
         # ───────── SEQUENCE ALIGNMENT & ALIGNED RMSF ─────────
         seq1,caL1 = seq_and_ca(prot1); seq2,caL2 = seq_and_ca(prot2)
@@ -379,7 +451,7 @@ def main()->None:
         plt.xlabel("Aligned residue index"); plt.ylabel("RMSF (Å)")
         plt.title(f"Aligned‑core RMSF  KS p={ks_aln.pvalue:.3e}")
         plt.legend(); plt.tight_layout()
-        plt.savefig(f"{args.out_prefix}_rmsf_aligned.pdf",dpi=300); plt.close()
+        plt.savefig(f"{args.out_prefix}_rmsf_aligned.pdf",dpi=CONFIG["plot"]["dpi"]); plt.close()
 
         # Aligned residue lists (built earlier from m1 / m2)
         aligned_res1 = [t1.topology.atom(ca).residue for ca in m1]
@@ -397,7 +469,7 @@ def main()->None:
         plt.xlabel("Frame"); plt.ylabel("Rg (Å)")
         plt.title(f"Radius of gyration  KS p={ks_rg.pvalue:.3e}")
         plt.legend(); plt.tight_layout()
-        plt.savefig(f"{args.out_prefix}_rg.pdf",dpi=300); plt.close()
+        plt.savefig(f"{args.out_prefix}_rg.pdf",dpi=CONFIG["plot"]["dpi"]); plt.close()
 
         # ───────── BACKBONE RMSD vs TIME ─────────
         bb_idx1 = prot1.topology.select("backbone")
@@ -408,15 +480,15 @@ def main()->None:
         plt.plot(rmsd1,label=args.label1); plt.plot(rmsd2,label=args.label2)
         plt.xlabel("Frame"); plt.ylabel("Backbone RMSD to start (Å)")
         plt.title("Backbone RMSD vs time"); plt.legend(); plt.tight_layout()
-        plt.savefig(f"{args.out_prefix}_rmsd_time.pdf",dpi=300); plt.close()
+        plt.savefig(f"{args.out_prefix}_rmsd_time.pdf",dpi=CONFIG["plot"]["dpi"]); plt.close()
 
         # ───────── CLUSTERING (k‑means, CA‑RMSD feature matrix) ─────────
-        min_frames = 10
+        min_frames = CONFIG["min_frames_for_clustering"]
         k_opt, pop1, pop2 = None, [], []
         if prot1.n_frames >= min_frames and prot2.n_frames >= min_frames \
            and len(ca1_all) and len(ca2_all):
         
-            ref_frames = min(50, prot1.n_frames, prot2.n_frames)      # up to 50 refs
+            ref_frames = min(CONFIG["max_reference_frames"], prot1.n_frames, prot2.n_frames) 
             ref_idx    = np.arange(ref_frames)
         
             # Feature matrix: for each frame, RMSD to each reference frame
@@ -432,7 +504,7 @@ def main()->None:
             X = np.vstack([feat1, feat2])     # samples = frames (rows)
         
             n_samples = X.shape[0]
-            max_k     = min(10, n_samples)    # never ask for more clusters than samples
+            max_k     = min(CONFIG["max_clusters"], n_samples)    # never ask for more clusters than samples
         
             # --- choose k by a simple elbow test ---
             inertias = []
@@ -468,7 +540,7 @@ def main()->None:
             plt.xlabel("Cluster"); plt.ylabel("Population (%)")
             plt.title("k‑means cluster populations (CA‑RMSD features)")
             plt.legend(); plt.tight_layout()
-            plt.savefig(f"{args.out_prefix}_cluster_populations.pdf", dpi=300)
+            plt.savefig(f"{args.out_prefix}_cluster_populations.pdf", dpi=CONFIG["plot"]["dpi"])
             plt.close()
         else:
             k_opt = None
@@ -492,7 +564,7 @@ def main()->None:
         plt.xlabel("PC1"); plt.ylabel("PC2")
         plt.title("PCA of aligned common Cα coordinates")
         plt.legend(); plt.tight_layout()
-        plt.savefig(f"{args.out_prefix}_pca_scatter.pdf", dpi=300)
+        plt.savefig(f"{args.out_prefix}_pca_scatter.pdf", dpi=CONFIG["plot"]["dpi"])
         plt.close()
 
         # Variance explained
@@ -546,7 +618,7 @@ def main()->None:
         occ1=occupancy(hb1); occ2=occupancy(hb2)
         persistent = {k:(occ1.get(k,0.0), occ2.get(k,0.0))
                       for k in set(occ1)|set(occ2)
-                      if max(occ1.get(k,0.0), occ2.get(k,0.0))>=0.30}
+                      if max(occ1.get(k, 0.0), occ2.get(k, 0.0)) >= CONFIG["hbond_threshold"]}
         if persistent:
             csvfile=f"{args.out_prefix}_hbonds_persistent.csv"
             with open(csvfile,"w",newline="") as fh:
@@ -562,10 +634,11 @@ def main()->None:
             logging.info("No hydrogen bonds ≥30%% occupancy in either trajectory")
 
         # Print summary table to screen
-        top_n = 20
+        top_n = CONFIG["top_n_persistent_hbonds"]
+        hb_threshold_pct = int(CONFIG["hbond_threshold"] * 100)
         sorted_persistent = sorted(persistent.items(), key=lambda x: -max(x[1]))
         
-        print("\nTop persistent hydrogen bonds (≥30% occupancy in either trajectory):")
+        print(f"\nTop persistent hydrogen bonds (≥{hb_threshold_pct}% occupancy in either trajectory):")
         print(f"{'Donor':<18} → {'Acceptor':<18} | {args.label1:^18} | {args.label2:^18}")
         print("-" * 70)
         
@@ -585,14 +658,14 @@ def main()->None:
             print(f"{don_str:<18} → {acc_str:<18} | {f1:>8.2f}         | {f2:>8.2f}")
         
         # Summary stats
-        n1 = sum(1 for v in persistent.values() if v[0] >= 0.30)
-        n2 = sum(1 for v in persistent.values() if v[1] >= 0.30)
-        shared = sum(1 for v in persistent.values() if v[0] >= 0.30 and v[1] >= 0.30)
-        only1 = sum(1 for v in persistent.values() if v[0] >= 0.30 and v[1] < 0.30)
-        only2 = sum(1 for v in persistent.values() if v[1] >= 0.30 and v[0] < 0.30)
+        n1 = sum(1 for v in persistent.values() if v[0] >= CONFIG["hbond_threshold"])
+        n2 = sum(1 for v in persistent.values() if v[1] >= CONFIG["hbond_threshold"])
+        shared = sum(1 for v in persistent.values() if v[0] >= 0.30 and v[1] >= CONFIG["hbond_threshold"])
+        only1 = sum(1 for v in persistent.values() if v[0] >= 0.30 and v[1] < CONFIG["hbond_threshold"])
+        only2 = sum(1 for v in persistent.values() if v[1] >= 0.30 and v[0] < CONFIG["hbond_threshold"])
         
-        print(f"\n{args.label1}: {n1} persistent H-bonds (≥30%)")
-        print(f"{args.label2}: {n2} persistent H-bonds (≥30%)")
+        print(f"\n{args.label1}: {n1} persistent H-bonds (≥{hb_threshold_pct}%)")
+        print(f"{args.label2}: {n2} persistent H-bonds (≥{hb_threshold_pct}%)")
         print(f"Shared: {shared}")
         print(f"Exclusive to {args.label1}: {only1}")
         print(f"Exclusive to {args.label2}: {only2}\n")
@@ -606,8 +679,7 @@ def main()->None:
             ss_num1=np.vectorize(struct_map.get)(ss1)
             ss_num2=np.vectorize(struct_map.get)(ss2)
         
-            import seaborn as sns
-            plt.figure(figsize=(10,6))
+            plt.figure(figsize=CONFIG["plot"]["figsize"]["dssp"])
             for i,(ss,label) in enumerate([(ss_num1,args.label1),(ss_num2,args.label2)],1):
                 plt.subplot(2,1,i)
                 sns.heatmap(ss.T,cbar=i==1,cmap="tab20",
@@ -615,7 +687,7 @@ def main()->None:
                 plt.ylabel("Residue"); plt.xlabel("Frame")
                 plt.title(f"{label} – DSSP")
             plt.tight_layout()
-            plt.savefig(f"{args.out_prefix}_dssp.pdf", dpi=300)
+            plt.savefig(f"{args.out_prefix}_dssp.pdf", dpi=CONFIG["plot"]["dpi"])
             plt.close()
         
             # Difference map (on aligned residues only)
@@ -625,13 +697,13 @@ def main()->None:
             aligned_ss2 = ss2[:, r2_idx]
             dssp_diff = (aligned_ss1 != aligned_ss2).astype(np.int_)
         
-            plt.figure(figsize=(12, 6))
+            plt.figure(figsize=CONFIG["plot"]["figsize"]["dssp_diff"])
             sns.heatmap(dssp_diff.T, cmap="Reds", cbar_kws={"label": "Mismatch (1 = different)"})
             plt.xlabel("Frame")
             plt.ylabel("Aligned residue index")
             plt.title("DSSP secondary structure difference (Complete vs Published)")
             plt.tight_layout()
-            plt.savefig(f"{args.out_prefix}_dssp_difference.pdf", dpi=300)
+            plt.savefig(f"{args.out_prefix}_dssp_difference.pdf", dpi=CONFIG["plot"]["dpi"])
             plt.close()
         
             diff_summary = dssp_diff.mean(axis=0)
@@ -643,7 +715,7 @@ def main()->None:
             logging.warning("DSSP calculation failed (%s)", e)
 
         # ───────── DCCM (Dynamic Cross-Correlation Matrix) for Aligned Cα Atoms ─────────
-        TOP_N_DCCM = 5  # Number of top correlated and anti-correlated residue pairs to report
+        TOP_N_DCCM = CONFIG["dccm"]["top_n"]
         
         def compute_dccm(traj: md.Trajectory, atom_indices: list[int]) -> np.ndarray:
             """Compute normalized DCCM for a given set of atoms (typically Cα)."""
@@ -690,22 +762,22 @@ def main()->None:
         
         # Plot DCCM matrices
         for mat, label in zip([dccm1, dccm2], [args.label1, args.label2]):
-            plt.figure(figsize=(8, 6))
+            plt.figure(figsize=CONFIG["plot"]["figsize"]["dccm"])
             sns.heatmap(mat, vmin=-1, vmax=1, cmap="coolwarm", square=True, cbar_kws={"label": "DCCM correlation"})
             plt.title(f"DCCM (aligned Cα) — {label}")
             plt.tight_layout()
-            plt.savefig(f"{args.out_prefix}_dccm_ca_{safe(label)}.pdf", dpi=300)
+            plt.savefig(f"{args.out_prefix}_dccm_ca_{safe(label)}.pdf", dpi=CONFIG["plot"]["dpi"])
             plt.close()
 
         # ───────── Differential DCCM (ΔDCCM) Heatmap ─────────
         delta_dccm = dccm1 - dccm2  # ΔDCCM = Complete - Published
 
-        plt.figure(figsize=(8, 6))
+        plt.figure(figsize=CONFIG["plot"]["figsize"]["dccm"])
         sns.heatmap(delta_dccm, cmap="bwr", center=0, vmin=-1, vmax=1,
                     square=True, cbar_kws={"label": "ΔDCCM (Complete - Published)"})
         plt.title("Differential DCCM (Aligned Cα Atoms)")
         plt.tight_layout()
-        plt.savefig(f"{args.out_prefix}_dccm_delta.pdf", dpi=300)
+        plt.savefig(f"{args.out_prefix}_dccm_delta.pdf", dpi=CONFIG["plot"]["dpi"])
         plt.close()
         print("  Differential DCCM saved to PDF.")
         
@@ -732,27 +804,67 @@ def main()->None:
         for a, b, c in top_correlated_residues(dccm2, aligned_res2, top_n=TOP_N_DCCM, sign="negative"):
             print(f"  {a} ↔ {b}  |  corr = {c:.3f}")
 
-        dccm_stats = {
-            "mean_delta"      : float(avg_corr_overall),
-            "max_abs_delta"   : float(max_diff),
-            "top_positive"    : {
-                args.label1: [ {"res1": a, "res2": b, "corr": float(c)}
-                               for a, b, c in top_correlated_residues(
-                                   dccm1, aligned_res1, top_n=TOP_N_DCCM, sign="positive") ],
-                args.label2: [ {"res1": a, "res2": b, "corr": float(c)}
-                               for a, b, c in top_correlated_residues(
-                                   dccm2, aligned_res2, top_n=TOP_N_DCCM, sign="positive") ],
-            },
-            "top_negative"    : {
-                args.label1: [ {"res1": a, "res2": b, "corr": float(c)}
-                               for a, b, c in top_correlated_residues(
-                                   dccm1, aligned_res1, top_n=TOP_N_DCCM, sign="negative") ],
-                args.label2: [ {"res1": a, "res2": b, "corr": float(c)}
-                               for a, b, c in top_correlated_residues(
-                                   dccm2, aligned_res2, top_n=TOP_N_DCCM, sign="negative") ],
-            }
-        }
+        # Compute ΔDCCM top changes
+        delta_pairs = []
+        for i in range(delta_dccm.shape[0]):
+            for j in range(i + 1, delta_dccm.shape[1]):
+                delta_pairs.append(((i, j), delta_dccm[i, j]))
+        
+        delta_top_positive = sorted(delta_pairs, key=lambda x: x[1], reverse=True)[:TOP_N_DCCM]
+        delta_top_negative = sorted(delta_pairs, key=lambda x: x[1])[:TOP_N_DCCM]
+        
+        def format_delta_pair(i, j, val):
+            res1 = aligned_res1[i]
+            res2 = aligned_res1[j]
+            label1 = f"{chr(65 + res1.chain.index)}:{res1.name}{res1.resSeq}"
+            label2 = f"{chr(65 + res2.chain.index)}:{res2.name}{res2.resSeq}"
+            return {"res1": label1, "res2": label2, "delta_corr": float(val)}
+        
+        print(f"\nTop {TOP_N_DCCM} ΔDCCM (positive):")
+        for (i, j), val in delta_top_positive:
+            p = format_delta_pair(i, j, val)
+            print(f"  {p['res1']} ↔ {p['res2']}  |  Δcorr = {p['delta_corr']:.3f}")
+        
+        print(f"\nTop {TOP_N_DCCM} ΔDCCM (negative):")
+        for (i, j), val in delta_top_negative:
+            p = format_delta_pair(i, j, val)
+            print(f"  {p['res1']} ↔ {p['res2']}  |  Δcorr = {p['delta_corr']:.3f}")
 
+        dccm_stats = {
+            "alignment_length": len(aligned_res1),
+            "mean_delta": float(avg_corr_overall),
+            "max_abs_delta": float(max_diff),
+            "top_positive": {
+                args.label1: [
+                    {"res1": a, "res2": b, "corr": float(c)}
+                    for a, b, c in top_correlated_residues(
+                        dccm1, aligned_res1, top_n=TOP_N_DCCM, sign="positive")
+                ],
+                args.label2: [
+                    {"res1": a, "res2": b, "corr": float(c)}
+                    for a, b, c in top_correlated_residues(
+                        dccm2, aligned_res2, top_n=TOP_N_DCCM, sign="positive")
+                ]
+            },
+            "top_negative": {
+                args.label1: [
+                    {"res1": a, "res2": b, "corr": float(c)}
+                    for a, b, c in top_correlated_residues(
+                        dccm1, aligned_res1, top_n=TOP_N_DCCM, sign="negative")
+                ],
+                args.label2: [
+                    {"res1": a, "res2": b, "corr": float(c)}
+                    for a, b, c in top_correlated_residues(
+                        dccm2, aligned_res2, top_n=TOP_N_DCCM, sign="negative")
+                ]
+            },
+            "delta_top_positive": [
+                format_delta_pair(i, j, val) for (i, j), val in delta_top_positive
+            ],
+            "delta_top_negative": [
+                format_delta_pair(i, j, val) for (i, j), val in delta_top_negative
+            ]
+        }
         # ───────── Ligand detection or reporting ─────────
         ligand_resname = args.ligand.upper() if args.ligand else None
         
@@ -795,8 +907,8 @@ def main()->None:
             lig_traj2 = t2.atom_slice(ligand2)
         
             # ───── Ligand RMSD (vs. frame 0) ─────
-            lig_rmsd1 = md.rmsd(lig_traj1, lig_traj1, 0) * 10.0  # Å
-            lig_rmsd2 = md.rmsd(lig_traj2, lig_traj2, 0) * 10.0  # Å
+            lig_rmsd1 = md.rmsd(lig_traj1, lig_traj1, 0) * CONFIG["rmsf_scale"]  # Å
+            lig_rmsd2 = md.rmsd(lig_traj2, lig_traj2, 0) * CONFIG["rmsf_scale"]  # Å
         
             plt.figure()
             plt.plot(lig_rmsd1, label=f"{args.label1}")
@@ -804,7 +916,7 @@ def main()->None:
             plt.xlabel("Frame"); plt.ylabel("Ligand RMSD (Å)")
             plt.title(f"Ligand RMSD (resname {ligand_resname})")
             plt.legend(); plt.tight_layout()
-            plt.savefig(f"{args.out_prefix}_ligand_rmsd.pdf", dpi=300)
+            plt.savefig(f"{args.out_prefix}_ligand_rmsd.pdf", dpi=CONFIG["plot"]["dpi"])
             plt.close()
         
             print(f"  Ligand RMSD (Å):")
@@ -821,7 +933,7 @@ def main()->None:
             plt.xlabel("Frame"); plt.ylabel("Ligand SASA (Å²)")
             plt.title(f"Ligand Solvent Accessibility (resname {ligand_resname})")
             plt.legend(); plt.tight_layout()
-            plt.savefig(f"{args.out_prefix}_ligand_sasa.pdf", dpi=300)
+            plt.savefig(f"{args.out_prefix}_ligand_sasa.pdf", dpi=CONFIG["plot"]["dpi"])
             plt.close()
         
             print(f"  Ligand SASA (Å²):")
@@ -838,7 +950,7 @@ def main()->None:
             plt.xlabel("Ligand Atom Index"); plt.ylabel("RMSF (Å)")
             plt.title(f"Ligand Atom Flexibility (RMSF)")
             plt.legend(); plt.tight_layout()
-            plt.savefig(f"{args.out_prefix}_ligand_rmsf.pdf", dpi=300)
+            plt.savefig(f"{args.out_prefix}_ligand_rmsf.pdf", dpi=CONFIG["plot"]["dpi"])
             plt.close()
 
             print("  Ligand RMSF:")
@@ -886,7 +998,7 @@ def main()->None:
             }
             
             if lig_hb_shared:
-                print(f"  {len(lig_hb_shared)} ligand–protein H-bonds ≥30% persistence")
+                print(f"  {len(lig_hb_shared)} ligand–protein H-bonds ≥{hb_threshold_pct}% persistence")
                 for (don, acc), (f1, f2) in sorted(lig_hb_shared.items(), key=lambda x: -max(x[1])):
                     # Use aligned trajectories for residue labeling
                     don_atom = traj_lp1.topology.atom(don) if don < traj_lp1.n_atoms else traj_lp2.topology.atom(don)
@@ -900,7 +1012,7 @@ def main()->None:
                 print("  No persistent ligand–pocket H-bonds found.")
 
             # ───── Contact Fingerprint (aligned residues, ligand ↔ protein) ─────
-            cutoff_nm = 0.35                              # 3.5 Å
+            cutoff_nm = CONFIG["contact_fingerprint"]["distance_cutoff_nm"]
                         
             def build_unique_pairs(residues, ligand_atoms):
                 """Return (unique_pairs, residue_index_list)."""
@@ -941,11 +1053,11 @@ def main()->None:
                     fp2[i] = (dist2[:, cols2] < cutoff_nm).any(axis=1).mean()
             
             # ---- Pretty print ---------------------------------------------------------
-            print("\nLigand–Residue Contact Fingerprint (aligned residues; contact ≥3.5 Å)")
+            print(f"\nLigand–Residue Contact Fingerprint (aligned residues; contact ≥{int(CONFIG['contact_fingerprint']['distance_cutoff_nm']*10):.1f} Å)")
             print(f"{'Residue (Complete)':<22} | {args.label1:^6} | {args.label2:^6}")
             print("-"*44)
             for i, (r1, r2) in enumerate(zip(aligned_res1, aligned_res2)):
-                if max(fp1[i], fp2[i]) >= 0.30:           # show only “interesting” residues
+                if max(fp1[i], fp2[i]) >= CONFIG["contact_fingerprint"]["min_occupancy"]:           # show only “interesting” residues
                     name1 = f"{chr(65 + r1.chain.index)}:{r1.name}{r1.resSeq}"
                     name2 = f"{chr(65 + r2.chain.index)}:{r2.name}{r2.resSeq}"
                     print(f"{name1:<22} | {fp1[i]:>5.2f} | {fp2[i]:>5.2f}   ({name2})")
@@ -955,7 +1067,7 @@ def main()->None:
             print("=" * 30)
 
             # Set how many top residues to report
-            N_TOP = 5
+            N_TOP = CONFIG["dccm"]["ligand_loop_top_n"]
 
             # 1. loop residues present in prot1 but absent from prot2
             loop_residues = [
@@ -1005,12 +1117,12 @@ def main()->None:
                 idx_max  = np.argmax(np.abs(lig_loop_corr))
 
                 # 5. save figure
-                plt.figure(figsize=(5, 4))
+                plt.figure(figsize=CONFIG["plot"]["figsize"]["ligand_loop"])
                 plt.imshow(dccm_res, vmin=-1, vmax=1, cmap="bwr")
                 plt.colorbar(label="Cross‑correlation")
-                plt.title("Residue‑level DCCM  (CBN ↔ new loops)")
+                plt.title(f"Residue‑level DCCM  ({ligand_resname} ↔ new loops)")
                 plt.tight_layout()
-                plt.savefig(f"{args.out_prefix}_dccm_ligand_loop_residue.pdf", dpi=300)
+                plt.savefig(f"{args.out_prefix}_dccm_ligand_loop_residue.pdf", dpi=CONFIG["plot"]["dpi"])
                 plt.close()
                 print("  Ligand–Loop DCCM saved to PDF.")
 
@@ -1167,7 +1279,7 @@ def main()->None:
                         args.label2: float(fp2[i])
                     }
                     for i, res in enumerate(aligned_res1)  # use aligned_res1 here
-                    if max(fp1[i], fp2[i]) > 0.3  # keep only significant contacts
+                    if max(fp1[i], fp2[i]) > CONFIG["contact_fingerprint"]["min_occupancy"]
                 ]
             }
         if lig_loop_stats is not None:
@@ -1192,10 +1304,10 @@ def main()->None:
                 summary["out2_summary"] = {k: float(v) for k, v in out2_data.items()}
             print_sim_summary(args.label2, out2_data)
 
-
-        with open(f"{args.out_prefix}_summary.json", "w") as jfh:
+        json_file = f"{args.out_prefix}_summary.json"
+        with open(json_file, "w") as jfh:
             json.dump(summary, jfh, indent=2)
-            logging.info("Wrote summary JSON to %s", f"{args.out_prefix}_summary.json")
+            logging.info("Wrote summary JSON to %s", json_file)
 
 
     finally:
