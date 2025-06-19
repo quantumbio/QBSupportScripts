@@ -458,6 +458,23 @@ def main()->None:
         aligned_res2 = [t2.topology.atom(ca).residue for ca in m2]
         n_aligned    = len(aligned_res1)
 
+        summary = {
+            "label1": args.label1,
+            "label2": args.label2,
+            "rmsf": {
+                "full": {
+                    "mean1": float(rmsf1_full.mean()), "std1": float(rmsf1_full.std()),
+                    "mean2": float(rmsf2_full.mean()), "std2": float(rmsf2_full.std()),
+                    "ks_p": float(ks_full.pvalue)
+                },
+                "aligned": {
+                    "mean1": float(rmsf1_aln.mean()), "std1": float(rmsf1_aln.std()),
+                    "mean2": float(rmsf2_aln.mean()), "std2": float(rmsf2_aln.std()),
+                    "ks_p": float(ks_aln.pvalue)
+                }
+            }
+        }
+
         # ───────── Rg ─────────
         rg1=md.compute_rg(prot1)*10.0; rg2=md.compute_rg(prot2)*10.0
         ks_rg=ks_2samp(rg1,rg2)
@@ -471,6 +488,12 @@ def main()->None:
         plt.legend(); plt.tight_layout()
         plt.savefig(f"{args.out_prefix}_rg.pdf",dpi=CONFIG["plot"]["dpi"]); plt.close()
 
+        summary["rg"] = {
+            "mean1": float(rg1.mean()), "std1": float(rg1.std()),
+            "mean2": float(rg2.mean()), "std2": float(rg2.std()),
+            "ks_p": float(ks_rg.pvalue)
+        }
+
         # ───────── BACKBONE RMSD vs TIME ─────────
         bb_idx1 = prot1.topology.select("backbone")
         bb_idx2 = prot2.topology.select("backbone")
@@ -481,7 +504,21 @@ def main()->None:
         plt.xlabel("Frame"); plt.ylabel("Backbone RMSD to start (Å)")
         plt.title("Backbone RMSD vs time"); plt.legend(); plt.tight_layout()
         plt.savefig(f"{args.out_prefix}_rmsd_time.pdf",dpi=CONFIG["plot"]["dpi"]); plt.close()
-
+        
+        # Record backbone RMSD statistics in summary
+        summary["rmsd_backbone"] = {
+            args.label1: {
+                "mean": float(rmsd1.mean()),
+                "std": float(rmsd1.std()),
+                "max": float(rmsd1.max())
+            },
+            args.label2: {
+                "mean": float(rmsd2.mean()),
+                "std": float(rmsd2.std()),
+                "max": float(rmsd2.max())
+            }
+        }
+        
         # ───────── CLUSTERING (k‑means, CA‑RMSD feature matrix) ─────────
         min_frames = CONFIG["min_frames_for_clustering"]
         k_opt, pop1, pop2 = None, [], []
@@ -547,6 +584,14 @@ def main()->None:
             pop1 = pop2 = []
             logging.warning("Clustering skipped: insufficient frames or atoms.")
 
+        summary["clustering"] = {
+            "k": k_opt,
+            "populations": {
+                args.label1: list(map(int, pop1)),
+                args.label2: list(map(int, pop2))
+            }
+        }
+
         # ───────── PCA (aligned Cα only) ─────────
         n_ca_common = len(m1)
         coords1 = prot1.atom_slice(np.array(m1)).xyz.reshape(prot1.n_frames, n_ca_common * 3)
@@ -587,6 +632,13 @@ def main()->None:
         # Distance between PCA centroids
         centroid_dist = np.linalg.norm([mu1_pc1 - mu2_pc1, mu1_pc2 - mu2_pc2])
         print(f"\nCentroid distance (Complete vs Published): {centroid_dist:.2f}\n")
+
+        summary["pca"] = {
+            "explained_variance": [float(v) for v in var_exp],
+            "std_pc1": [float(sd1_pc1), float(sd2_pc1)],
+            "std_pc2": [float(sd1_pc2), float(sd2_pc2)],
+            "centroid_distance": float(centroid_dist)
+        }
 
         # ───────── Hydrogen‑bond persistence ─────────
         hb1 = md.wernet_nilsson(prot1, periodic=False, sidechain_only=False)
@@ -670,6 +722,30 @@ def main()->None:
         print(f"Exclusive to {args.label1}: {only1}")
         print(f"Exclusive to {args.label2}: {only2}\n")
 
+        summary["hbonds"] = {
+            "n1": n1,
+            "n2": n2,
+            "shared": shared,
+            "exclusive1": only1,
+            "exclusive2": only2
+        }
+        
+        summary["top_hbonds"] = [
+            {
+                "donor": f"{chr(65 + don_res.chain.index)}:{don_res.name}{don_res.resSeq}",
+                "acceptor": f"{chr(65 + acc_res.chain.index)}:{acc_res.name}{acc_res.resSeq}",
+                args.label1: float(f1),
+                args.label2: float(f2)
+            }
+            for (don_idx, acc_idx), (f1, f2) in sorted_persistent
+            for don_res, acc_res in [
+                (
+                    (prot1 if don_idx < prot1.n_atoms else prot2).topology.atom(don_idx).residue,
+                    (prot1 if acc_idx < prot1.n_atoms else prot2).topology.atom(acc_idx).residue
+                )
+            ]
+        ]
+
         # ───────── DSSP heat‑map ─────────
         n_disagree = 0
         try:
@@ -710,9 +786,14 @@ def main()->None:
             n_disagree = np.sum(diff_summary > 0.5)
             print(f"\n{n_disagree} aligned residues differed in secondary structure "
                   f"in >50% of frames.\n")
+
+            summary["dssp_diff"] = {
+                "residues_differing_gt_50pct": int(n_disagree)
+            }
         
         except Exception as e:
             logging.warning("DSSP calculation failed (%s)", e)
+            summary["dssp_diff"] = {"residues_differing_gt_50pct": None}
 
         # ───────── DCCM (Dynamic Cross-Correlation Matrix) for Aligned Cα Atoms ─────────
         TOP_N_DCCM = CONFIG["dccm"]["top_n"]
@@ -865,13 +946,14 @@ def main()->None:
                 format_delta_pair(i, j, val) for (i, j), val in delta_top_negative
             ]
         }
+        summary["dccm_overall"] = dccm_stats
         # ───────── Ligand detection or reporting ─────────
         ligand_resname = args.ligand.upper() if args.ligand else None
         
         if ligand_resname:
             ligand1 = t1.topology.select(f"resname {ligand_resname}")
             ligand2 = t2.topology.select(f"resname {ligand_resname}")
-        
+            
             if len(ligand1) == 0 or len(ligand2) == 0:
                 print(f"\nWARNING: Ligand '{ligand_resname}' not found in one or both trajectories.\n")
             else:
@@ -901,6 +983,10 @@ def main()->None:
         if ligand_resname and len(ligand1) > 0 and len(ligand2) > 0:
             print("\nLigand Stability Analysis")
             print("=" * 30)
+
+            summary["ligand"] = {
+                "resname": ligand_resname
+            }
         
             # Slice trajectories
             lig_traj1 = t1.atom_slice(ligand1)
@@ -922,7 +1008,20 @@ def main()->None:
             print(f"  Ligand RMSD (Å):")
             print(f"    {args.label1:<20} mean={lig_rmsd1.mean():.2f}  std={lig_rmsd1.std():.2f}  max={lig_rmsd1.max():.2f}")
             print(f"    {args.label2:<20} mean={lig_rmsd2.mean():.2f}  std={lig_rmsd2.std():.2f}  max={lig_rmsd2.max():.2f}")
-        
+
+            summary["ligand"]["rmsd"] = {
+                args.label1: {
+                    "mean": float(lig_rmsd1.mean()),
+                    "std": float(lig_rmsd1.std()),
+                    "max": float(lig_rmsd1.max())
+                },
+                args.label2: {
+                    "mean": float(lig_rmsd2.mean()),
+                    "std": float(lig_rmsd2.std()),
+                    "max": float(lig_rmsd2.max())
+                }
+            }
+
             # ───── Ligand SASA (Shrake-Rupley) ─────
             sasa1 = md.shrake_rupley(lig_traj1).sum(axis=1)
             sasa2 = md.shrake_rupley(lig_traj2).sum(axis=1)
@@ -939,7 +1038,18 @@ def main()->None:
             print(f"  Ligand SASA (Å²):")
             print(f"    {args.label1:<20} mean={sasa1.mean():.1f}  std={sasa1.std():.1f}")
             print(f"    {args.label2:<20} mean={sasa2.mean():.1f}  std={sasa2.std():.1f}")
-        
+
+            summary["ligand"]["sasa"] = {
+                args.label1: {
+                    "mean": float(sasa1.mean()),
+                    "std": float(sasa1.std())
+                },
+                args.label2: {
+                    "mean": float(sasa2.mean()),
+                    "std": float(sasa2.std())
+                }
+            }
+
             # ───── Ligand RMSF (per atom) ─────
             rmsf_lig1 = md.rmsf(lig_traj1, reference=lig_traj1) * 10.0
             rmsf_lig2 = md.rmsf(lig_traj2, reference=lig_traj2) * 10.0
@@ -956,6 +1066,19 @@ def main()->None:
             print("  Ligand RMSF:")
             print(f"    {args.label1:<20} mean={rmsf_lig1.mean():.2f}  std={rmsf_lig1.std():.2f}  max={rmsf_lig1.max():.2f}")
             print(f"    {args.label2:<20} mean={rmsf_lig2.mean():.2f}  std={rmsf_lig2.std():.2f}  max={rmsf_lig2.max():.2f}")
+
+            summary["ligand"]["rmsf"] = {
+                args.label1: {
+                    "mean": float(rmsf_lig1.mean()),
+                    "std": float(rmsf_lig1.std()),
+                    "max": float(rmsf_lig1.max())
+                },
+                args.label2: {
+                    "mean": float(rmsf_lig2.mean()),
+                    "std": float(rmsf_lig2.std()),
+                    "max": float(rmsf_lig2.max())
+                }
+            }
 
             # ───── Ligand–Pocket H-bonds (≥30%) [Aligned Structures] ─────
             print("\nLigand–Pocket H-bond Analysis")
@@ -1008,6 +1131,29 @@ def main()->None:
                     name1 = f"{chr(65 + r1.chain.index)}:{r1.name}{r1.resSeq}"
                     name2 = f"{chr(65 + r2.chain.index)}:{r2.name}{r2.resSeq}"
                     print(f"    {name1} ↔ {name2} | {args.label1}: {f1:.2f}  {args.label2}: {f2:.2f}")
+
+                summary["ligand"]["hbond_persistence"] = [
+                    {
+                        "donor": (
+                            f"{chr(65 + t1.topology.atom(don).residue.chain.index)}:"
+                            f"{t1.topology.atom(don).residue.name}{t1.topology.atom(don).residue.resSeq}"
+                            if don < t1.n_atoms else
+                            f"{chr(65 + t2.topology.atom(don).residue.chain.index)}:"
+                            f"{t2.topology.atom(don).residue.name}{t2.topology.atom(don).residue.resSeq}"
+                        ),
+                        "acceptor": (
+                            f"{chr(65 + t1.topology.atom(acc).residue.chain.index)}:"
+                            f"{t1.topology.atom(acc).residue.name}{t1.topology.atom(acc).residue.resSeq}"
+                            if acc < t1.n_atoms else
+                            f"{chr(65 + t2.topology.atom(acc).residue.chain.index)}:"
+                            f"{t2.topology.atom(acc).residue.name}{t2.topology.atom(acc).residue.resSeq}"
+                        ),
+                        args.label1: float(f1),
+                        args.label2: float(f2)
+                    }
+                    for (don, acc), (f1, f2) in lig_hb_shared.items()
+                ]
+
             else:
                 print("  No persistent ligand–pocket H-bonds found.")
 
@@ -1061,6 +1207,16 @@ def main()->None:
                     name1 = f"{chr(65 + r1.chain.index)}:{r1.name}{r1.resSeq}"
                     name2 = f"{chr(65 + r2.chain.index)}:{r2.name}{r2.resSeq}"
                     print(f"{name1:<22} | {fp1[i]:>5.2f} | {fp2[i]:>5.2f}   ({name2})")
+
+            summary["ligand"]["contact_fingerprint"] = [
+                {
+                    "residue": f"{chr(65 + res.chain.index)}:{res.name}{res.resSeq}",
+                    args.label1: float(fp1[i]),
+                    args.label2: float(fp2[i])
+                }
+                for i, res in enumerate(aligned_res1)
+                if max(fp1[i], fp2[i]) > CONFIG["contact_fingerprint"]["min_occupancy"]
+            ]
 
             # ───── Ligand–Loop DCCM (Complete Structure, residue‑level) ─────
             print("\nLigand–Loop DCCM Analysis")
@@ -1162,129 +1318,7 @@ def main()->None:
                     for i in top_neg_idx
                 ]
             }
-
-        summary = {
-            "label1": args.label1,
-            "label2": args.label2,
-            "rmsf": {
-                "full": {
-                    "mean1": float(rmsf1_full.mean()), "std1": float(rmsf1_full.std()),
-                    "mean2": float(rmsf2_full.mean()), "std2": float(rmsf2_full.std()),
-                    "ks_p": float(ks_full.pvalue)
-                },
-                "aligned": {
-                    "mean1": float(rmsf1_aln.mean()), "std1": float(rmsf1_aln.std()),
-                    "mean2": float(rmsf2_aln.mean()), "std2": float(rmsf2_aln.std()),
-                    "ks_p": float(ks_aln.pvalue)
-                }
-            },
-            "rg": {
-                "mean1": float(rg1.mean()), "std1": float(rg1.std()),
-                "mean2": float(rg2.mean()), "std2": float(rg2.std()),
-                "ks_p": float(ks_rg.pvalue)
-            },
-            "pca": {
-                "explained_variance": [float(v) for v in var_exp],
-                "std_pc1": [float(sd1_pc1), float(sd2_pc1)],
-                "std_pc2": [float(sd1_pc2), float(sd2_pc2)],
-                "centroid_distance": float(centroid_dist)
-            },
-            "clustering": {
-                "k": k_opt,
-                "populations": {
-                    args.label1: list(map(int, pop1)),
-                    args.label2: list(map(int, pop2))
-                }
-            },
-            "hbonds": {
-                "n1": n1, "n2": n2,
-                "shared": shared,
-                "exclusive1": only1,
-                "exclusive2": only2
-            },
-            "top_hbonds" : [
-                {
-                    "donor": f"{chr(65 + don_res.chain.index)}:{don_res.name}{don_res.resSeq}",
-                    "acceptor": f"{chr(65 + acc_res.chain.index)}:{acc_res.name}{acc_res.resSeq}",
-                    args.label1: float(f1),
-                    args.label2: float(f2)
-                }
-                for (don_idx, acc_idx), (f1, f2) in sorted_persistent
-                for don_res, acc_res in [
-                    (
-                        (prot1 if don_idx < prot1.n_atoms else prot2).topology.atom(don_idx).residue,
-                        (prot1 if acc_idx < prot1.n_atoms else prot2).topology.atom(acc_idx).residue
-                    )
-                ]
-            ],
-            "dssp_diff": {
-                "residues_differing_gt_50pct": int(n_disagree)
-            },
-            "dccm_overall" : dccm_stats
-        }
-
-        # ───── Add Ligand Data to JSON Summary (if analyzed) ─────
-        if ligand_resname and len(ligand1) > 0 and len(ligand2) > 0:
-            summary["ligand"] = {
-                "resname": ligand_resname,
-                "rmsd": {
-                    args.label1: {
-                        "mean": float(lig_rmsd1.mean()),
-                        "std": float(lig_rmsd1.std()),
-                        "max": float(lig_rmsd1.max())
-                    },
-                    args.label2: {
-                        "mean": float(lig_rmsd2.mean()),
-                        "std": float(lig_rmsd2.std()),
-                        "max": float(lig_rmsd2.max())
-                    }
-                },
-                "sasa": {
-                    args.label1: {
-                        "mean": float(sasa1.mean()),
-                        "std": float(sasa1.std())
-                    },
-                    args.label2: {
-                        "mean": float(sasa2.mean()),
-                        "std": float(sasa2.std())
-                    }
-                },
-                "rmsf": {
-                    args.label1: {
-                        "mean": float(rmsf_lig1.mean()),
-                        "std": float(rmsf_lig1.std()),
-                        "max": float(rmsf_lig1.max())
-                    },
-                    args.label2: {
-                        "mean": float(rmsf_lig2.mean()),
-                        "std": float(rmsf_lig2.std()),
-                        "max": float(rmsf_lig2.max())
-                    }
-                },
-                "hbond_persistence": [
-                    {
-                        "donor": f"{chr(65 + t1.topology.atom(don).residue.chain.index)}:{t1.topology.atom(don).residue.name}{t1.topology.atom(don).residue.resSeq}" if don < t1.n_atoms else
-                                 f"{chr(65 + t2.topology.atom(don).residue.chain.index)}:{t2.topology.atom(don).residue.name}{t2.topology.atom(don).residue.resSeq}",
-                        "acceptor": f"{chr(65 + t1.topology.atom(acc).residue.chain.index)}:{t1.topology.atom(acc).residue.name}{t1.topology.atom(acc).residue.resSeq}" if acc < t1.n_atoms else
-                                    f"{chr(65 + t2.topology.atom(acc).residue.chain.index)}:{t2.topology.atom(acc).residue.name}{t2.topology.atom(acc).residue.resSeq}",
-                        args.label1: float(f1),
-                        args.label2: float(f2)
-                    }
-                    for (don, acc), (f1, f2) in lig_hb_shared.items()
-                ],
-                "contact_fingerprint": [
-                    {
-                        "residue": f"{chr(65 + res.chain.index)}:{res.name}{res.resSeq}",
-                        args.label1: float(fp1[i]),
-                        args.label2: float(fp2[i])
-                    }
-                    for i, res in enumerate(aligned_res1)  # use aligned_res1 here
-                    if max(fp1[i], fp2[i]) > CONFIG["contact_fingerprint"]["min_occupancy"]
-                ]
-            }
-        if lig_loop_stats is not None:
-            # ensure "ligand" key exists (created earlier)
-            summary.setdefault("ligand", {})["loop_dccm"] = lig_loop_stats
+            summary["ligand"]["loop_dccm"] = lig_loop_stats
         
         # ───────── Simulation summary from OUT.gz (optional) ─────────
         if args.out1 or args.out2:
@@ -1308,7 +1342,6 @@ def main()->None:
         with open(json_file, "w") as jfh:
             json.dump(summary, jfh, indent=2)
             logging.info("Wrote summary JSON to %s", json_file)
-
 
     finally:
         for f in tmp_files:
