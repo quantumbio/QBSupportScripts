@@ -381,6 +381,11 @@ def main()->None:
         plt.legend(); plt.tight_layout()
         plt.savefig(f"{args.out_prefix}_rmsf_aligned.pdf",dpi=300); plt.close()
 
+        # Aligned residue lists (built earlier from m1 / m2)
+        aligned_res1 = [t1.topology.atom(ca).residue for ca in m1]
+        aligned_res2 = [t2.topology.atom(ca).residue for ca in m2]
+        n_aligned    = len(aligned_res1)
+
         # ───────── Rg ─────────
         rg1=md.compute_rg(prot1)*10.0; rg2=md.compute_rg(prot2)*10.0
         ks_rg=ks_2samp(rg1,rg2)
@@ -636,7 +641,117 @@ def main()->None:
         
         except Exception as e:
             logging.warning("DSSP calculation failed (%s)", e)
+
+        # ───────── DCCM (Dynamic Cross-Correlation Matrix) for Aligned Cα Atoms ─────────
+        TOP_N_DCCM = 5  # Number of top correlated and anti-correlated residue pairs to report
         
+        def compute_dccm(traj: md.Trajectory, atom_indices: list[int]) -> np.ndarray:
+            """Compute normalized DCCM for a given set of atoms (typically Cα)."""
+            xyz = traj.xyz[:, atom_indices, :]  # (n_frames, n_atoms, 3)
+            disp = xyz - xyz.mean(axis=0, keepdims=True)  # displacement vectors
+            n_atoms = xyz.shape[1]
+            corr = np.zeros((n_atoms, n_atoms))
+            for i in range(n_atoms):
+                for j in range(n_atoms):
+                    vi = disp[:, i, :].reshape(len(traj), 3)
+                    vj = disp[:, j, :].reshape(len(traj), 3)
+                    numerator = np.sum(np.sum(vi * vj, axis=1))
+                    denom = np.sqrt(np.sum(vi ** 2) * np.sum(vj ** 2))
+                    corr[i, j] = numerator / denom if denom > 0 else 0.0
+            return np.clip(corr, -1.0, 1.0)
+        
+        def top_correlated_residues(dccm_matrix, residues, top_n=5, sign="positive"):
+            """Return top correlated or anti-correlated residue pairs."""
+            N = dccm_matrix.shape[0]
+            pairs = []
+            for i in range(N):
+                for j in range(i + 1, N):
+                    corr = dccm_matrix[i, j]
+                    if sign == "positive":
+                        score = corr
+                    elif sign == "negative":
+                        score = -corr
+                    else:
+                        score = abs(corr)
+                    pairs.append(((i, j), corr, score))
+            sorted_pairs = sorted(pairs, key=lambda x: x[2], reverse=True)[:top_n]
+            results = []
+            for (i, j), corr_val, _ in sorted_pairs:
+                res1 = residues[i]
+                res2 = residues[j]
+                label1 = f"{chr(65 + res1.chain.index)}:{res1.name}{res1.resSeq}"
+                label2 = f"{chr(65 + res2.chain.index)}:{res2.name}{res2.resSeq}"
+                results.append((label1, label2, corr_val))
+            return results
+        
+        # Compute DCCMs using aligned Cα atoms
+        dccm1 = compute_dccm(prot1, np.array(m1))
+        dccm2 = compute_dccm(prot2, np.array(m2))
+        
+        # Plot DCCM matrices
+        for mat, label in zip([dccm1, dccm2], [args.label1, args.label2]):
+            plt.figure(figsize=(8, 6))
+            sns.heatmap(mat, vmin=-1, vmax=1, cmap="coolwarm", square=True, cbar_kws={"label": "DCCM correlation"})
+            plt.title(f"DCCM (aligned Cα) — {label}")
+            plt.tight_layout()
+            plt.savefig(f"{args.out_prefix}_dccm_ca_{safe(label)}.pdf", dpi=300)
+            plt.close()
+
+        # ───────── Differential DCCM (ΔDCCM) Heatmap ─────────
+        delta_dccm = dccm1 - dccm2  # ΔDCCM = Complete - Published
+
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(delta_dccm, cmap="bwr", center=0, vmin=-1, vmax=1,
+                    square=True, cbar_kws={"label": "ΔDCCM (Complete - Published)"})
+        plt.title("Differential DCCM (Aligned Cα Atoms)")
+        plt.tight_layout()
+        plt.savefig(f"{args.out_prefix}_dccm_delta.pdf", dpi=300)
+        plt.close()
+        print("  Differential DCCM saved to PDF.")
+        
+        # DCCM summary stats
+        avg_corr_overall = np.mean(dccm1 - dccm2)
+        max_diff = np.max(np.abs(dccm1 - dccm2))
+        print(f"\nDCCM Summary (Aligned Cα Atoms):")
+        print(f"  Mean difference: {avg_corr_overall:.3f}")
+        print(f"  Max abs. difference: {max_diff:.3f}")
+        
+        print(f"\nTop {TOP_N_DCCM} most positively correlated residue pairs ({args.label1}):")
+        for a, b, c in top_correlated_residues(dccm1, aligned_res1, top_n=TOP_N_DCCM, sign="positive"):
+            print(f"  {a} ↔ {b}  |  corr = {c:.3f}")
+        
+        print(f"\nTop {TOP_N_DCCM} most negatively correlated residue pairs ({args.label1}):")
+        for a, b, c in top_correlated_residues(dccm1, aligned_res1, top_n=TOP_N_DCCM, sign="negative"):
+            print(f"  {a} ↔ {b}  |  corr = {c:.3f}")
+        
+        print(f"\nTop {TOP_N_DCCM} most positively correlated residue pairs ({args.label2}):")
+        for a, b, c in top_correlated_residues(dccm2, aligned_res2, top_n=TOP_N_DCCM, sign="positive"):
+            print(f"  {a} ↔ {b}  |  corr = {c:.3f}")
+        
+        print(f"\nTop {TOP_N_DCCM} most negatively correlated residue pairs ({args.label2}):")
+        for a, b, c in top_correlated_residues(dccm2, aligned_res2, top_n=TOP_N_DCCM, sign="negative"):
+            print(f"  {a} ↔ {b}  |  corr = {c:.3f}")
+
+        dccm_stats = {
+            "mean_delta"      : float(avg_corr_overall),
+            "max_abs_delta"   : float(max_diff),
+            "top_positive"    : {
+                args.label1: [ {"res1": a, "res2": b, "corr": float(c)}
+                               for a, b, c in top_correlated_residues(
+                                   dccm1, aligned_res1, top_n=TOP_N_DCCM, sign="positive") ],
+                args.label2: [ {"res1": a, "res2": b, "corr": float(c)}
+                               for a, b, c in top_correlated_residues(
+                                   dccm2, aligned_res2, top_n=TOP_N_DCCM, sign="positive") ],
+            },
+            "top_negative"    : {
+                args.label1: [ {"res1": a, "res2": b, "corr": float(c)}
+                               for a, b, c in top_correlated_residues(
+                                   dccm1, aligned_res1, top_n=TOP_N_DCCM, sign="negative") ],
+                args.label2: [ {"res1": a, "res2": b, "corr": float(c)}
+                               for a, b, c in top_correlated_residues(
+                                   dccm2, aligned_res2, top_n=TOP_N_DCCM, sign="negative") ],
+            }
+        }
 
         # ───────── Ligand detection or reporting ─────────
         ligand_resname = args.ligand.upper() if args.ligand else None
@@ -786,12 +901,7 @@ def main()->None:
 
             # ───── Contact Fingerprint (aligned residues, ligand ↔ protein) ─────
             cutoff_nm = 0.35                              # 3.5 Å
-            
-            # Aligned residue lists (built earlier from m1 / m2)
-            aligned_res1 = [t1.topology.atom(ca).residue for ca in m1]
-            aligned_res2 = [t2.topology.atom(ca).residue for ca in m2]
-            n_aligned    = len(aligned_res1)
-            
+                        
             def build_unique_pairs(residues, ligand_atoms):
                 """Return (unique_pairs, residue_index_list)."""
                 seen = set()
@@ -839,6 +949,107 @@ def main()->None:
                     name1 = f"{chr(65 + r1.chain.index)}:{r1.name}{r1.resSeq}"
                     name2 = f"{chr(65 + r2.chain.index)}:{r2.name}{r2.resSeq}"
                     print(f"{name1:<22} | {fp1[i]:>5.2f} | {fp2[i]:>5.2f}   ({name2})")
+
+            # ───── Ligand–Loop DCCM (Complete Structure, residue‑level) ─────
+            print("\nLigand–Loop DCCM Analysis")
+            print("=" * 30)
+
+            # Set how many top residues to report
+            N_TOP = 5
+
+            # 1. loop residues present in prot1 but absent from prot2
+            loop_residues = [
+                res for res in prot1.topology.residues
+                if res.is_protein and res.index not in {r.index for r in prot2.topology.residues}
+            ]
+
+            # 2. the ligand (as a residue object).  We assume one copy.
+            ligand_res = next((res for res in t1.topology.residues
+                               if res.name == ligand_resname), None)
+
+            if not loop_residues:
+                print("  Skipped: no unique loop residues in Complete Structure.")
+            elif ligand_res is None:
+                print("  Skipped: ligand residue not found.")
+            else:
+                all_residues = [ligand_res] + loop_residues     # ligand is index 0
+
+                # ---------- helper functions ---------------------------------
+                def residue_displacements(traj, residues):
+                    """Return (n_frames × 3·n_res) matrix of COM displacements."""
+                    n_f, n_r = traj.n_frames, len(residues)
+                    com = np.zeros((n_f, n_r, 3), dtype=np.float32)
+                    for i, res in enumerate(residues):
+                        idx = [a.index for a in res.atoms if a.element.symbol != "H"]
+                        com[:, i, :] = traj.atom_slice(idx).xyz.mean(axis=1)
+                    disp = com - com.mean(axis=0, keepdims=True)
+                    return disp.reshape(n_f, -1)
+
+                def dccm_from_disp(disp):
+                    """Return (n_res × n_res) DCCM from displacement matrix."""
+                    n_res = disp.shape[1] // 3
+                    dccm  = np.corrcoef(disp.T).reshape(n_res, 3, n_res, 3).mean(axis=(1, 3))
+                    return dccm
+
+                def res_label(res):
+                    return f"{chr(65 + res.chain.index)}:{res.name}{res.resSeq}"
+
+                # 3. build displacement matrix & DCCM
+                disp_mat = residue_displacements(t1, all_residues)
+                dccm_res = dccm_from_disp(disp_mat)             # (n_res × n_res)
+
+                # 4. extract ligand (row 0) ↔ loop block
+                lig_loop_corr = dccm_res[0, 1:]                  # vector length = len(loop_residues)
+                avg_corr = lig_loop_corr.mean()
+                max_corr = np.abs(lig_loop_corr).max()
+                idx_max  = np.argmax(np.abs(lig_loop_corr))
+
+                # 5. save figure
+                plt.figure(figsize=(5, 4))
+                plt.imshow(dccm_res, vmin=-1, vmax=1, cmap="bwr")
+                plt.colorbar(label="Cross‑correlation")
+                plt.title("Residue‑level DCCM  (CBN ↔ new loops)")
+                plt.tight_layout()
+                plt.savefig(f"{args.out_prefix}_dccm_ligand_loop_residue.pdf", dpi=300)
+                plt.close()
+                print("  Ligand–Loop DCCM saved to PDF.")
+
+                # 6. summary
+                print("\nLigand–Loop DCCM Summary (Residue‑level):")
+                print(f"  Average ligand–loop correlation : {avg_corr:.3f}")
+                print(f"  Max |correlation|                : {max_corr:.3f}")
+                print(f"  Most‑correlated loop residue     : {res_label(loop_residues[idx_max])}")
+
+                # Top N positively correlated
+                top_pos_idx = np.argsort(-lig_loop_corr)[:N_TOP]
+                # Top N negatively correlated
+                top_neg_idx = np.argsort(lig_loop_corr)[:N_TOP]
+
+                print(f"  Top {N_TOP} loop residues by positive correlation:")
+                for i in top_pos_idx:
+                    print(f"    {res_label(loop_residues[i]):<12} |  corr = {lig_loop_corr[i]:.3f}")
+
+                print(f"  Top {N_TOP} loop residues by negative correlation:")
+                for i in top_neg_idx:
+                    print(f"    {res_label(loop_residues[i]):<12} |  corr = {lig_loop_corr[i]:.3f}")
+
+        lig_loop_stats = None
+        if ligand_resname and loop_residues and ligand_res is not None:
+            lig_loop_stats = {
+                "avg_corr"         : float(avg_corr),
+                "max_abs_corr"     : float(max_corr),
+                "most_correlated"  : res_label(loop_residues[idx_max]),
+                "top_positive"     : [
+                    {"residue": res_label(loop_residues[i]),
+                     "corr"   : float(lig_loop_corr[i])}
+                    for i in top_pos_idx
+                ],
+                "top_negative"     : [
+                    {"residue": res_label(loop_residues[i]),
+                     "corr"   : float(lig_loop_corr[i])}
+                    for i in top_neg_idx
+                ]
+            }
 
         summary = {
             "label1": args.label1,
@@ -896,7 +1107,8 @@ def main()->None:
             ],
             "dssp_diff": {
                 "residues_differing_gt_50pct": int(n_disagree)
-            }
+            },
+            "dccm_overall" : dccm_stats
         }
 
         # ───── Add Ligand Data to JSON Summary (if analyzed) ─────
@@ -958,6 +1170,9 @@ def main()->None:
                     if max(fp1[i], fp2[i]) > 0.3  # keep only significant contacts
                 ]
             }
+        if lig_loop_stats is not None:
+            # ensure "ligand" key exists (created earlier)
+            summary.setdefault("ligand", {})["loop_dccm"] = lig_loop_stats
         
         # ───────── Simulation summary from OUT.gz (optional) ─────────
         if args.out1 or args.out2:
