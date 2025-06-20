@@ -3,207 +3,107 @@
 Comprehensive Comparison of Two MD Trajectories
 ===============================================
 
-This script performs an extensive structural and energetic comparison between two
-molecular dynamics (MD) trajectories — typically a "Complete Structure" vs a
+This script performs an extensive structural, dynamic, and energetic comparison between
+two molecular dynamics (MD) trajectories — typically a "Complete Structure" vs a
 "Published Structure" — to evaluate relative stability, convergence, and predictive utility.
 
-Outputs
--------
-1. Full RMSF (all protein residues)                    → *_rmsf_full.pdf
-2. Aligned-core RMSF (based on sequence alignment)     → *_rmsf_aligned.pdf
-3. Radius of gyration (Rg) over time                   → *_rg.pdf
-4. Backbone RMSD vs time                               → *_rmsd_time.pdf
-5. k-means cluster population bar chart (CA-RMSD)      → *_cluster_populations.pdf
-6. PCA scatter plot (PC1 vs PC2, aligned Cα)           → *_pca_scatter.pdf
-7. PCA variance and spread summary                     → printed to screen
-8. Persistent hydrogen bonds (≥30% occupancy)          → *_hbonds_persistent.csv
-   - Includes top 20 persistent H-bonds printed to screen
-   - Summary of shared vs exclusive bonds also printed
-9. DSSP secondary structure heatmaps                   → *_dssp.pdf
-10. DSSP difference map (per-residue disagreement)     → *_dssp_difference.pdf
-11. DCCM heatmaps (per trajectory, aligned Cα)         → *_dccm_ca_LABEL.pdf
-12. Differential DCCM (ΔDCCM heatmap)                  → *_dccm_delta.pdf
-13. Ligand–Loop DCCM (residue-level)                   → *_dccm_ligand_loop_residue.pdf
-14. OUT.gz production summary (if provided)            → printed to screen
-    - Includes simulated time, avg. energy, temperature, and energy drift
-15. Ligand Stability Analysis (if --ligand supplied)   → printed to screen and saved as:
-    a. Ligand RMSD over time                           → *_ligand_rmsd.pdf
-    b. Ligand SASA over time                           → *_ligand_sasa.pdf
-    c. Ligand per-atom RMSF                            → *_ligand_rmsf.pdf
-    d. Ligand-pocket hydrogen bonds (≥30%)             → printed to screen
-    e. Ligand-residue contact fingerprint map          → printed to screen
-    f. Ligand–Loop DCCM correlation summary            → printed to screen
-    g. All ligand data added to *_summary.json
-16. JSON summary for all metrics                       → *_summary.json
-    - See field descriptions below
+Analyses Performed
+------------------
+1. Full-protein RMSF (all residues)                       → *_rmsf_full.pdf
+2. Aligned-residue RMSF (based on sequence alignment)     → *_rmsf_aligned.pdf
+3. Radius of Gyration (Rg) over time                      → *_rg.pdf
+4. Backbone RMSD vs. time                                 → *_rmsd_time.pdf
+5. Cα-based k-means cluster population bar chart          → *_cluster_populations.pdf
+6. PCA scatter plot (PC1 vs PC2, aligned Cα)              → *_pca_scatter.pdf
+7. PCA statistics: variance explained & standard deviation → printed to screen
+8. Persistent H-bonds (≥30% occupancy)                    → *_hbonds_persistent.csv
+   - Summary of shared and exclusive H-bonds printed to screen
+   - Top 20 persistent H-bonds printed to screen
+9. DSSP secondary structure analysis                      → *_dssp.pdf
+10. Per-residue DSSP difference heatmap                   → *_dssp_difference.pdf
+11. DCCM heatmaps (Cα-only) for each structure            → *_dccm_ca_LABEL.pdf
+12. Differential DCCM (Δ-correlation matrix)              → *_dccm_delta.pdf
+13. Ligand–loop DCCM correlation summary                  → *_dccm_ligand_loop_residue.pdf
+14. OUT.gz trajectory summaries (if provided)             → printed to screen
+    - Includes: number of steps, simulated ps, average energy & temperature, drift
+15. Ligand Analyses (if `--ligand` is specified):
+    a. Ligand RMSD vs. time                               → *_ligand_rmsd.pdf
+    b. Ligand SASA vs. time                               → *_ligand_sasa.pdf
+    c. Ligand per-atom RMSF                               → *_ligand_rmsf.pdf
+    d. Ligand-pocket H-bond persistence                   → printed to screen
+    e. Ligand-pocket contact fingerprint matrix           → printed to screen
+    f. Ligand–loop DCCM statistics                        → printed to screen
+16. Summary JSON file containing all key metrics          → *_summary.json
 
-JSON Output Description
------------------------
-The *_summary.json file contains a structured record of all computed metrics:
+JSON Output: *_summary.json
+---------------------------
+The JSON file contains all major results in structured format, supporting downstream parsing by
+automated scoring tools, AI assistants, or cross-comparative scripts.
 
-{
-  "label1": Name of trajectory 1 (e.g., "Complete Structure"),
-  "label2": Name of trajectory 2 (e.g., "Published Structure"),
+Top-level fields include:
 
-  "rmsf": {
-    "full":     { "mean1", "std1", "mean2", "std2", "ks_p" },
-    "aligned":  { "mean1", "std1", "mean2", "std2", "ks_p" }
-  },
+  - label1 / label2: human-readable names for the input trajectories
+  - out_prefix: basename used for all generated files
+  - generated_on: ISO timestamp of run
+  - units: dictionary of measurement units for each metric
+  - n_frames / n_atoms / n_residues: structure metadata
+  - rmsf: RMSF statistics (full and aligned)
+  - rg: radius of gyration statistics + KS p-value
+  - rmsd_backbone: RMSD (mean, std, max) vs time
+  - clustering: number of clusters + frame counts
+  - pca: PC1/PC2 explained variance, stddev, centroid distance
+  - hbonds: shared and exclusive persistent hydrogen bonds
+  - top_hbonds: top persistent H-bond interactions
+  - dssp_diff: residue-wise secondary structure disagreements (>50% occupancy)
+  - dccm_overall: DCCM correlations and Δ-correlation highlights
+  - ligand: (if applicable) ligand RMSD, RMSF, SASA, H-bonds, contact fingerprint, and DCCM
+  - out1_summary / out2_summary: thermodynamic summaries parsed from OUT.gz logs
 
-  "rg": {
-    "mean1", "std1", "mean2", "std2", "ks_p"
-  },
-
-  "pca": {
-    "explained_variance": [ PC1%, PC2% ],
-    "std_pc1": [ traj1_std, traj2_std ],
-    "std_pc2": [ traj1_std, traj2_std ],
-    "centroid_distance": Euclidean distance between PCA centroids
-  },
-
-  "clustering": {
-    "k": number of clusters selected,
-    "populations": {
-      "label1": [ cluster sizes in traj1 ],
-      "label2": [ cluster sizes in traj2 ]
-    }
-  },
-
-  "hbonds": {
-    "n1": persistent H-bonds in traj1 (≥30%),
-    "n2": persistent H-bonds in traj2 (≥30%),
-    "shared": number of shared persistent H-bonds,
-    "exclusive1": count only in traj1,
-    "exclusive2": count only in traj2
-  },
-
-  "top_hbonds": [  # sorted by highest max persistence
-    {
-      "donor":    "A:ARG61",
-      "acceptor": "A:GLU35",
-      "label1":   1.00,
-      "label2":   1.00
-    },
-    ...
-  ],
-
-  "dssp_diff": {
-    "residues_differing_gt_50pct": Number of aligned residues whose secondary structure disagrees >50% of the time
-  },
-
-  "dccm_overall": {
-    "mean_delta": mean difference between DCCMs (Complete − Published),
-    "max_abs_delta": maximum |difference| between matrix values,
-    "alignment_length": number of aligned Cα atoms used,
-    "top_positive": {
-      "label1": [ { "res1", "res2", "corr" }, ... ],
-      "label2": [ { "res1", "res2", "corr" }, ... ]
-    },
-    "top_negative": {
-      "label1": [ { "res1", "res2", "corr" }, ... ],
-      "label2": [ { "res1", "res2", "corr" }, ... ]
-    },
-    "delta_top_positive": [ { "res1", "res2", "delta_corr" }, ... ],
-    "delta_top_negative": [ { "res1", "res2", "delta_corr" }, ... ]
-  },
-
-  "ligand": {   # Included only if --ligand is provided AND the ligand is present in both structures
-    "resname": 3-letter residue name (e.g., "CBN"),
-
-    "rmsd": {
-      "label1": { "mean", "std", "max" },
-      "label2": { "mean", "std", "max" }
-    },
-
-    "sasa": {
-      "label1": { "mean", "std" },
-      "label2": { "mean", "std" }
-    },
-
-    "rmsf": {
-      "label1": { "mean", "std", "max" },
-      "label2": { "mean", "std", "max" }
-    },
-
-    "hbond_persistence": [
-      {
-        "donor": "A:ARG32",
-        "acceptor": "B:GLU45",
-        "label1": 0.95,
-        "label2": 0.00
-      },
-      ...
-    ],
-
-    "contact_fingerprint": [
-      {
-        "residue": "A:ASP17",
-        "label1": 0.44,
-        "label2": 0.12
-      },
-      ...
-    ],
-
-    "loop_dccm": {
-      "avg_corr": average ligand–loop correlation,
-      "max_abs_corr": strongest |correlation| observed,
-      "most_correlated": "A:VAL186",
-      "top_positive": [ { "residue", "corr" }, ... ],
-      "top_negative": [ { "residue", "corr" }, ... ]
-    }
-  },
-
-  "out1_summary": {
-    "total_ps": total simulated time (ps),
-    "avg_energy": mean potential energy (kJ/mol),
-    "std_energy": std dev of potential energy,
-    "avg_temp": mean temperature (K),
-    "std_temp": temperature fluctuation
-  },
-
-  "out2_summary": {
-    (same fields as out1_summary)
-  }
-
-}
-
-Usage
------
+Usage Examples
+--------------
 Basic:
     python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz
 
-With optional OUT.gz files (adds simulation summary):
+With OUT.gz simulation logs:
     python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz \
         --out1 OUT1.gz --out2 OUT2.gz
 
-With ligand analysis:
+With ligand analysis (resname e.g. CBN):
     python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz \
-        --ligand LIG
+        --ligand CBN
 
-Optional labels for reporting:
-    --label1 "Complete Structure" --label2 "Published Structure"
+Custom labeling and output prefix:
+    python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz \
+        --label1 "Complete" --label2 "Published" -o 1kzn
 
-Output prefix (e.g., "1kzn_comparison"):
-    -o 1kzn_comparison
+Dependencies
+------------
+  - mdtraj
+  - numpy
+  - matplotlib
+  - seaborn
+  - Biopython (Bio.Align)
+  - scikit-learn (PCA and clustering)
+  - gzip
+  - DSSP (external binary; install via conda: `conda install -c salilab dssp`)
 
 Developer Notes
 ---------------
-- All temporary decompressed files are tracked and deleted on exit.
-- Sequence alignment is performed using Biopython’s PairwiseAligner.
-- PCA and clustering use scikit-learn (requires installation).
-- Hydrogen bond persistence is based on MDTraj’s Wernet-Nilsson criteria.
-- DSSP analysis requires the DSSP binary (e.g., `conda install -c salilab dssp`).
-- DCCM analysis includes full Cα matrices, differential matrices, and ligand–loop cross-correlations.
-- OUT.gz files are parsed as CSV with 3 columns: step, potential energy, temperature.
-- The ligand section requires --ligand RESNAME to be provided and found in both structures.
-- The *_summary.json file is suitable for downstream batch analysis and scoring frameworks.
+- Temporary files (from gzipped input) are auto-cleaned on exit.
+- Sequence alignment uses Biopython’s global aligner.
+- All plots are DPI-configurable via CONFIG.
+- JSON summary is machine- and AI-readable for downstream scoring models.
+- Ligand analysis requires ligand to be present and properly identified in both topologies.
 
-Dependencies:
-    mdtraj, numpy, matplotlib, seaborn, Bio, scikit-learn, gzip
+Interpretation Notes
+---------------------
+- High RMSF/RMSD and poor DCCM agreement suggest unstable or misprepared structures.
+- Tight PCA clustering and low radius of gyration imply convergence and compactness.
+- Shared hydrogen bonds and consistent DSSP assignments are positive indicators.
+- Ligand metrics (RMSD, SASA, DCCM, H-bonding) help assess binding pose stability and consistency.
+- Always examine ΔDCCM and fingerprint matrices to pinpoint structure-specific behaviors.
 
-Recommended:
-    Use this script to benchmark MD stability, convergence, and reliability prior
-    to ensemble averaging, binding free energy calculations, or scoring pipelines.
+This script is suitable for pre-screening MD simulations before ensemble averaging, AI-based prediction, or free energy calculation workflows.
 """
 
 from __future__ import annotations
@@ -219,6 +119,7 @@ import tempfile
 from pathlib import Path
 from typing import List, Tuple
 import json
+from datetime import datetime
 
 # ─── Third-Party Libraries ───────────────────────────────────────────────────
 import mdtraj as md
@@ -388,7 +289,7 @@ def main()->None:
     ap=argparse.ArgumentParser()
     ap.add_argument("traj1"); ap.add_argument("top1")
     ap.add_argument("traj2"); ap.add_argument("top2")
-    ap.add_argument("-o","--out-prefix", default="comparison")
+    ap.add_argument("-o","--out-prefix", default="comparison", help="Use as a basename for the comparison (e.g. PDBid)")
     ap.add_argument("--label1", default="Complete Structure")
     ap.add_argument("--label2", default="Published Structure")
     ap.add_argument("--out1", type=Path, help="OUT.gz file for trajectory 1 (optional)")
@@ -416,7 +317,30 @@ def main()->None:
         # Slice protein only
         prot1=t1.atom_slice([a.index for a in t1.topology.atoms if a.residue.is_protein])
         prot2=t2.atom_slice([a.index for a in t2.topology.atoms if a.residue.is_protein])
-
+        
+        summary = {
+            "label1": args.label1,
+            "label2": args.label2,
+            "out_prefix": args.out_prefix
+        }
+        summary["generated_on"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        summary["units"] = {}
+        summary["units"]["temp"] = "K"
+        summary["units"]["energy"] = "kJ/mol"
+        summary["units"]["energy"] = "kJ/mol"
+        summary["n_frames"] = {
+            args.label1: t1.n_frames,
+            args.label2: t2.n_frames
+        }
+        summary["n_atoms"] = {
+            args.label1: t1.n_atoms,
+            args.label2: t2.n_atoms
+        }
+        summary["n_residues"] = {
+            args.label1: len([r for r in t1.topology.residues if r.is_protein]),
+            args.label2: len([r for r in t2.topology.residues if r.is_protein])
+        }
+        
         # ───────── FULL RMSF ─────────
         ca1_all = prot1.topology.select("name CA")
         ca2_all = prot2.topology.select("name CA")
@@ -457,23 +381,25 @@ def main()->None:
         aligned_res1 = [t1.topology.atom(ca).residue for ca in m1]
         aligned_res2 = [t2.topology.atom(ca).residue for ca in m2]
         n_aligned    = len(aligned_res1)
-
-        summary = {
-            "label1": args.label1,
-            "label2": args.label2,
-            "rmsf": {
-                "full": {
-                    "mean1": float(rmsf1_full.mean()), "std1": float(rmsf1_full.std()),
-                    "mean2": float(rmsf2_full.mean()), "std2": float(rmsf2_full.std()),
-                    "ks_p": float(ks_full.pvalue)
-                },
-                "aligned": {
-                    "mean1": float(rmsf1_aln.mean()), "std1": float(rmsf1_aln.std()),
-                    "mean2": float(rmsf2_aln.mean()), "std2": float(rmsf2_aln.std()),
-                    "ks_p": float(ks_aln.pvalue)
-                }
+        
+        summary["rmsf"] = {
+            "full": {
+                "mean1": float(rmsf1_full.mean()),
+                "std1": float(rmsf1_full.std()),
+                "mean2": float(rmsf2_full.mean()),
+                "std2": float(rmsf2_full.std()),
+                "ks_p": float(ks_full.pvalue)
+            },
+            "aligned": {
+                "mean1": float(rmsf1_aln.mean()),
+                "std1": float(rmsf1_aln.std()),
+                "mean2": float(rmsf2_aln.mean()),
+                "std2": float(rmsf2_aln.std()),
+                "ks_p": float(ks_aln.pvalue)
             }
         }
+            
+        summary["units"]["rmsf"] = "Å"
 
         # ───────── Rg ─────────
         rg1=md.compute_rg(prot1)*10.0; rg2=md.compute_rg(prot2)*10.0
@@ -493,6 +419,8 @@ def main()->None:
             "mean2": float(rg2.mean()), "std2": float(rg2.std()),
             "ks_p": float(ks_rg.pvalue)
         }
+
+        summary["units"]["rg"] = "Å"
 
         # ───────── BACKBONE RMSD vs TIME ─────────
         bb_idx1 = prot1.topology.select("backbone")
@@ -518,7 +446,9 @@ def main()->None:
                 "max": float(rmsd2.max())
             }
         }
-        
+
+        summary["units"]["rmsd_backbone"] = "Å"
+
         # ───────── CLUSTERING (k‑means, CA‑RMSD feature matrix) ─────────
         min_frames = CONFIG["min_frames_for_clustering"]
         k_opt, pop1, pop2 = None, [], []
@@ -639,6 +569,8 @@ def main()->None:
             "std_pc2": [float(sd1_pc2), float(sd2_pc2)],
             "centroid_distance": float(centroid_dist)
         }
+
+        summary["units"]["pca"] = "unitless"
 
         # ───────── Hydrogen‑bond persistence ─────────
         hb1 = md.wernet_nilsson(prot1, periodic=False, sidechain_only=False)
@@ -790,6 +722,7 @@ def main()->None:
             summary["dssp_diff"] = {
                 "residues_differing_gt_50pct": int(n_disagree)
             }
+            summary["dssp_diff_pct"] = float(n_disagree) / float(len(aligned_res1))
         
         except Exception as e:
             logging.warning("DSSP calculation failed (%s)", e)
@@ -947,6 +880,8 @@ def main()->None:
             ]
         }
         summary["dccm_overall"] = dccm_stats
+        summary["units"]["correlation"] = "unitless"
+
         # ───────── Ligand detection or reporting ─────────
         ligand_resname = args.ligand.upper() if args.ligand else None
         
@@ -1049,11 +984,16 @@ def main()->None:
                     "std": float(sasa2.std())
                 }
             }
-
-            # ───── Ligand RMSF (per atom) ─────
+            summary["units"]["sasa"] = "Å²"
+            
+            # Ligand RMSF (per atom)
             rmsf_lig1 = md.rmsf(lig_traj1, reference=lig_traj1) * 10.0
             rmsf_lig2 = md.rmsf(lig_traj2, reference=lig_traj2) * 10.0
-        
+            
+            # Perform KS test
+            ks_lig = ks_2samp(rmsf_lig1, rmsf_lig2)
+            
+            # Plot
             plt.figure()
             plt.plot(rmsf_lig1, label=args.label1)
             plt.plot(rmsf_lig2, label=args.label2)
@@ -1062,10 +1002,12 @@ def main()->None:
             plt.legend(); plt.tight_layout()
             plt.savefig(f"{args.out_prefix}_ligand_rmsf.pdf", dpi=CONFIG["plot"]["dpi"])
             plt.close()
-
+            
+            # Print
             print("  Ligand RMSF:")
             print(f"    {args.label1:<20} mean={rmsf_lig1.mean():.2f}  std={rmsf_lig1.std():.2f}  max={rmsf_lig1.max():.2f}")
             print(f"    {args.label2:<20} mean={rmsf_lig2.mean():.2f}  std={rmsf_lig2.std():.2f}  max={rmsf_lig2.max():.2f}")
+            print(f"    KS‑p (ligand RMSF): {ks_lig.pvalue:.2e}")
 
             summary["ligand"]["rmsf"] = {
                 args.label1: {
@@ -1077,7 +1019,8 @@ def main()->None:
                     "mean": float(rmsf_lig2.mean()),
                     "std": float(rmsf_lig2.std()),
                     "max": float(rmsf_lig2.max())
-                }
+                },
+                "ks_p": float(ks_lig.pvalue)
             }
 
             # ───── Ligand–Pocket H-bonds (≥30%) [Aligned Structures] ─────
@@ -1217,7 +1160,13 @@ def main()->None:
                 for i, res in enumerate(aligned_res1)
                 if max(fp1[i], fp2[i]) > CONFIG["contact_fingerprint"]["min_occupancy"]
             ]
-
+            summary["ligand"]["contact_fingerprint_summary"] = {
+                "n_contacts_over_50pct": sum(
+                    1 for i in range(len(aligned_res1))
+                    if max(fp1[i], fp2[i]) > CONFIG["contact_fingerprint"]["min_occupancy"]
+                )
+            }
+            summary["units"]["occupancy"] = "fraction"
             # ───── Ligand–Loop DCCM (Complete Structure, residue‑level) ─────
             print("\nLigand–Loop DCCM Analysis")
             print("=" * 30)
@@ -1340,7 +1289,7 @@ def main()->None:
 
         json_file = f"{args.out_prefix}_summary.json"
         with open(json_file, "w") as jfh:
-            json.dump(summary, jfh, indent=2)
+            json.dump(summary, jfh, indent=2, ensure_ascii=False)
             logging.info("Wrote summary JSON to %s", json_file)
 
     finally:
