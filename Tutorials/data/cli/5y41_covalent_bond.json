@@ -1,0 +1,25 @@
+{
+ "standard_bits": {
+  "Metadata": {
+   "standard_bits-version": "1.0"
+  },
+  "bonds": {
+        "label_entity_id_1" : ["A"],
+        "label_comp_id_1" : ["CYS"],
+        "label_seq_id_1" : ["566"],
+        "pdbx_pdb_ins_code_1" : [null],
+        "label_entity_id_2" : ["A"],
+        "label_comp_id_2" : ["RPG"],
+        "label_seq_id_2" : ["601"],
+        "pdbx_pdb_ins_code_2" : [null],
+        "atom_id_1":["SG"],
+        "pdbx_formal_charge_1" :[null],
+        "hybridization_1" :["sp3"],
+        "atom_id_2":["C11"],
+        "pdbx_formal_charge_2" :[null],
+        "hybridization_2" :["sp3"],
+        "type": ["single"],
+        "order": ["single"]
+    }
+ }
+}
