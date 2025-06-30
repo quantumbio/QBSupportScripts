@@ -102,5 +102,24 @@ wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutori
 $QBHOME/bin/qmechanic 4wq6+H_2_1_0_0_0_F2_C1_refined.pdb 4wq6+H_2_1_0_0_0_F2_C1_refined.mtz --xstats "/A/3TQ/601//"
 
 
+echo "Tutorial 7: XModeScore using Buster on different protonation/flip states of a peptide macrocycle"
+#Source BUSTER
+source /share/apps/GlobalPhasing/linux-x86_64/BUSTER_snapshot_20221121/setup.sh  
+rm -rf ${WORKDIR}/xmodeScore_8alx ; mkdir -p ${WORKDIR}/xmodeScore_8alx ; cd ${WORKDIR}/xmodeScore_8alx
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/8alx+H.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/8alx+H.mtz
+mkdir 8alx-tautomers_depot; cd 8alx-tautomers_depot
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/8alx+H_state1.pdb
+wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/8alx+H_state2.pdb
+
+cd ../
+# 8alx+H.pdb and 8alx+H.mtz files are generated using the command
+# $QBHOME/bin/qmechanic 8alx --prepare sidechains -h amberff14sb -p 8alx+H.pdb -v2 --np 2 -O
+#The cyclic peptide is chain B residues 1..14. The alternative state was generated with COOT by flipping the sidechain of ASN 3 Chain B
+
+$QBHOME/bin/qbphenix --pdbFile 8alx+H.pdb --sfFile 8alx+H.mtz --XmodeScore 8alx-tautomers_depot  --makecif divcon --qmWeight 7.0 --protonation skip --region-radius 0.0 --buffer-radius 0.0 --mmMethod amberff14sb --qmMethod pm6 --ncycles 2 --nSmallCycles 50 --dir Xmode_buster --selection "/B/*/1..14//" --engine buster --protonateTautomers skip --Nproc 8 --v 1
+
+
+
 currentDate=`date`
 echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
