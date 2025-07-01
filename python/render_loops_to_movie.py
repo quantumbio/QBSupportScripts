@@ -38,10 +38,10 @@ if args.limit:
     serial_files = serial_files[:args.limit]
 
 # initial‐phase steps
-INIT_STEPS = 10
+INIT_STEPS = 20
 
 # total frames = init(rotate+trans+zoom) + left/right + serial
-total_frames  = INIT_STEPS*3 + max(len(left_files), len(right_files)) + len(serial_files)
+total_frames  = INIT_STEPS*2 + max(len(left_files), len(right_files)) + len(serial_files)
 frame_digits  = len(str(total_frames))
 ffmpeg_pattern = f"frame%0{frame_digits}d.png"
 
@@ -100,56 +100,32 @@ frag_coords    = [a.coord for a in cmd.get_model("focus_frag").atom]
 frag_centroid  = [sum(c[i] for c in frag_coords)/len(frag_coords) for i in range(3)]
 vec_shift      = [frag_centroid[i] - main_centroid[i] for i in range(3)]
 
-# ────────── TRANSLATION BY INTERPOLATING PIVOT (10 steps) ──────────
-INIT_STEPS = 10
+# ─────────────── INIT_STEPS ───────────────
+#INIT_STEPS = 10
 
-# make a *mutable* copy of rotated_view
-init_view   = list(rotated_view)
-init_pivot  = init_view[12:15]       # tuple → list slice
-final_pivot = frag_centroid           # already a list
+# 1) start from the 180°-rotated view
+start_view = list(rotated_view)
 
-# keep the same clipping planes while translating
-front, back = init_view[15], init_view[16]
-
-for i in range(1, INIT_STEPS+1):
-    t = i / float(INIT_STEPS)
-    v = init_view[:]                   # still a list copy
-    # interpolate pivot (indices 12–14)
-    v[12] = init_pivot[0] + (final_pivot[0] - init_pivot[0]) * t
-    v[13] = init_pivot[1] + (final_pivot[1] - init_pivot[1]) * t
-    v[14] = init_pivot[2] + (final_pivot[2] - init_pivot[2]) * t
-    # restore clipping planes (no zoom during translation)
-    v[15], v[16] = front, back
-    cmd.set_view(v)
-    save_frame()
-
-translated_view = cmd.get_view()         # still a tuple here
-
-
-# ────────── SMOOTH ZOOM VIA FULL VIEW INTERPOLATION (10 steps) ──────────
-INIT_STEPS = 10
-
-# 1) Capture the start (post-translation) and end (zoomed) views as lists
-start_view = list(translated_view)
-cmd.set_view(translated_view)
+# 2) compute the end view by doing one zoom+center on the fragment
+cmd.set_view(start_view)
 cmd.zoom("focus_frag", complete=1)
 end_view = list(cmd.get_view())
 
-# 2) Interpolate all 18 view elements each frame
+# 3) one loop that both shifts pivot (translation) and adjusts zoom
 for i in range(1, INIT_STEPS+1):
     t = i / float(INIT_STEPS)
+    # blend every entry of the view matrix
     v = [ start_view[j] + (end_view[j] - start_view[j]) * t
           for j in range(len(start_view)) ]
     cmd.set_view(v)
     save_frame()
 
-# 3) Use the final view for the rest of the movie
+# 4) capture final view and clean up
 current_view = tuple(end_view)
-
-# cleanup centering fragments
 cmd.delete("tmp_left")
 cmd.delete("tmp_right")
 cmd.delete("focus_frag")
+
 
 # ──────────────── RANDOMIZED LOOP MATCHING ────────────────
 max_len = max(len(left_files), len(right_files))
