@@ -72,9 +72,11 @@ $QBHOME/bin/qbphenix --pdbFile 3HS4+H.pdb --dataFile  3HS4.mtz --XModeScore 3HS4
 echo "Tutorial #3: XModeScore using Buster"
 rm -rf ${WORKDIR}/xmodeScore_external_2BSM ; mkdir -p ${WORKDIR}/xmodeScore_external_2BSM ; cd ${WORKDIR}/xmodeScore_external_2BSM
 source /share/apps/GlobalPhasing/linux-x86_64/BUSTER_snapshot_20221121/setup.sh
+#to use grade set CSDHOME
+export CSDHOME=/share/apps/CCDC/CSD_2022
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/2BSM+H.pdb
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/2BSM.mtz
-qbbuster --pdbFile 2BSM+H.pdb --sfFile 2BSM.mtz --XModeScore --protomers "-1..1" --protonation skip --makeCIF grade --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 1 --resname BSM --chain A --resid 1224 --np 20 --buffer-radius 0.0 --region-radius 3.0 $ENGINE_DIVCON
+qbbuster --pdbFile 2BSM+H.pdb --sfFile 2BSM.mtz --XModeScore --protomers "-1..1" --protonation skip --makeCIF divcon --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 1 --resname BSM --chain A --resid 1224 --np 20 --buffer-radius 0.0 --region-radius 3.0 $ENGINE_DIVCON
 
 echo "Tutorial #4: XModeScore with the new features to explore flip and chiral states - using Buster"
 dir3=xmodeScore_4wq6
