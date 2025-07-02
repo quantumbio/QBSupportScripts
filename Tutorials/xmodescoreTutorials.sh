@@ -119,7 +119,7 @@ cd ../
 # $QBHOME/bin/qmechanic 8alx --prepare sidechains -h amberff14sb -p 8alx+H.pdb -v2 --np 2 -O
 #The cyclic peptide is chain B residues 1..14. The alternative state was generated with COOT by flipping the sidechain of ASN 3 Chain B
 
-$QBHOME/bin/qbphenix --pdbFile 8alx+H.pdb --sfFile 8alx+H.mtz --XmodeScore 8alx-tautomers_depot  --makecif divcon --qmWeight 7.0 --protonation skip --region-radius 0.0 --buffer-radius 0.0 --mmMethod amberff14sb --qmMethod pm6 --ncycles 2 --nSmallCycles 50 --dir Xmode_buster --selection "/B/*/1..14//" --engine buster --protonateTautomers skip --Nproc 8 --v 1
+$QBHOME/bin/qbphenix --pdbFile 8alx+H.pdb --sfFile 8alx+H.mtz --XmodeScore 8alx-tautomers_depot  --makecif divcon --qmWeight 7.0 --protonation skip --region-radius 0.0 --buffer-radius 0.0 --mmMethod amberff14sb --qmMethod pm6 --ncycles 2 --nSmallCycles 50 --dir Xmode_buster --selection "/B/*/1..15//" --engine buster --protonateTautomers skip --Nproc 8 --v 1
 
 
 
