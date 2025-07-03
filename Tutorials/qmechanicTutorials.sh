@@ -87,7 +87,7 @@ echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
 }
 
 function tutorial7_action {
-echo "Seventh Tutorial: Protonation"
+echo "Seventh Tutorial: Macrocycle Protonation w/JSON bond definition"
 rm -rf ${WORKDIR}/macrocycle ; mkdir -p ${WORKDIR}/macrocycle ; cd ${WORKDIR}/macrocycle
 
 cd macrocycle
@@ -100,7 +100,7 @@ echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
 }
 
 function tutorial8_action {
-echo "Eighth Tutorial: Covalently Bound Ligand"
+echo "Eighth Tutorial: Single Point Covalently Bound Ligand w/JSON bond definition"
 rm -rf ${WORKDIR}/bound_ligand ; mkdir -p ${WORKDIR}/bound_ligand ; mkdir bound_ligand
 cd bound_ligand
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/cli/5y41+H.pdb
