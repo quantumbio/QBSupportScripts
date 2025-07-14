@@ -119,7 +119,7 @@ import tempfile
 from pathlib import Path
 from typing import List, Tuple
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ─── Third-Party Libraries ───────────────────────────────────────────────────
 import mdtraj as md
@@ -224,6 +224,12 @@ def compute_rmsf(traj: md.Trajectory, idx: np.ndarray)->np.ndarray:
 
 def safe(label:str)->str:  # filename‑safe
     return re.sub(r"[^A-Za-z0-9]+","_",label.strip()).lower()
+
+def res_label(res_or_atom):
+    """Return residue label 'A:ARG42' for either an Atom or Residue."""
+    res = res_or_atom.residue if hasattr(res_or_atom, "residue") else res_or_atom
+    chain = chr(65 + res.chain.index)
+    return f"{chain}:{res.name}{res.resSeq}"
     
 def parse_out_file(out_gz_path: Path):
     """
@@ -323,7 +329,7 @@ def main()->None:
             "label2": args.label2,
             "out_prefix": args.out_prefix
         }
-        summary["generated_on"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        summary["generated_on"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         summary["units"] = {}
         summary["units"]["temp"] = "K"
         summary["units"]["energy"] = "kJ/mol"
@@ -340,6 +346,37 @@ def main()->None:
             args.label1: len([r for r in t1.topology.residues if r.is_protein]),
             args.label2: len([r for r in t2.topology.residues if r.is_protein])
         }
+        
+        # ───────── Snapshot Output (solute-centered PDBs) ─────────
+        print("\nSaving representative snapshots (solute-centered)...")
+        
+        def save_centered_snapshots(traj: md.Trajectory, solute_sel: np.ndarray, label: str):
+            # Compute solute center-of-geometry per frame
+            xyz_solute = traj.xyz[:, solute_sel, :]
+            com = xyz_solute.mean(axis=1, keepdims=True)  # (n_frames, 1, 3)
+        
+            # Apply COM-centering to all atoms
+            centered_xyz = traj.xyz - com
+        
+            # Create new trajectory with solute atoms only
+            traj_solute = traj.atom_slice(solute_sel)
+            traj_solute.xyz = centered_xyz[:, solute_sel, :]
+        
+            # Select 10 evenly spaced frame indices
+            frame_indices = np.linspace(0, traj_solute.n_frames - 1, 10, dtype=int)
+            snapshots = traj_solute.slice(frame_indices)
+        
+            out_path = f"{args.out_prefix}_snapshots_{safe(label)}.pdb"
+            snapshots.save_pdb(out_path)
+            print(f"  {label:<20} → {out_path}")
+        
+        # Select solute atoms (e.g., all protein)
+        solute1 = t1.topology.select("protein")
+        solute2 = t2.topology.select("protein")
+        
+        save_centered_snapshots(t1, solute1, args.label1)
+        save_centered_snapshots(t2, solute2, args.label2)
+
         
         # ───────── FULL RMSF ─────────
         ca1_all = prot1.topology.select("name CA")
@@ -575,49 +612,53 @@ def main()->None:
         # ───────── Hydrogen‑bond persistence ─────────
         hb1 = md.wernet_nilsson(prot1, periodic=False, sidechain_only=False)
         hb2 = md.wernet_nilsson(prot2, periodic=False, sidechain_only=False)
-        def occupancy(hb_frame_list):
-            """
-            Compute per‑bond occupancy fractions.
         
-            Returns
-            -------
-            dict
-                key   = (donor_atom_index, acceptor_atom_index)
-                value = occupancy fraction (0–1)
+        def occupancy_by_label(hb_frame_list, topology):
+            """
+            Compute per-bond occupancy using residue labels instead of raw atom indices.
+        
+            Returns:
+                dict: (donor_label, acceptor_label) → occupancy fraction
             """
             if not hb_frame_list:
                 return {}
         
-            n_frames = len(hb_frame_list)
             counts = {}
+            n_frames = len(hb_frame_list)
         
-            for frame_array in hb_frame_list:            # one array per frame
-                for bond in frame_array:                 # bond length = 2 or 3
+            for frame_array in hb_frame_list:
+                for bond in frame_array:
                     donor = int(bond[0])
-                    acceptor = int(bond[-1])             # last column is always acceptor
-                    key = (donor, acceptor)
+                    acceptor = int(bond[-1])
+                    d_lbl = res_label(topology.atom(donor))
+                    a_lbl = res_label(topology.atom(acceptor))
+                    key = tuple(sorted((d_lbl, a_lbl)))
                     counts[key] = counts.get(key, 0) + 1
         
             return {k: v / n_frames for k, v in counts.items()}
-        occ1=occupancy(hb1); occ2=occupancy(hb2)
-        persistent = {k:(occ1.get(k,0.0), occ2.get(k,0.0))
-                      for k in set(occ1)|set(occ2)
-                      if max(occ1.get(k, 0.0), occ2.get(k, 0.0)) >= CONFIG["hbond_threshold"]}
+        
+        occ1 = occupancy_by_label(hb1, prot1.topology)
+        occ2 = occupancy_by_label(hb2, prot2.topology)
+        
+        persistent = {
+            k: (occ1.get(k, 0.0), occ2.get(k, 0.0))
+            for k in set(occ1) | set(occ2)
+            if max(occ1.get(k, 0.0), occ2.get(k, 0.0)) >= CONFIG["hbond_threshold"]
+        }
+        
+        # Write CSV output
         if persistent:
-            csvfile=f"{args.out_prefix}_hbonds_persistent.csv"
-            with open(csvfile,"w",newline="") as fh:
-                w=csv.writer(fh); w.writerow(["Donor","Acceptor",args.label1,args.label2])
-                for (don_idx, acc_idx), (f1, f2) in sorted(persistent.items(),
-                                                           key=lambda x: -max(x[1])):
-                    don_res = prot1.topology.atom(don_idx).residue
-                    acc_res = prot1.topology.atom(acc_idx).residue
-                    w.writerow([f"{don_res}-{don_idx}", f"{acc_res}-{acc_idx}",
-                                f"{f1:.2f}", f"{f2:.2f}"])
-            logging.info("Wrote persistent H‑bonds to %s (%d entries)",csvfile,len(persistent))
+            csvfile = f"{args.out_prefix}_hbonds_persistent.csv"
+            with open(csvfile, "w", newline="") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["Donor", "Acceptor", args.label1, args.label2])
+                for (don, acc), (f1, f2) in sorted(persistent.items(), key=lambda x: -max(x[1])):
+                    writer.writerow([don, acc, f"{f1:.2f}", f"{f2:.2f}"])
+            logging.info("Wrote persistent H‑bonds to %s (%d entries)", csvfile, len(persistent))
         else:
             logging.info("No hydrogen bonds ≥30%% occupancy in either trajectory")
-
-        # Print summary table to screen
+        
+        # Print summary to screen
         top_n = CONFIG["top_n_persistent_hbonds"]
         hb_threshold_pct = int(CONFIG["hbond_threshold"] * 100)
         sorted_persistent = sorted(persistent.items(), key=lambda x: -max(x[1]))
@@ -626,34 +667,22 @@ def main()->None:
         print(f"{'Donor':<18} → {'Acceptor':<18} | {args.label1:^18} | {args.label2:^18}")
         print("-" * 70)
         
-        for (don_idx, acc_idx), (f1, f2) in sorted(persistent.items(), key=lambda x: -max(x[1]))[:20]:
-            top_d = prot1 if don_idx < prot1.n_atoms else prot2
-            top_a = prot1 if acc_idx < prot1.n_atoms else prot2
-        
-            don_atom = top_d.topology.atom(don_idx)
-            acc_atom = top_a.topology.atom(acc_idx)
-        
-            don_res = don_atom.residue
-            acc_res = acc_atom.residue
-        
-            don_str = f"{chr(65 + don_res.chain.index)}:{don_res.name}{don_res.resSeq}"
-            acc_str = f"{chr(65 + acc_res.chain.index)}:{acc_res.name}{acc_res.resSeq}"
-        
-            print(f"{don_str:<18} → {acc_str:<18} | {f1:>8.2f}         | {f2:>8.2f}")
+        for (don, acc), (f1, f2) in sorted_persistent[:top_n]:
+            print(f"{don:<18} → {acc:<18} | {f1:>8.2f}         | {f2:>8.2f}")
         
         # Summary stats
         n1 = sum(1 for v in persistent.values() if v[0] >= CONFIG["hbond_threshold"])
         n2 = sum(1 for v in persistent.values() if v[1] >= CONFIG["hbond_threshold"])
-        shared = sum(1 for v in persistent.values() if v[0] >= 0.30 and v[1] >= CONFIG["hbond_threshold"])
-        only1 = sum(1 for v in persistent.values() if v[0] >= 0.30 and v[1] < CONFIG["hbond_threshold"])
-        only2 = sum(1 for v in persistent.values() if v[1] >= 0.30 and v[0] < CONFIG["hbond_threshold"])
+        shared = sum(1 for v in persistent.values() if v[0] >= CONFIG["hbond_threshold"] and v[1] >= CONFIG["hbond_threshold"])
+        only1 = sum(1 for v in persistent.values() if v[0] >= CONFIG["hbond_threshold"] and v[1] < CONFIG["hbond_threshold"])
+        only2 = sum(1 for v in persistent.values() if v[1] >= CONFIG["hbond_threshold"] and v[0] < CONFIG["hbond_threshold"])
         
         print(f"\n{args.label1}: {n1} persistent H-bonds (≥{hb_threshold_pct}%)")
         print(f"{args.label2}: {n2} persistent H-bonds (≥{hb_threshold_pct}%)")
         print(f"Shared: {shared}")
         print(f"Exclusive to {args.label1}: {only1}")
         print(f"Exclusive to {args.label2}: {only2}\n")
-
+        
         summary["hbonds"] = {
             "n1": n1,
             "n2": n2,
@@ -664,20 +693,13 @@ def main()->None:
         
         summary["top_hbonds"] = [
             {
-                "donor": f"{chr(65 + don_res.chain.index)}:{don_res.name}{don_res.resSeq}",
-                "acceptor": f"{chr(65 + acc_res.chain.index)}:{acc_res.name}{acc_res.resSeq}",
+                "donor": don,
+                "acceptor": acc,
                 args.label1: float(f1),
                 args.label2: float(f2)
             }
-            for (don_idx, acc_idx), (f1, f2) in sorted_persistent
-            for don_res, acc_res in [
-                (
-                    (prot1 if don_idx < prot1.n_atoms else prot2).topology.atom(don_idx).residue,
-                    (prot1 if acc_idx < prot1.n_atoms else prot2).topology.atom(acc_idx).residue
-                )
-            ]
+            for (don, acc), (f1, f2) in sorted_persistent
         ]
-
         # ───────── DSSP heat‑map ─────────
         n_disagree = 0
         try:
@@ -884,13 +906,25 @@ def main()->None:
 
         # ───────── Ligand detection or reporting ─────────
         ligand_resname = args.ligand.upper() if args.ligand else None
+        loop_residues = None 
+        ligand_res = None
         
         if ligand_resname:
-            ligand1 = t1.topology.select(f"resname {ligand_resname}")
-            ligand2 = t2.topology.select(f"resname {ligand_resname}")
+            def find_ligand_atoms(top, ligand_name):
+                atoms = []
+                for res in top.residues:
+                    resname_norm = res.name[:3].upper()
+                    if resname_norm == ligand_name.upper():
+                        atoms.extend([atom.index for atom in res.atoms])
+                return atoms
+            
+            ligand1 = find_ligand_atoms(t1.topology, ligand_resname)
+            ligand2 = find_ligand_atoms(t2.topology, ligand_resname)
             
             if len(ligand1) == 0 or len(ligand2) == 0:
                 print(f"\nWARNING: Ligand '{ligand_resname}' not found in one or both trajectories.\n")
+                print(f"  Ligand candidates in t1: {[res.name for res in t1.topology.residues if res.name[:3].upper() == ligand_resname.upper()]}")
+                print(f"  Ligand candidates in t2: {[res.name for res in t2.topology.residues if res.name[:3].upper() == ligand_resname.upper()]}")
             else:
                 print(f"\nLigand '{ligand_resname}' found in both structures.")
                 print(f"  Complete Structure: {len(ligand1)} atoms")
@@ -1023,82 +1057,78 @@ def main()->None:
                 "ks_p": float(ks_lig.pvalue)
             }
 
-            # ───── Ligand–Pocket H-bonds (≥30%) [Aligned Structures] ─────
-            print("\nLigand–Pocket H-bond Analysis")
+            # ───── Ligand–Pocket H‑bonds (≥30 % persistence) ─────
+            print("\nLigand–Pocket H‑bond Analysis")
             print("=" * 30)
             
-            # Union of protein + ligand (from ALIGNED prot1/prot2)
-            ligand_protein1 = np.unique(np.concatenate([prot1.topology.select("all"), ligand1]))
-            ligand_protein2 = np.unique(np.concatenate([prot2.topology.select("all"), ligand2]))
+            hb_threshold = 0.30          # 30 %
+            hb_threshold_pct = int(hb_threshold * 100)
             
-            traj_lp1 = t1.atom_slice(ligand_protein1)
-            traj_lp2 = t2.atom_slice(ligand_protein2)
+            # --- helper -----------------------------------------------------------
             
-            hb1_all = md.wernet_nilsson(traj_lp1)
-            hb2_all = md.wernet_nilsson(traj_lp2)
+            def collect_lig_hbonds(traj, ligand_atom_ids_in_slice):
+                """
+                Count H‑bonds where exactly one atom is in `ligand_atom_ids_in_slice`
+                (indices refer to *traj*).  Returns { (don_label, acc_label) : fraction }.
+                The donor/acceptor labels are sorted so direction does not create duplicates.
+                """
+                lig_set   = set(ligand_atom_ids_in_slice)
+                n_frames  = len(traj)
+                counts    = {}
             
-            def extract_ligand_hbonds(hb_frame_list, ligand_slice_indices):
-                ligand_set = set(ligand_slice_indices)
-                counts = {}
-                n_frames = len(hb_frame_list)
-                for frame in hb_frame_list:
-                    for hbond in frame:
+                for frame_hb in md.wernet_nilsson(traj):
+                    for hbond in frame_hb:
                         don, acc = map(int, hbond[[0, -1]])
-                        if don in ligand_set or acc in ligand_set:
-                            key = (don, acc)
+                        in_lig = (don in lig_set, acc in lig_set)
+            
+                        if in_lig.count(True) == 1:          # XOR → one ligand, one protein
+                            don_lbl = res_label(traj.topology.atom(don))
+                            acc_lbl = res_label(traj.topology.atom(acc))
+                            key     = tuple(sorted((don_lbl, acc_lbl)))  # order‑independent
                             counts[key] = counts.get(key, 0) + 1
+            
                 return {k: v / n_frames for k, v in counts.items()}
+            # ----------------------------------------------------------------------
             
-            # Map ligand atom indices to sliced traj index space
-            ligand1_map = np.where(np.isin(ligand_protein1, ligand1))[0]
-            ligand2_map = np.where(np.isin(ligand_protein2, ligand2))[0]
+            # Build “protein + ligand” sliced trajectories for BOTH systems
+            lp1_ids = np.unique(np.concatenate([prot1.topology.select("all"), ligand1]))
+            lp2_ids = np.unique(np.concatenate([prot2.topology.select("all"), ligand2]))
             
-            lig_hb1 = extract_ligand_hbonds(hb1_all, ligand1_map)
-            lig_hb2 = extract_ligand_hbonds(hb2_all, ligand2_map)
+            traj_lp1 = t1.atom_slice(lp1_ids)
+            traj_lp2 = t2.atom_slice(lp2_ids)
             
-            # Merge and filter shared H-bonds
-            lig_hb_shared = {
-                k: (lig_hb1.get(k, 0), lig_hb2.get(k, 0))
-                for k in set(lig_hb1) | set(lig_hb2)
-                if max(lig_hb1.get(k, 0), lig_hb2.get(k, 0)) >= 0.3
+            # Map ligand atom IDs *within each slice*
+            lig1_in_slice = np.where(np.isin(lp1_ids, ligand1))[0]
+            lig2_in_slice = np.where(np.isin(lp2_ids, ligand2))[0]
+            
+            hb1 = collect_lig_hbonds(traj_lp1, lig1_in_slice)
+            hb2 = collect_lig_hbonds(traj_lp2, lig2_in_slice)
+            
+            # Union & threshold filter
+            pairs = {
+                k: (hb1.get(k, 0.0), hb2.get(k, 0.0))
+                for k in set(hb1) | set(hb2)
+                if max(hb1.get(k, 0.0), hb2.get(k, 0.0)) >= hb_threshold
             }
             
-            if lig_hb_shared:
-                print(f"  {len(lig_hb_shared)} ligand–protein H-bonds ≥{hb_threshold_pct}% persistence")
-                for (don, acc), (f1, f2) in sorted(lig_hb_shared.items(), key=lambda x: -max(x[1])):
-                    # Use aligned trajectories for residue labeling
-                    don_atom = traj_lp1.topology.atom(don) if don < traj_lp1.n_atoms else traj_lp2.topology.atom(don)
-                    acc_atom = traj_lp1.topology.atom(acc) if acc < traj_lp1.n_atoms else traj_lp2.topology.atom(acc)
-                    r1 = don_atom.residue
-                    r2 = acc_atom.residue
-                    name1 = f"{chr(65 + r1.chain.index)}:{r1.name}{r1.resSeq}"
-                    name2 = f"{chr(65 + r2.chain.index)}:{r2.name}{r2.resSeq}"
-                    print(f"    {name1} ↔ {name2} | {args.label1}: {f1:.2f}  {args.label2}: {f2:.2f}")
-
+            if pairs:
+                print(f"  {len(pairs)} ligand–protein H‑bonds ≥{hb_threshold_pct}% persistence")
+                for (resA, resB), (f1, f2) in sorted(pairs.items(),
+                                                     key=lambda x: -max(x[1])):
+                    print(f"    {resA} ↔ {resB} | {args.label1}: {f1:.2f}  {args.label2}: {f2:.2f}")
+            
+                # Store in JSON summary -------------------------------------------
                 summary["ligand"]["hbond_persistence"] = [
                     {
-                        "donor": (
-                            f"{chr(65 + t1.topology.atom(don).residue.chain.index)}:"
-                            f"{t1.topology.atom(don).residue.name}{t1.topology.atom(don).residue.resSeq}"
-                            if don < t1.n_atoms else
-                            f"{chr(65 + t2.topology.atom(don).residue.chain.index)}:"
-                            f"{t2.topology.atom(don).residue.name}{t2.topology.atom(don).residue.resSeq}"
-                        ),
-                        "acceptor": (
-                            f"{chr(65 + t1.topology.atom(acc).residue.chain.index)}:"
-                            f"{t1.topology.atom(acc).residue.name}{t1.topology.atom(acc).residue.resSeq}"
-                            if acc < t1.n_atoms else
-                            f"{chr(65 + t2.topology.atom(acc).residue.chain.index)}:"
-                            f"{t2.topology.atom(acc).residue.name}{t2.topology.atom(acc).residue.resSeq}"
-                        ),
+                        "donor": resA,
+                        "acceptor": resB,
                         args.label1: float(f1),
                         args.label2: float(f2)
                     }
-                    for (don, acc), (f1, f2) in lig_hb_shared.items()
+                    for (resA, resB), (f1, f2) in pairs.items()
                 ]
-
             else:
-                print("  No persistent ligand–pocket H-bonds found.")
+                print("  No persistent ligand–pocket H‑bonds found.")
 
             # ───── Contact Fingerprint (aligned residues, ligand ↔ protein) ─────
             cutoff_nm = CONFIG["contact_fingerprint"]["distance_cutoff_nm"]
@@ -1207,9 +1237,6 @@ def main()->None:
                     n_res = disp.shape[1] // 3
                     dccm  = np.corrcoef(disp.T).reshape(n_res, 3, n_res, 3).mean(axis=(1, 3))
                     return dccm
-
-                def res_label(res):
-                    return f"{chr(65 + res.chain.index)}:{res.name}{res.resSeq}"
 
                 # 3. build displacement matrix & DCCM
                 disp_mat = residue_displacements(t1, all_residues)
