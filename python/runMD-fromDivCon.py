@@ -61,7 +61,8 @@ import time
 minimize_nsteps     = round (5000      /   10)
 nvt_equil_nsteps    = round (100000    /   10)
 ntp_equil_nsteps    = round (100000    /   10)
-production_nsteps   = round (1000000   /   100)
+#production_nsteps   = round (1000000   /   100)
+production_nsteps   = 25000000  # 50 ns for 0.002 ps timesteps
 
 # Load the Amber topology and coordinate files
 prmtopFile = sys.argv[1]
@@ -504,7 +505,7 @@ print(f"Elapsed time: {elapsed_time:.6f} seconds")
 # Save final equilibrated positions
 save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
-report_interval = min(production_nsteps,1000)
+report_interval = min(production_nsteps,25000)
 simulation.context.setVelocitiesToTemperature(300*unit.kelvin)
 #simulation.reporters.append(app.PDBReporter('output.pdb', report_interval))
 simulation.reporters.append(app.StateDataReporter(sys.stdout, report_interval, step=True, potentialEnergy=True, temperature=True))
