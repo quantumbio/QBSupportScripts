@@ -43,8 +43,12 @@ wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutori
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/CryoEM/emd_22463.map
 
 $QBHOME/bin/qmechanic 7jsy+H.pdb emd_22463.map --resolution 1.8 --experiment cryoEM --opt all 35 0.01 --qm-region /A/I3C/501// 0.0 0.0 -h pm6 amberff14sb -O -p 7jsy+H_refined.pdb 7jsy+H_refined.mtz --np 4 -v 2 --nb-cutoff 25
-
+## Notes:
+#   * --resolution is optional
+#   * --experiment is required
+#   * This calculation will perform 35 steps of QM/MM refinement (or until gnorm<=0.01) in which only the ligand (I3C) is QM.
 #
+
 echo "Tutorial #2: Cryo_EM ONIOM Refinement with qbDivCon: PDBid:7efc"
 tutorFolder=cryoEM_qbdivcon_7efc_tut2
 rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
@@ -53,7 +57,9 @@ wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutori
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/CryoEM/emd_31083.map
 
 $QBHOME/bin/qbdivcon --pdbfile 7efc+H.pdb --sfFile emd_31083.map --experiment cryoEM --resolution 1.7 --protonation skip  --engine divcon --qmMethod pm6 --mmMethod amberff14sb --resname BTN --chain A --resid 5100 --np 4 --region-radius 3.0 --nSmallCycles 40 
-#
+## Notes:
+#   * This example will utilize the qbphenix.pl script (which is used to run PHENIX & BUSTER) - demonstrating the use of DivCon (qmechanic) instead.
+#   * Run $QBHOME/bin/qbdivcon --help to see the full list of command line options available.
 
 echo "Tutorial #3: Cryo_EM XModeScore with qbDivCon: PDBid:7jsy"
 tutorFolder=cryoEM_xmodescore_7jsy_tut3
@@ -63,7 +69,9 @@ wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutori
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/CryoEM/emd_22463.map
 
 $QBHOME/bin/qbdivcon --pdbfile 7jsy+H.pdb --sfFile emd_22463.map --experiment cryoEM --resolution 1.8 --XmodeScore --protomers "-1..1" --exploreFlip --protonation skip  --engine divcon --qmMethod pm6 --mmMethod amberff14sb --resname I3C --chain A --resid 501 --np 16 --region-radius 3.0 --nSmallCycles 40 --dir testXmode
-#
+## Notes:
+#   * This example will run XModeScore (exploring protonation & flips) utilizing the DivCon engine
+
 echo "Tutorial #4: Cryo_EM XModeScore with DivCon qmechanic: PDBid:7jsy"
 tutorFolder=cryoEM_qmechanic_xmodescore_7jsy_tut4
 rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR}/$tutorFolder
