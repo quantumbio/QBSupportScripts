@@ -58,15 +58,32 @@ import importlib.resources
 import mdtraj as md
 import time
 
-minimize_nsteps     = round (5000      /   10)
-nvt_equil_nsteps    = round (100000    /   10)
-ntp_equil_nsteps    = round (100000    /   10)
-#production_nsteps   = round (1000000   /   100)
-production_nsteps   = 25000000  # 50 ns for 0.002 ps timesteps
+import argparse
+
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description="Run OpenMM MD simulation with optional test mode.")
+parser.add_argument("prmtop", help="Path to AMBER prmtop file")
+parser.add_argument("inpcrd", help="Path to AMBER inpcrd file")
+parser.add_argument("--test-run", action="store_true", help="Run a short test simulation")
+
+args = parser.parse_args()
+prmtopFile = args.prmtop
+inpcrdFile = args.inpcrd
+test_run = args.test_run
+
+if test_run:
+    minimize_nsteps   = 500  # ~quick minimization
+    nvt_equil_nsteps  = 1000
+    ntp_equil_nsteps  = 1000
+    production_nsteps = 5000  # 10 ps at 0.002 ps timestep
+    print("Test run mode enabled: using reduced step counts for quick validation.")
+else:
+    minimize_nsteps   = round(5000 / 10)
+    nvt_equil_nsteps  = round(100000 / 10)
+    ntp_equil_nsteps  = round(100000 / 10)
+    production_nsteps = 25000000  # 50 ns for 0.002 ps timestep
 
 # Load the Amber topology and coordinate files
-prmtopFile = sys.argv[1]
-inpcrdFile = sys.argv[2]
 prmtop = pmd.load_file(prmtopFile, inpcrdFile)
 
 # Identify and modify HOH residues
