@@ -69,7 +69,7 @@ rm -rf ${WORKDIR}/$tutorFolder ; mkdir -p ${WORKDIR}/$tutorFolder ; cd ${WORKDIR
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4b72+H.pdb
 wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4b72.mtz
 
-$QBHOME/bin/qbphenix --pdbFile 4b72+H.pdb --sfFile 4b72.mtz --XmodeScore --protonation Skip --protomers "-1..1" --engine divcon --protonateTautomers divcon --qmMethod pm6 --mmMethod amberff14sb --nSmallCycles 50 --region-radius 3.0 --buffer-radius 0.0 --selection "resname 2FB and resid 1503 and chain A" --dir testXmode --Nproc 16
+$QBHOME/bin/qbdivcon --pdbFile 4b72+H.pdb --sfFile 4b72.mtz --XmodeScore --protonation Skip --protomers "-1..1" --engine divcon --protonateTautomers divcon --qmMethod pm6 --mmMethod amberff14sb --nSmallCycles 50 --region-radius 3.0 --buffer-radius 0.0 --selection "resname 2FB and resid 1503 and chain A" --dir testXmode --Nproc 16
 
 echo "Tutorial #5: XModeScore with Dock executed on protonated PDBid:1bzc"
 tutorFolder=xmodeScore_1bzc
