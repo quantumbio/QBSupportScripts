@@ -180,7 +180,7 @@ tutorial_4() {
   fi
   "${DIVCON_BIN}" pro_Bace_030215_CAT_4p_predock.pdb \
     --ligand lig_Bace_030215_CAT_4p_predock.mol2 -h amberff14sb \
-    --mtdock Bace_030215_CAT_4p-dock.sdf --mtscore ensemble --np 4 -v 2
+    --mtdock CAT_4p-dock.sdf --mtscore ensemble --np 4 -v 2
 }
 
 tutorial_5() {
