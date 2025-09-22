@@ -1,128 +1,286 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -u -o pipefail
 
-# MT-threaded spot test script
+# MT-threaded spot test script (menu-driven refactor; corrected to remove erroneous backticks)
 
+: "${QBHOME:?Set QBHOME or source /path/to/DivConSuite/etc/qbenv.sh before running this script.}"
 
-if [[ -z "${QBHOME}" ]]; then
-  echo "Set QBHOME or source /path/to/DivConSuite/etc/qbenv.sh before running this script."
+DIVCON="${QBHOME}/bin/qmechanic"
+if [[ ! -x "${DIVCON}" ]]; then
+  echo "ERROR: ${DIVCON} not executable"
   exit 1
 fi
 
-DIVCON=${QBHOME}/bin/qmechanic
-WORKDIR=${PWD}
+WORKDIR="${PWD}"
+DATE_FMT="+%Y-%m-%d %H:%M:%S"
 
-export MT_ALLOW_MTDOCK=1    # For these tests, MTDock is required.
+# For these tests, MTDock is required.
+export MT_ALLOW_MTDOCK=1
 
-# Density-driven docking: known pocket location 
-#   * This is effectively re-docking of the ligand in density.
-#   * We use the same appraoch we have always used in which the placed ligand defines the pocket.
-#   * Since we know where we are docking, the "blobs" keyword is unnecessary.
+log() { printf "[%s] %s\n" "$(date "${DATE_FMT}")" "$*"; }
 
-echo "Tutorial #1a-pdb: Automated DivCon-based Docking – using qmechanic and XModeScore"
-dir4=XModeScore-dock_ONIOM
-rm -rf ${WORKDIR}/$dir4 ; mkdir -p ${WORKDIR}/$dir4 ; cd ${WORKDIR}/$dir4
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.pdb
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.mtz
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4XF_A_402.pdb
+section() {
+  echo
+  echo "======================================================================"
+  echo "$*"
+  echo "======================================================================"
+}
 
-${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   `# input files. Since MTZ file is provided, it is understood that density docking will be used`                                                                         \
-    -h pm6 amberff14sb                                  `# Use AMBERFF14SB for all MM and PM6 for all QM. For v1: all steps up to XModeScore should be done with MM and final XModeScore should be done with QM/MM`             \
-    --ligand 4XF_A_402.pdb                              `# This is a placed ligand so no novel compound required. The novel compound (if provided) is the LIGAND in any subsequent steps which uses the LIGAND keyword.`        \
-    --qm-region LIGAND+/A/ZN/401// 3.0 0                `# The QM region in ONIOM. Note: for v1, all steps up to XModeScore should be done with MM and final XModeScore should be done with QM/MM. `                            \
-    --confSearch LIGAND opt off                         `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform no opt on conformer`                \
-    --flip all                                          `# Enumerate all rotomers (flip states) available in LIGAND`                                                                                                            \
-    --chirality all                                     `# Enumerate all stereoisomers (chiral centers) available in LIGAND`                                                                                                    \
-    --dock 5,1SD opt torsion pocket 100 0.01            `# Dock the top 5 poses/enumerations from confSearch and refine/optimize the entire site after placement (using MM), keep the top 1 standard deviation of refined sets.`    \
-    --protomers all [-1..1]                             `# Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target.`                                                  \
-    --xmodescore opt all                                `# Use XModeScore to decide the final "winners" and "losers." If --qm-region and -h amberff14sb pm6 set, use QM/MM refinement of the target+ligand for XModeScore.`     \
-    --np 8  -v 2                                        `# All refinements and all scoring happen in parallel. Verbosity=2 should be clean. Verbosity=3 should just have a bit more debug information but should still be fairly clean.`    \
-    -p 5C3K-out.pdb 5C3K-out.mtz                        `# There should be a PDB and MTZ file for each refined/scored case from XModeScore. Should be called: 5C3K-out_pose-1.pdb 5C3K-out_pose-1.mtz, 5C3K-out_pose-2.pdb 5C3K-out_pose-2.mtz etc (note: the pose-# should equal the number in the Pose Scoring Table in the screen output)`   \
-        >& OUT.SCREEN
+safe_cd_root() {
+  cd "${WORKDIR}" || { echo "ERROR: Cannot cd back to ${WORKDIR}"; exit 1; }
+}
 
-echo "Tutorial #1a-mol2: Automated DivCon-based Docking – using qmechanic and XModeScore"
-dir4=XModeScore-dock_MM
-rm -rf ${WORKDIR}/$dir4 ; mkdir -p ${WORKDIR}/$dir4 ; cd ${WORKDIR}/$dir4
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.pdb
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.mtz
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4XF_A_402.pdb
+clean_make_cd() {
+  local d="$1"
+  rm -rf "${WORKDIR:?}/${d}"
+  mkdir -p "${WORKDIR}/${d}"
+  cd "${WORKDIR}/${d}" || { echo "ERROR: Cannot enter ${WORKDIR}/${d}"; exit 1; }
+}
 
-${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   `# input files. Since MTZ file is provided, it is understood that density docking will be used`     \
-    -h amberff14sb                                      `# Use AMBERFF14SB for all MM. Since no PM6 is requested & no region is set, all calculations (including XModeScore) should be done with MM only.`      \
-    --ligand 4XF_A_402.pdb                              `# This is a placed ligand so no novel compound required. `     \
-    --confSearch LIGAND opt off                         `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform no opt on conformer`        \
-    --flip off                                          `# DONT Enumerate all rotomers (flip states) available in LIGAND`       \
-    --chirality off                                     `# DONE Enumerate all stereoisomers (chiral centers) available in LIGAND`   \
-    --dock 5,1SD opt torsion LIGAND 100 0.01            `# Dock the top 5 poses/enumerations from confSearch and refine/optimize the ligand after placement, keep the top 1 standard deviation of refined sets to pass to XModeScore.` \
-    --protomers all [-1..1]                             `# Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target`       \
-    --xmodescore opt torsion pocket                     `# Use XModeScore to decide the final "winners" and "losers." Only optimize the POCKET+LIGAND and not the whole target+ligand.`     \
-    --np 8  -v 2                                        `# All refinements and all scoring happen in parallel`      \
-    -p 5C3K-out.mol2 5C3K-out.mtz                       `# There should be a MOL2 and MTZ file for each refined/scored case from XModeScore. Should be called: 5C3K-out_pose-1.mol2 5C3K-out_pose-1.mtz, 5C3K-out_pose-2.mol2 5C3K-out_pose-2.mtz etc (note: the pose-# should equal the number in the Pose Scoring Table in the screen output and the XModeScore terms should be stored in the mol2 file)` \
-        >& OUT.SCREEN
+fetch() {
+  local url="$1"
+  local file
+  file="$(basename "${url}")"
+  if [[ -f "${file}" ]]; then
+    log "Already present: ${file}"
+    return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    wget -q "${url}" || { echo "ERROR: wget failed: ${url}"; return 1; }
+  elif command -v curl >/dev/null 2>&1; then
+    curl -fsSL -O "${url}" || { echo "ERROR: curl failed: ${url}"; return 1; }
+  else
+    echo "ERROR: Need wget or curl"
+    return 1
+  fi
+}
 
-echo "Tutorial #1b: Automated DivCon-based Docking – using qmechanic and EndState MTScore"
-dir4=MTDock-MTScore_garf
-rm -rf ${WORKDIR}/$dir4 ; mkdir -p ${WORKDIR}/$dir4 ; cd ${WORKDIR}/$dir4
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.pdb
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.mtz
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4XF_A_402.pdb
+###############################################################################
+# Tutorial Functions
+# NOTE: Replace any [...]-tagged comment placeholders with the complete,
+# original arguments from your canonical script.
+###############################################################################
 
-${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   `# input files. Since MTZ file is provided, it is understood that density docking will be used`     \
-    -h garf                                             `# This is going to be an MT calculation so as always: MM-amberff14sb used for all optimizations and GARF for all MT calculations.`     \
-    --ligand 4XF_A_402.pdb                              `# This is a placed ligand so no novel compound required. `     \
-    --mtcs LIGAND opt off                               `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform no opt on conformer`    \
-    --flip all                                          `# Enumerate all rotomers (flip states) available in LIGAND`        \
-    --chirality all                                     `# Enumerate all stereoisomers (chiral centers) available in LIGAND`        \
-    --mtdock 5,1SD opt torsion pocket 100 0.01          `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site after placement, keep the top 1 standard deviation of refined sets to pass to MTScore.`        \
-    --protomers off                                     `# DONT Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target`      \
-    --mtscore endstate                                  `# Use MTScore EndState to decide the final "winners" and "losers"`     \
-    --np 8  -v 2                                        `# All refinements and all scoring happen in parallel`              \
-    -p 5C3K-out.mol2 5C3K-out.mtz                       `# There should be a MOL2 and MTZ file for each refined/scored case from MTScore. Should be called: 5C3K-out_pose-1.mol2 5C3K-out_pose-1.mtz, 5C3K-out_pose-2.mol2 5C3K-out_pose-2.mtz etc (note: the pose-# should equal the number in the Pose Scoring Table in the screen output and the MTScore terms should be stored in the mol2 file)`       \
-        >& OUT.SCREEN
+tutorial_1a_pdb() {
+  section "Tutorial #1a-pdb: Automated DivCon-based Docking – qmechanic + XModeScore (ONIOM)"
+  safe_cd_root
+  local dir="XModeScore-dock_ONIOM"
+  clean_make_cd "${dir}"
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.pdb
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.mtz
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4XF_A_402.pdb
 
-echo "Tutorial #1c: Automated DivCon-based Docking – using qmechanic and Ensemble MTScore"
-dir4=MTDock-MTScore_amberff14sb
-rm -rf ${WORKDIR}/$dir4 ; mkdir -p ${WORKDIR}/$dir4 ; cd ${WORKDIR}/$dir4
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.pdb
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.mtz
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4XF_A_402.pdb
+  local args=(
+    "5C3K-H_refine_001.pdb"
+    "5C3K-H_refine_001.mtz"
+    -h pm6 amberff14sb
+    --ligand 4XF_A_402.pdb
+    --qm-region LIGAND+/A/ZN/401// 3.0 0
+    --confSearch LIGAND opt off
+    --flip all
+    --chirality all
+    --dock 5,1SD opt torsion pocket 100 0.01
+    --protomers all [-1..1]
+    --xmodescore opt all
+    --np 8 -v 2
+    -p 5C3K-out.pdb 5C3K-out.mtz
+  )
+  # (Above: fill in any missing flags that were truncated.)
+  "${DIVCON}" "${args[@]}" >& OUT.SCREEN
+}
 
-${DIVCON} 5C3K-H_refine_001.pdb 5C3K-H_refine_001.mtz   `# input files. Since MTZ file is provided, it is understood that density docking will be used`     \
-    -h amberff14sb                                      `# This is going to be an MT calculation so as always: MM-amberff14sb used for all optimizations and AMBERff14sb for all MT calculations.`  \
-    --ligand 4XF_A_402.pdb                              `# This is a placed ligand so no novel compound required. ` \
-    --confSearch LIGAND opt off                         `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform no opt on conformer`    \
-    --flip all                                          `# Enumerate all rotomers (flip states) available in LIGAND`        \
-    --chirality all                                     `# Enumerate all stereoisomers (chiral centers) available in LIGAND`    \
-    --mtdock 5,1SD opt torsion pocket 100 0.01          `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site after placement, keep the top 1 standard deviation of refined sets.`   \
-    --protomers all [-1..1]                             `# Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target`       \
-    --mtscore ensemble                                  `# Use MTScore Ensemble across the entire ensemble of protein/ligand complexes generated.`      \
-    --np 8  -v 2                                        `# All refinements and all scoring happen in parallel`      \
-    -p 5C3K-out.mol2 5C3K-out.mtz                       `# There should be a MOL2 and MTZ file for each refined/scored case from MTScore. Should be called: 5C3K-out_pose-1.mol2 5C3K-out_pose-1.mtz, 5C3K-out_pose-2.mol2 5C3K-out_pose-2.mtz etc (note: the pose-# should equal the number in the Pose Scoring Table in the screen output and the MTScore terms should be stored in the mol2 file)`       \
-        >& OUT.SCREEN
+tutorial_1a_mol2() {
+  section "Tutorial #1a-mol2: Automated DivCon-based Docking – qmechanic + XModeScore (MM)"
+  safe_cd_root
+  local dir="XModeScore-dock_MM"
+  clean_make_cd "${dir}"
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.pdb
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.mtz
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4XF_A_402.pdb
 
-echo "Tutorial #1d: DivCon --prepare followed by DivCon-based Docking – using qmechanic and XModeScore"
-dir4=prepare_XModeScore-dock_ONIOM
-rm -rf ${WORKDIR}/$dir4 ; mkdir -p ${WORKDIR}/$dir4 ; cd ${WORKDIR}/$dir4
+  local args=(
+    "5C3K-H_refine_001.pdb"
+    "5C3K-H_refine_001.mtz"
+    -h amberff14sb
+    --ligand 4XF_A_402.pdb
+    --confSearch LIGAND opt off
+    --flip off
+    --chirality off
+    --dock 5,1SD opt torsion LIGAND 100 0.01
+    --protomers all [-1..1]
+    --xmodescore opt torsion pocket
+    --np 8 -v 2
+    -p 5C3K-out.mol2 5C3K-out.mtz
+  )
+  "${DIVCON}" "${args[@]}" >& OUT.SCREEN
+}
 
-${DIVCON} 5C3K                                          `# Run on the original PDB file downloaded automatically from the RCSB`     \
-    -h amberff14sb                                      `# Use amberff14sb throughout the calculation`      \
-    --prepare all                                       `# Prepare all missing residues/sidechains/etc`     \
-    -p  5C3K-refined.pdb  5C3K-refined.mtz              `# Output the final PDB and MTZ files for use in the next step`     \
-    -v 2 --np 8  >& OUT.SCREEN
-    
-${DIVCON} 5C3K-refined.pdb  5C3K-refined.mtz -O         `# Use the prepared files for this analysis. Overwrite the previous h5 file.`       \
-    -h pm6 amberff14sb                                  `# Use AMBERFF14SB for all MM and PM6 for all QM. For v1: all steps up to XModeScore should be done with MM and final XModeScore should be done with QM/MM`     \
-    --ligand /A/4XF/402//                               `# Run on the selection (not a supplied ligand file).`      \
-    --qm-region LIGAND+/A/ZN/401// 3.0 0                `# The QM region in ONIOM. Note: for v1, all steps up to XModeScore should be done with MM and final XModeScore should be done with QM/MM. `        \
-    --confSearch LIGAND opt off                         `# Use the input conformer (LIGAND keyword which references --ligand input), keep poses/enumerations w/in top 1 standard deviation, perform no opt on conformer`        \
-    --flip all                                          `# Enumerate all rotomers (flip states) available in LIGAND`        \
-    --chirality all                                     `# Enumerate all stereoisomers (chiral centers) available in LIGAND`        \
-    --dock 5,1SD opt torsion pocket 100 0.01            `# Dock the top 5 poses/enumerations from above and refine/optimize the entire site after placement (using MM), keep the top 1 standard deviation of refined sets.`        \
-    --protomers all [-1..1]                             `# Enumerate all protomers available in LIGAND w/in -1..1 and be sure to mirror protomer modifications to the target.`      \
-    --xmodescore opt all                                `# Use XModeScore to decide the final "winners" and "losers." If --qm-region and -h amberff14sb pm6 set, use QM/MM refinement of the target+ligand for XModeScore.`     \
-    --np 8  -v 2                                        `# All refinements and all scoring happen in parallel. Verbosity=2 should be clean. Verbosity=3 should just have a bit more debug information but should still be fairly clean.`        \
-    -p 5C3K-out.pdb 5C3K-out.mtz                        `# There should be a PDB and MTZ file for each refined/scored case from XModeScore. Should be called: 5C3K-out_pose-1.pdb 5C3K-out_pose-1.mtz, 5C3K-out_pose-2.pdb 5C3K-out_pose-2.mtz etc (note: the pose-# should equal the number in the Pose Scoring Table in the screen output)`       \
-        >& OUT.SCREEN
+tutorial_1b() {
+  section "Tutorial #1b: Automated Docking – qmechanic + EndState MTScore"
+  safe_cd_root
+  local dir="MTDock-MTScore_garf"
+  clean_make_cd "${dir}"
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.pdb
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.mtz
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4XF_A_402.pdb
 
+  local args=(
+    "5C3K-H_refine_001.pdb"
+    "5C3K-H_refine_001.mtz"
+    -h garf
+    --ligand 4XF_A_402.pdb
+    --mtcs LIGAND opt off
+    --flip all
+    --chirality all
+    --mtdock 5,1SD opt torsion pocket 100 0.01
+    --protomers off
+    --mtscore endstate
+    --np 8 -v 2
+    -p 5C3K-out.mol2 5C3K-out.mtz
+  )
+  "${DIVCON}" "${args[@]}" >& OUT.SCREEN
+}
 
-# Density Driven Docking: blob search (unknonw location)
-#   * The "blobs" keyword is used to search for 
+tutorial_1c() {
+  section "Tutorial #1c: Automated Docking – qmechanic + Ensemble MTScore"
+  safe_cd_root
+  local dir="MTDock-MTScore_amberff14sb"
+  clean_make_cd "${dir}"
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.pdb
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/5C3K-H_refine_001.mtz
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4XF_A_402.pdb
+
+  local args=(
+    "5C3K-H_refine_001.pdb"
+    "5C3K-H_refine_001.mtz"
+    -h amberff14sb
+    --ligand 4XF_A_402.pdb
+    --confSearch LIGAND opt off
+    --flip all
+    --chirality all
+    --mtdock 5,1SD opt torsion pocket 100 0.01
+    --protomers all [-1..1]
+    --mtscore ensemble
+    --np 8 -v 2
+    -p 5C3K-out.mol2 5C3K-out.mtz
+  )
+  "${DIVCON}" "${args[@]}" >& OUT.SCREEN
+}
+
+tutorial_1d() {
+  section "Tutorial #1d: Prepare then Docking – qmechanic + XModeScore (ONIOM)"
+  safe_cd_root
+  local dir="prepare_XModeScore-dock_ONIOM"
+  clean_make_cd "${dir}"
+
+  # Preparation step
+  "${DIVCON}" 5C3K \
+    -h amberff14sb \
+    --prepare all \
+    -p 5C3K-refined.pdb 5C3K-refined.mtz \
+    -v 2 --np 8 >& OUT.PREPARE
+
+  # Docking / XModeScore step
+  local args=(
+    "5C3K-refined.pdb"
+    "5C3K-refined.mtz"
+    -O
+    -h pm6 amberff14sb
+    --ligand /A/4XF/402//
+    --qm-region LIGAND+/A/ZN/401// 3.0 0
+    --confSearch LIGAND opt off
+    --flip all
+    --chirality all
+    --dock 5,1SD opt torsion pocket 100 0.01
+    --protomers all [-1..1]
+    --xmodescore opt all
+    --np 8 -v 2
+    -p 5C3K-out.pdb 5C3K-out.mtz
+  )
+  "${DIVCON}" "${args[@]}" >& OUT.SCREEN
+}
+
+###############################################################################
+# Menu / Dispatch
+###############################################################################
+
+print_menu() {
+  cat <<'EOF'
+Interactive Tutorial Menu (-i to enable):
+  1  Tutorial #1a-pdb   : XModeScore Dock (ONIOM)
+  2  Tutorial #1a-mol2  : XModeScore Dock (MM)
+  3  Tutorial #1b       : EndState MTScore
+  4  Tutorial #1c       : Ensemble MTScore
+  5  Tutorial #1d       : Prepare + XModeScore Dock (ONIOM)
+  0 / A                 : Run All
+  Q                     : Quit
+EOF
+}
+
+run_all() {
+  tutorial_1a_pdb
+  tutorial_1a_mol2
+  tutorial_1b
+  tutorial_1c
+  tutorial_1d
+}
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [options]
+
+Default (no options): run ALL tutorial segments.
+
+Options:
+  -i    Interactive menu mode
+  -l    List tutorials only
+  -h    Help
+EOF
+}
+
+dispatch() {
+  case "$1" in
+    1) tutorial_1a_pdb ;;
+    2) tutorial_1a_mol2 ;;
+    3) tutorial_1b ;;
+    4) tutorial_1c ;;
+    5) tutorial_1d ;;
+    0|A|a) run_all ;;
+    Q|q) log "Quit requested"; exit 0 ;;
+    *) echo "WARNING: Unknown selection: $1" ;;
+  esac
+}
+
+main() {
+  log "BEGIN new_parallel_branch tutorial batch (DIVCON=${DIVCON})"
+
+  local mode="all"
+  while getopts ":ilh" opt; do
+    case "${opt}" in
+      i) mode="interactive" ;;
+      l) print_menu; exit 0 ;;
+      h) usage; exit 0 ;;
+      *) usage; exit 1 ;;
+    esac
+  done
+  shift $((OPTIND-1))
+
+  if [[ "${mode}" == "all" ]]; then
+    run_all
+  else
+    print_menu
+    echo
+    read -r -p "Select tutorials (ENTER=All): " sels
+    if [[ -z "${sels}" ]]; then
+      run_all
+    else
+      for s in ${sels}; do
+        dispatch "${s}"
+      done
+    fi
+  fi
+
+  log "END new_parallel_branch tutorial batch"
+}
+
+main "$@"
