@@ -1,6 +1,15 @@
-#!/bin/bash
-#set -e
-
+#!/usr/bin/env bash
+# Menu-driven refactor (patterned after mtscoreTutorials.sh)
+# Original content: qmechanicTutorials.sh (single point, decomposition, optimization, ONIOM, protonation, macrocycle, covalent examples)
+#
+# Changes:
+#  - Added robust argument parsing (-i interactive, -l list, -h help)
+#  - Added safety helpers (fetch, clean directories, logging with timestamps)
+#  - Converted legacy select/menu into numbered dispatcher similar to mtscoreTutorials.sh
+#  - Kept original qmechanic command lines functionally identical
+#  - Removed stray 'grep' placeholder lines that had no arguments (no functional effect)
+#  - Replaced duplicate nested directory creation (macrocycle / bound_ligand) with a cleaner layout
+#
 #  // BEGIN COPYRIGHT
 #  /***********************************************************************
 #     Copyright (c) 2021 QuantumBio Inc. and/or its affiliates.
@@ -8,8 +17,8 @@
 #  This source code is the property of QuantumBio Inc. and/or its affiliates
 #  and is provided AS IS.
 # 
-#  This source code may contain proprietary and Confidential Information, 
-#  including trade secrets, belonging to QuantumBio Inc. and/or its 
+#  This source code may contain proprietary and Confidential Information,
+#  including trade secrets, belonging to QuantumBio Inc. and/or its
 #  affiliates.
 # 
 #  Please see http://www.quantumbioinc.com/ for more information.
@@ -17,148 +26,235 @@
 #  ***********************************************************************/
 #  // END COPYRIGHT
 
+# (Original script had set -e commented out; we keep similar leniency)
+set -u -o pipefail
 
-if [ -z "${QBHOME}" ]; then
-    echo "ERROR: QBHOME is not set! Must set the QBHOME environment variable THEN call this function"
-    exit
+: "${QBHOME:?ERROR: QBHOME is not set! Must export QBHOME before running.}"
+
+DIVCON_BIN="${QBHOME}/bin/qmechanic"
+if [[ ! -x "${DIVCON_BIN}" ]]; then
+  echo "ERROR: ${DIVCON_BIN} is not an executable! Adjust QBHOME or install qmechanic."
+  exit 1
 fi
 
-DIVCON_BIN=${QBHOME}/bin/qmechanic
+WORKDIR="${PWD}"
+DATE_FMT="+%Y-%m-%d %H:%M:%S"
 
-if [ ! -x "${DIVCON_BIN}" ]; then
-    echo "ERROR: ${DIVCON_BIN} is not an executable! Set this path to the qmechanic executable"
-    exit
-fi
-
-currentDate=`date`
-echo "BEGIN Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
-
-WORKDIR=$PWD
-
-function tutorial1_action {
-echo "First Tutorial: Single Point Calculation"
-rm -rf ${WORKDIR}/SinglePointCalculation ; mkdir -p ${WORKDIR}/SinglePointCalculation ; cd ${WORKDIR}/SinglePointCalculation
-
-wget http://downloads.quantumbioinc.com/media/tutorials/cli/1TOW-H.pdb
-mv  1TOW-H.pdb 1TOW.pdb
-${DIVCON_BIN} 1TOW.pdb --np 8 -h pm6 -v 2 
+log() {
+  printf "[%s] %s\n" "$(date "${DATE_FMT}")" "$*"
 }
 
-function tutorial2_action {
-echo "Second Tutorial: Interaction Energy Decomposition"
-rm -rf ${WORKDIR}/InteractionEnergyDecomposition ; mkdir -p ${WORKDIR}/InteractionEnergyDecomposition ; cd ${WORKDIR}/InteractionEnergyDecomposition
-
-wget http://downloads.quantumbioinc.com/media/tutorials/cli/1LRI-addH.pdb
-${DIVCON_BIN} 1LRI-addH.pdb -h pm6 --np 8 -v 2 --decompose "/A/CLR/99//" --dc
+section() {
+  echo
+  echo "======================================================================"
+  echo "$*"
+  echo "======================================================================"
 }
 
-function tutorial3_action {
-echo "Third Tutorial: Structure Optimization"
-rm -rf ${WORKDIR}/StructureOptimization ; mkdir -p ${WORKDIR}/StructureOptimization ; cd ${WORKDIR}/StructureOptimization
-
-wget http://downloads.quantumbioinc.com/media/tutorials/cli/1LRI-addH.pdb
-${DIVCON_BIN} 1LRI-addH.pdb -h pm6 --np 8 -v 2 --opt all 3 0.01 --symmetry -p pdb
+safe_cd_root() {
+  cd "${WORKDIR}" || {
+    echo "ERROR: Cannot return to root work directory: ${WORKDIR}"
+    exit 1
+  }
 }
 
-function tutorial4_action {
-echo "Forth Tutorial: Active Site Structure Optimization"
-rm -rf ${WORKDIR}/ActiveSiteStructureOptimization ; mkdir -p ${WORKDIR}/ActiveSiteStructureOptimization ; cd ${WORKDIR}/ActiveSiteStructureOptimization
-
-wget http://downloads.quantumbioinc.com/media/tutorials/cli/1TOW-H.pdb
-${DIVCON_BIN} 1TOW-H.pdb --opt /*/CRZ/*// 3.0 0.0 --np 8 -h pm6 -v 2 -p pdb
+clean_make_cd() {
+  local dir="$1"
+  rm -rf "${WORKDIR:?}/${dir}"
+  mkdir -p "${WORKDIR}/${dir}"
+  cd "${WORKDIR}/${dir}" || {
+    echo "ERROR: Cannot cd into ${WORKDIR}/${dir}"
+    exit 1
+  }
 }
 
-function tutorial5_action {
-echo "Fifth Tutorial: ONIOM (mixed-QM/MM) Simulations"
-rm -rf ${WORKDIR}/ONIOM_Simulations ; mkdir -p ${WORKDIR}/ONIOM_Simulations ; cd ${WORKDIR}/ONIOM_Simulations
-
-wget http://downloads.quantumbioinc.com/media/tutorials/cli/1LRI-addH.pdb
-${DIVCON_BIN} 1LRI-addH.pdb -h pm6 amberff14sb --opt 25 0.01 --qm-region /A/CLR/99// 3.0 0.0 --np 8 -v 1 -p pdb
+fetch() {
+  local url="$1"
+  local file
+  file="$(basename "${url}")"
+  if [[ -f "${file}" ]]; then
+    log "Already downloaded: ${file}"
+    return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    wget -q "${url}" && return 0
+  elif command -v curl >/dev/null 2>&1; then
+    curl -fsSL -O "${url}" && return 0
+  else
+    echo "ERROR: Neither wget nor curl is available."
+    return 1
+  fi
+  echo "ERROR: Failed to download ${url}"
+  return 1
 }
 
-function tutorial6_action {
-echo "Sixth Tutorial: Protonation"
-rm -rf ${WORKDIR}/Protonation ; mkdir -p ${WORKDIR}/Protonation ; cd ${WORKDIR}/Protonation
+###############################################################################
+# Tutorial Functions
+###############################################################################
 
-${DIVCON_BIN} 4EK4 --prepare --np 8 -v 2 -p pdb -h amberff14sb
-
-currentDate=`date`
-echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
+tutorial_1() {
+  section "Tutorial 1: Single Point Calculation"
+  safe_cd_root
+  clean_make_cd "SinglePointCalculation"
+  fetch http://downloads.quantumbioinc.com/media/tutorials/cli/1TOW-H.pdb
+  mv 1TOW-H.pdb 1TOW.pdb
+  "${DIVCON_BIN}" 1TOW.pdb --np 8 -h pm6 -v 2
 }
 
-function tutorial7_action {
-echo "Seventh Tutorial: Macrocycle Protonation w/JSON bond definition"
-rm -rf ${WORKDIR}/macrocycle ; mkdir -p ${WORKDIR}/macrocycle ; cd ${WORKDIR}/macrocycle
-
-cd macrocycle
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/cli/3p72_macrocycle_bond.json
-${DIVCON_BIN} 3p72  --standards 3p72_macrocycle_bond.json -h amberff14sb --prepare all --np 4 -v2 -p 3p72+H.pdb 3p72.mtz -O 2>&1 
-cd ..
-grep 
-currentDate=`date`
-echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
+tutorial_2() {
+  section "Tutorial 2: Interaction Energy Decomposition"
+  safe_cd_root
+  clean_make_cd "InteractionEnergyDecomposition"
+  fetch http://downloads.quantumbioinc.com/media/tutorials/cli/1LRI-addH.pdb
+  "${DIVCON_BIN}" 1LRI-addH.pdb -h pm6 --np 8 -v 2 --decompose "/A/CLR/99//" --dc
 }
 
-function tutorial8_action {
-echo "Eighth Tutorial: Single Point Covalently Bound Ligand w/JSON bond definition"
-rm -rf ${WORKDIR}/bound_ligand ; mkdir -p ${WORKDIR}/bound_ligand ; mkdir bound_ligand
-cd bound_ligand
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/cli/5y41+H.pdb
-wget https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/cli/5y41_covalent_bond.json
-${DIVCON_BIN} 5y41+H.pdb  --standards 5y41_covalent_bond.json -h amberff14sb --np 4 -v2  -O 2>&1 
-cd ..
-grep 
-currentDate=`date`
-
-echo "END Tutorial Test at ${currentDate} using ${DIVCON_BIN}"
+tutorial_3() {
+  section "Tutorial 3: Structure Optimization"
+  safe_cd_root
+  clean_make_cd "StructureOptimization"
+  fetch http://downloads.quantumbioinc.com/media/tutorials/cli/1LRI-addH.pdb
+  "${DIVCON_BIN}" 1LRI-addH.pdb -h pm6 --np 8 -v 2 --opt all 3 0.01 --symmetry -p pdb
 }
 
-if [ "$1" == "menu" ]; then
-PS3="Please choose an option: " # Prompt displayed to the user
-options=("Tut 1" "Tut 2" "Tut 3" "Tut 4" "Tut 5" "Tut 6" "Tut 7" "Tut 8" "Exit")
+tutorial_4() {
+  section "Tutorial 4: Active Site Structure Optimization"
+  safe_cd_root
+  clean_make_cd "ActiveSiteStructureOptimization"
+  fetch http://downloads.quantumbioinc.com/media/tutorials/cli/1TOW-H.pdb
+  "${DIVCON_BIN}" 1TOW-H.pdb --opt /*/CRZ/*// 3.0 0.0 --np 8 -h pm6 -v 2 -p pdb
+}
 
-select opt in "${options[@]}"; do
-    case $opt in
-        "Tut 1")
-            tutorial1_action
-            ;;
-        "Tut 2")
-            tutorial2_action
-            ;;
-        "Tut 3")
-            tutorial3_action
-            ;;
-        "Tut 4")
-            tutorial4_action
-            ;;
-        "Tut 5")
-            tutorial5_action
-            ;;
-        "Tut 6")
-            tutorial6_action
-            ;;
-        "Tut 7")
-            tutorial7_action
-            ;;
-        "Tut 8")
-            tutorial8_action
-            ;;
-        "Exit")
-            echo "Exiting menu."
-            break # Exit the select loop
-            ;;
-        *)
-            echo "Invalid option. Please try again."
-            ;;
+tutorial_5() {
+  section "Tutorial 5: ONIOM (mixed QM/MM) Simulations"
+  safe_cd_root
+  clean_make_cd "ONIOM_Simulations"
+  fetch http://downloads.quantumbioinc.com/media/tutorials/cli/1LRI-addH.pdb
+  "${DIVCON_BIN}" 1LRI-addH.pdb -h pm6 amberff14sb --opt 25 0.01 --qm-region /A/CLR/99// 3.0 0.0 --np 8 -v 1 -p pdb
+}
+
+tutorial_6() {
+  section "Tutorial 6: Protonation (Prepare)"
+  safe_cd_root
+  clean_make_cd "Protonation"
+  # Original used bare PDB ID 4EK4 relying on internal fetch; replicate directly
+  "${DIVCON_BIN}" 4EK4 --prepare --np 8 -v 2 -p pdb -h amberff14sb
+}
+
+tutorial_7() {
+  section "Tutorial 7: Macrocycle Protonation (JSON bond definition)"
+  safe_cd_root
+  clean_make_cd "macrocycle"
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/cli/3p72_macrocycle_bond.json
+  # Original command (kept same flags/order; writing outputs 3p72+H.pdb 3p72.mtz)
+  "${DIVCON_BIN}" 3p72 --standards 3p72_macrocycle_bond.json -h amberff14sb --prepare all --np 4 -v2 -p 3p72+H.pdb 3p72.mtz -O 2>&1
+}
+
+tutorial_8() {
+  section "Tutorial 8: Single Point Covalently Bound Ligand (JSON bond definition)"
+  safe_cd_root
+  clean_make_cd "bound_ligand"
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/cli/5y41+H.pdb
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/cli/5y41_covalent_bond.json
+  "${DIVCON_BIN}" 5y41+H.pdb --standards 5y41_covalent_bond.json -h amberff14sb --np 4 -v2 -O 2>&1
+}
+
+###############################################################################
+# Menu / Dispatch
+###############################################################################
+
+print_menu() {
+  cat <<'EOF'
+Interactive qmechanic Tutorial Menu (-i to enable):
+  1  Single Point Calculation
+  2  Interaction Energy Decomposition
+  3  Structure Optimization
+  4  Active Site Structure Optimization
+  5  ONIOM (mixed QM/MM) Simulations
+  6  Protonation (Prepare)
+  7  Macrocycle Protonation (JSON bond def)
+  8  Covalently Bound Ligand (JSON bond def)
+  0 / A  Run All
+  Q      Quit
+EOF
+}
+
+run_all() {
+  tutorial_1
+  tutorial_2
+  tutorial_3
+  tutorial_4
+  tutorial_5
+  tutorial_6
+  tutorial_7
+  tutorial_8
+}
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [options]
+
+Default (no options): run ALL tutorials sequentially.
+
+Options:
+  -i    Interactive menu mode
+  -l    List tutorials only (no execution)
+  -h    Show this help
+
+Examples:
+  $(basename "$0")
+  $(basename "$0") -i
+  $(basename "$0") -l
+EOF
+}
+
+dispatch_number() {
+  case "$1" in
+    1) tutorial_1 ;;
+    2) tutorial_2 ;;
+    3) tutorial_3 ;;
+    4) tutorial_4 ;;
+    5) tutorial_5 ;;
+    6) tutorial_6 ;;
+    7) tutorial_7 ;;
+    8) tutorial_8 ;;
+    0|A|a) run_all ;;
+    Q|q) log "User requested quit."; exit 0 ;;
+    *) echo "WARNING: Unknown selection: $1" ;;
+  esac
+}
+
+main() {
+  log "BEGIN Tutorial Test using ${DIVCON_BIN}"
+
+  local mode="all"
+
+  while getopts ":ilh" opt; do
+    case "${opt}" in
+      i) mode="interactive" ;;
+      l) print_menu; exit 0 ;;
+      h) usage; exit 0 ;;
+      *) usage; exit 1 ;;
     esac
-done
-else
-    tutorial1_action
-    tutorial2_action
-    tutorial3_action
-    tutorial4_action
-    tutorial5_action
-    tutorial6_action
-    tutorial7_action
-    tutorial8_action
-fi
+  done
+  shift $((OPTIND-1))
+
+  if [[ "${mode}" == "all" ]]; then
+    run_all
+  else
+    print_menu
+    echo
+    read -r -p "Select tutorials (ENTER=All): " selections
+    if [[ -z "${selections}" ]]; then
+      run_all
+    else
+      for sel in ${selections}; do
+        dispatch_number "${sel}"
+      done
+    fi
+  fi
+
+  log "END Tutorial Test using ${DIVCON_BIN}"
+}
+
+main "$@"
