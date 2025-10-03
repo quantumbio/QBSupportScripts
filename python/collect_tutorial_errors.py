@@ -2,16 +2,21 @@
 """
 Collect and summarize error information from tutorial run directories.
 
-Compatibility version (Python 2.7+ / 3.x). Enhanced to ignore 'Error' tokens
-when they appear in table-like lines (Markdown or ASCII tables), unless
---include-table-errors is specified.
+Enhancements:
+  - Uses glob patterns (default OUT.*) to pick up output logs.
+  - Ignores generic 'Error'-style tokens inside table-like lines UNLESS
+    --include-table-errors is given.
+  - ALSO now ignores 'Error' tokens when the matched token is immediately
+    preceded (ignoring only trailing whitespace) by a pipe character '|',
+    even if the line as a whole didn't trigger table heuristics.
 
 Usage examples:
   python scripts/collect_tutorial_errors.py --root .
   python scripts/collect_tutorial_errors.py --root . --json errors.json
   python scripts/collect_tutorial_errors.py --root . --include-logs
   python scripts/collect_tutorial_errors.py --root . --pattern "Segmentation fault"
-  python scripts/collect_tutorial_errors.py --root . --include-table-errors   (to revert ignore behavior)
+  python scripts/collect_tutorial_errors.py --root . --add-out-pattern "RUN.OUT"
+  python scripts/collect_tutorial_errors.py --root . --include-table-errors  (re-enable table generic Error detection)
 
 Exit codes:
   0 if no errors (or --always-zero)
@@ -23,8 +28,11 @@ import json
 import os
 import re
 import sys
+import fnmatch
 
-DEFAULT_FILE_NAMES = ["OUT.SCREEN"]
+# Default glob patterns for primary output files (user can append more).
+DEFAULT_FILE_PATTERNS = ["OUT.*"]
+
 ERROR_TOKENS = [
     r"\bQBException\b",
     r"\bERROR\b",
@@ -36,12 +44,13 @@ ERROR_TOKENS = [
 TRACEBACK_START_RE = re.compile(r"^Traceback \(most recent call last\):")
 QBEXCEPTION_RE = re.compile(r"QBException", re.IGNORECASE)
 
-# Precompile table heuristics
-MD_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")                     # | col | col |
-MD_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")  # |---|---|
-ASCII_BORDER_RE = re.compile(r"^\s*\+[-+:=]{2,}\+\s*$")             # +-----+-----+
-PIPE_HEAVY_LINE_RE = re.compile(r"^\s*(\|[^|]{0,120}){2,}\|?\s*$")  # multiple columns
-BORDER_CHARS_RE = re.compile(r"^[\s\|\+\-:=]+$")                    # lines of just border chars
+# Table detection heuristics
+MD_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+MD_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+ASCII_BORDER_RE = re.compile(r"^\s*\+[-+:=]{2,}\+\s*$")
+PIPE_HEAVY_LINE_RE = re.compile(r"^\s*(\|[^|]{0,120}){2,}\|?\s*$")
+BORDER_CHARS_RE = re.compile(r"^[\s\|\+\-:=]+$")
+
 
 class ErrorBlock(object):
     def __init__(self, tutorial, file_path, error_type, summary,
@@ -61,24 +70,34 @@ def color(s, code, enable):
     return "\033[%sm%s\033[0m" % (code, s)
 
 
-def iter_candidate_files(root, include_logs):
+def match_any_pattern(filename, patterns):
+    for pat in patterns:
+        if fnmatch.fnmatch(filename, pat):
+            return True
+    return False
+
+
+def iter_candidate_files(root, include_logs, file_patterns):
     for entry_name in sorted(os.listdir(root)):
         full = os.path.join(root, entry_name)
         if not os.path.isdir(full):
             continue
         tutorial = entry_name
-        paths = []
-        for fname in DEFAULT_FILE_NAMES:
-            p = os.path.join(full, fname)
-            if os.path.isfile(p):
-                paths.append(p)
+
+        collected = []
+        for fname in sorted(os.listdir(full)):
+            fpath = os.path.join(full, fname)
+            if os.path.isfile(fpath) and match_any_pattern(fname, file_patterns):
+                collected.append(fpath)
+
         if include_logs:
-            for sub_name in os.listdir(full):
-                if sub_name.endswith(".log"):
-                    p = os.path.join(full, sub_name)
-                    if os.path.isfile(p):
-                        paths.append(p)
-        for p in paths:
+            for fname in sorted(os.listdir(full)):
+                if fname.endswith(".log"):
+                    fpath = os.path.join(full, fname)
+                    if os.path.isfile(fpath):
+                        collected.append(fpath)
+
+        for p in collected:
             yield tutorial, p
 
 
@@ -96,8 +115,6 @@ def capture_block(lines, start_index):
 
 
 def is_table_line(line):
-    """Heuristic to detect if a line is part of a textual table, so we can
-    suppress generic 'Error' token matches inside it."""
     stripped = line.rstrip("\n")
     if MD_TABLE_ROW_RE.match(stripped):
         return True
@@ -105,13 +122,30 @@ def is_table_line(line):
         return True
     if ASCII_BORDER_RE.match(stripped):
         return True
-    # Lines that are just border chars
     if BORDER_CHARS_RE.match(stripped) and len(stripped.strip()) > 0 and ('-' in stripped or '|' in stripped or '+' in stripped):
         return True
-    # Multi-column lines with many pipes
     if stripped.count('|') >= 2 and PIPE_HEAVY_LINE_RE.match(stripped):
         return True
     return False
+
+
+def _pipe_precedes_match(line, match_start):
+    """
+    Returns True if, after trimming only trailing spaces from the substring
+    before match_start, the last non-space character is a pipe '|'.
+    This treats constructs like:
+        | Error ...
+        |   Error
+        +------+ Error
+    as pipe-preceded occurrences.
+
+    NOTE: We deliberately only trim *trailing* spaces (rstrip) from the prefix.
+    """
+    if match_start <= 0:
+        return False
+    prefix = line[:match_start]
+    prefix_rstripped = prefix.rstrip(' ')
+    return prefix_rstripped.endswith('|')
 
 
 def parse_file(tutorial, filepath, extra_patterns, generic_tokens, context,
@@ -153,7 +187,7 @@ def parse_file(tutorial, filepath, extra_patterns, generic_tokens, context,
             i = end
             continue
 
-        # Extra patterns (with context)
+        # Extra patterns
         matched_extra = False
         for pat in extra_patterns:
             if pat.search(line):
@@ -172,11 +206,17 @@ def parse_file(tutorial, filepath, extra_patterns, generic_tokens, context,
             i += 1
             continue
 
-        # Generic tokens (skip if table line and user wants to ignore table errors)
+        # Generic tokens (skip if table line OR pipe-preceded token unless user forces inclusion)
         table_line = (not include_table_errors) and is_table_line(line)
         if not table_line:
+            # We examine each token separately; skip if pipe precedes the actual match.
+            token_matched = False
             for tok in generic_tokens:
-                if tok.search(line):
+                m = tok.search(line)
+                if m:
+                    if (not include_table_errors) and _pipe_precedes_match(line, m.start()):
+                        # Suppress this match and keep scanning other tokens only if needed
+                        continue
                     start_ctx = max(0, i - context)
                     end_ctx = min(n, i + context + 1)
                     block = raw_lines[start_ctx:end_ctx]
@@ -185,8 +225,9 @@ def parse_file(tutorial, filepath, extra_patterns, generic_tokens, context,
                         line.strip(), [l.rstrip("\n") for l in block],
                         start_ctx + 1, end_ctx
                     ))
+                    token_matched = True
                     break
-
+            # If suppressed for pipe reasons, nothing added.
         i += 1
 
     return results
@@ -204,7 +245,7 @@ def build_regex_list(patterns):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Collect and summarize QB tutorial errors."
+        description="Collect and summarize QB tutorial errors (supports OUT.* glob)."
     )
     parser.add_argument("--root", default=".",
                         help="Root directory containing tutorial run subdirectories.")
@@ -221,19 +262,26 @@ def main(argv=None):
     parser.add_argument("--always-zero", action="store_true",
                         help="Exit 0 even if errors found.")
     parser.add_argument("--include-table-errors", action="store_true",
-                        help="Do NOT ignore lines that look like table rows.")
+                        help="Do NOT ignore lines that look like table rows or pipe-preceded 'Error'.")
+    parser.add_argument("--add-out-pattern", action="append", default=[],
+                        help="Additional glob for primary output files (e.g. RUN.OUT). Can repeat.")
     args = parser.parse_args(argv)
 
     if not os.path.isdir(args.root):
         sys.stderr.write("ERROR: Root directory not found: %s\n" % args.root)
         return 1
 
+    file_patterns = list(DEFAULT_FILE_PATTERNS)
+    for p in args.add_out_pattern:
+        if p not in file_patterns:
+            file_patterns.append(p)
+
     extra_patterns = build_regex_list(args.pattern)
     generic_tokens = [re.compile(t) for t in ERROR_TOKENS]
 
     tutorial_map = {}
 
-    for tutorial, path in iter_candidate_files(args.root, args.include_logs):
+    for tutorial, path in iter_candidate_files(args.root, args.include_logs, file_patterns):
         blocks = parse_file(
             tutorial, path,
             extra_patterns, generic_tokens,
@@ -288,6 +336,7 @@ def main(argv=None):
                     "tutorial_count": len(tutorials_with_errors),
                     "error_block_count": total_errors,
                     "ignored_table_errors": (not args.include_table_errors),
+                    "file_patterns": file_patterns,
                     "errors": out
                 }, jf, indent=2)
             print(color("\nJSON report written to %s" % args.json, "32", use_color))
