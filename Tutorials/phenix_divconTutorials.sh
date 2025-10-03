@@ -98,7 +98,7 @@ tutorial_1() {
   fetch "https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/${PDBID}-sf.cif"
   ${PHENIX}/build/bin/phenix.ready_set ${PDBID}.pdb add_h_to_water=true
   # Original truncated refine line:
-  ${PHENIX}/build/bin/phenix.refine ${PDBID}.updated.pdb ${PDBID}-sf.cif output.write_geo_file=False output.write_eff_file=False output.write_def_file=False refinement.refine.strategy=individual_sites+individual_adp main.number_of_macro_cycles=2 qblib=True qblib_method=pm6 qblib_region_selection="chain A and resname 2AN and resid 1098" qblib_region_radius=3.0 qblib_buffer_radius=2.5 qblib_np=4
+  ${PHENIX}/build/bin/phenix.refine ${PDBID}.updated.pdb ${PDBID}-sf.cif output.write_geo_file=False output.write_eff_file=False output.write_def_file=False refinement.refine.strategy=individual_sites+individual_adp main.number_of_macro_cycles=2 qblib=True qblib_method=pm6 qblib_region_selection="/A/2AN/1098/" qblib_region_radius=3.0 qblib_buffer_radius=2.5 qblib_np=4
 }
 
 tutorial_2a() {
