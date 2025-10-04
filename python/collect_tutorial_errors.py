@@ -2,25 +2,23 @@
 """
 Collect and summarize error information from tutorial run directories.
 
-Enhancements:
-  - Uses glob patterns (default OUT.*) to pick up output logs.
-  - Ignores generic 'Error'-style tokens inside table-like lines UNLESS
-    --include-table-errors is given.
-  - ALSO now ignores 'Error' tokens when the matched token is immediately
-    preceded (ignoring only trailing whitespace) by a pipe character '|',
-    even if the line as a whole didn't trigger table heuristics.
-
-Usage examples:
-  python scripts/collect_tutorial_errors.py --root .
-  python scripts/collect_tutorial_errors.py --root . --json errors.json
-  python scripts/collect_tutorial_errors.py --root . --include-logs
-  python scripts/collect_tutorial_errors.py --root . --pattern "Segmentation fault"
-  python scripts/collect_tutorial_errors.py --root . --add-out-pattern "RUN.OUT"
-  python scripts/collect_tutorial_errors.py --root . --include-table-errors  (re-enable table generic Error detection)
+Features:
+  - Glob patterns (default OUT.*) plus optional --add-out-pattern.
+  - Optional inclusion of *.log files.
+  - Suppresses generic 'Error' tokens in table-like lines or when pipe-preceded
+    unless --include-table-errors is given.
+  - Records counts:
+        total_tutorials_scanned
+        tutorials_with_errors
+        tutorials_without_errors
+        error_block_count
+  - JSON export with those fields.
+  - Detects QBException blocks and Python tracebacks regardless of table suppression.
+  - Additional regex patterns via --pattern (repeatable).
 
 Exit codes:
   0 if no errors (or --always-zero)
-  1 if errors detected (default)
+  1 if errors detected (default).
 """
 
 import argparse
@@ -30,7 +28,6 @@ import re
 import sys
 import fnmatch
 
-# Default glob patterns for primary output files (user can append more).
 DEFAULT_FILE_PATTERNS = ["OUT.*"]
 
 ERROR_TOKENS = [
@@ -44,7 +41,6 @@ ERROR_TOKENS = [
 TRACEBACK_START_RE = re.compile(r"^Traceback \(most recent call last\):")
 QBEXCEPTION_RE = re.compile(r"QBException", re.IGNORECASE)
 
-# Table detection heuristics
 MD_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
 MD_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 ASCII_BORDER_RE = re.compile(r"^\s*\+[-+:=]{2,}\+\s*$")
@@ -71,32 +67,29 @@ def color(s, code, enable):
 
 
 def match_any_pattern(filename, patterns):
-    for pat in patterns:
-        if fnmatch.fnmatch(filename, pat):
-            return True
-    return False
+    return any(fnmatch.fnmatch(filename, pat) for pat in patterns)
+
+
+def iter_tutorial_dirs(root):
+    for entry_name in sorted(os.listdir(root)):
+        full = os.path.join(root, entry_name)
+        if os.path.isdir(full):
+            yield entry_name, full
 
 
 def iter_candidate_files(root, include_logs, file_patterns):
-    for entry_name in sorted(os.listdir(root)):
-        full = os.path.join(root, entry_name)
-        if not os.path.isdir(full):
-            continue
-        tutorial = entry_name
-
+    for tutorial, tutorial_dir in iter_tutorial_dirs(root):
         collected = []
-        for fname in sorted(os.listdir(full)):
-            fpath = os.path.join(full, fname)
+        for fname in sorted(os.listdir(tutorial_dir)):
+            fpath = os.path.join(tutorial_dir, fname)
             if os.path.isfile(fpath) and match_any_pattern(fname, file_patterns):
                 collected.append(fpath)
-
         if include_logs:
-            for fname in sorted(os.listdir(full)):
+            for fname in sorted(os.listdir(tutorial_dir)):
                 if fname.endswith(".log"):
-                    fpath = os.path.join(full, fname)
+                    fpath = os.path.join(tutorial_dir, fname)
                     if os.path.isfile(fpath):
                         collected.append(fpath)
-
         for p in collected:
             yield tutorial, p
 
@@ -130,17 +123,6 @@ def is_table_line(line):
 
 
 def _pipe_precedes_match(line, match_start):
-    """
-    Returns True if, after trimming only trailing spaces from the substring
-    before match_start, the last non-space character is a pipe '|'.
-    This treats constructs like:
-        | Error ...
-        |   Error
-        +------+ Error
-    as pipe-preceded occurrences.
-
-    NOTE: We deliberately only trim *trailing* spaces (rstrip) from the prefix.
-    """
     if match_start <= 0:
         return False
     prefix = line[:match_start]
@@ -165,7 +147,6 @@ def parse_file(tutorial, filepath, extra_patterns, generic_tokens, context,
     while i < n:
         line = raw_lines[i]
 
-        # Traceback
         if TRACEBACK_START_RE.match(line):
             block, end = capture_block(raw_lines, i)
             results.append(ErrorBlock(
@@ -176,7 +157,6 @@ def parse_file(tutorial, filepath, extra_patterns, generic_tokens, context,
             i = end
             continue
 
-        # QBException
         if QBEXCEPTION_RE.search(line):
             block, end = capture_block(raw_lines, i)
             results.append(ErrorBlock(
@@ -187,10 +167,10 @@ def parse_file(tutorial, filepath, extra_patterns, generic_tokens, context,
             i = end
             continue
 
-        # Extra patterns
         matched_extra = False
         for pat in extra_patterns:
-            if pat.search(line):
+            m = pat.search(line)
+            if m:
                 start_ctx = max(0, i - context)
                 end_ctx = min(n, i + context + 1)
                 block = raw_lines[start_ctx:end_ctx]
@@ -206,16 +186,12 @@ def parse_file(tutorial, filepath, extra_patterns, generic_tokens, context,
             i += 1
             continue
 
-        # Generic tokens (skip if table line OR pipe-preceded token unless user forces inclusion)
         table_line = (not include_table_errors) and is_table_line(line)
         if not table_line:
-            # We examine each token separately; skip if pipe precedes the actual match.
-            token_matched = False
             for tok in generic_tokens:
                 m = tok.search(line)
                 if m:
                     if (not include_table_errors) and _pipe_precedes_match(line, m.start()):
-                        # Suppress this match and keep scanning other tokens only if needed
                         continue
                     start_ctx = max(0, i - context)
                     end_ctx = min(n, i + context + 1)
@@ -225,9 +201,7 @@ def parse_file(tutorial, filepath, extra_patterns, generic_tokens, context,
                         line.strip(), [l.rstrip("\n") for l in block],
                         start_ctx + 1, end_ctx
                     ))
-                    token_matched = True
                     break
-            # If suppressed for pipe reasons, nothing added.
         i += 1
 
     return results
@@ -245,7 +219,7 @@ def build_regex_list(patterns):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Collect and summarize QB tutorial errors (supports OUT.* glob)."
+        description="Collect and summarize QB tutorial errors (records total tutorial count)."
     )
     parser.add_argument("--root", default=".",
                         help="Root directory containing tutorial run subdirectories.")
@@ -279,6 +253,9 @@ def main(argv=None):
     extra_patterns = build_regex_list(args.pattern)
     generic_tokens = [re.compile(t) for t in ERROR_TOKENS]
 
+    all_tutorial_dirs = [name for name, _ in iter_tutorial_dirs(args.root)]
+    total_tutorials_scanned = len(all_tutorial_dirs)
+
     tutorial_map = {}
 
     for tutorial, path in iter_candidate_files(args.root, args.include_logs, file_patterns):
@@ -291,15 +268,17 @@ def main(argv=None):
             tutorial_map.setdefault(tutorial, []).extend(blocks)
 
     tutorials_with_errors = sorted(tutorial_map.keys())
-    total_errors = sum(len(v) for v in tutorial_map.values())
+    tutorials_without_errors = sorted(set(all_tutorial_dirs) - set(tutorials_with_errors))
+    error_block_count = sum(len(v) for v in tutorial_map.values())
 
     use_color = (not args.no_color) and sys.stdout.isatty()
 
-    if not tutorials_with_errors:
-        print(color("No errors detected in scanned tutorial outputs.", "32", use_color))
-    else:
-        print(color("Errors detected in %d tutorial(s), total error blocks: %d" %
-                    (len(tutorials_with_errors), total_errors), "31", use_color))
+    print(color("Total tutorials (directories): %d" % total_tutorials_scanned, "36", use_color))
+    print(color("Tutorials with errors:        %d" % len(tutorials_with_errors), "31" if tutorials_with_errors else "32", use_color))
+    print(color("Tutorials without errors:     %d" % len(tutorials_without_errors), "32", use_color))
+    print(color("Total error blocks:           %d" % error_block_count, "31" if error_block_count else "32", use_color))
+
+    if tutorials_with_errors:
         for tut in tutorials_with_errors:
             errs = tutorial_map[tut]
             print(color("\n=== %s (%d error block(s)) ===" %
@@ -317,10 +296,19 @@ def main(argv=None):
                                 (len(block.lines) - max_preview), "2", use_color))
 
     if args.json:
-        out = []
+        json_data = {
+            "root": os.path.abspath(args.root),
+            "file_patterns": file_patterns,
+            "ignored_table_errors": (not args.include_table_errors),
+            "total_tutorials_scanned": total_tutorials_scanned,
+            "tutorials_with_errors": len(tutorials_with_errors),
+            "tutorials_without_errors": len(tutorials_without_errors),
+            "error_block_count": error_block_count,
+            "errors": []
+        }
         for tut in tutorials_with_errors:
             for block in tutorial_map[tut]:
-                out.append({
+                json_data["errors"].append({
                     "tutorial": block.tutorial,
                     "file": block.file,
                     "error_type": block.error_type,
@@ -331,14 +319,7 @@ def main(argv=None):
                 })
         try:
             with open(args.json, "w") as jf:
-                json.dump({
-                    "root": os.path.abspath(args.root),
-                    "tutorial_count": len(tutorials_with_errors),
-                    "error_block_count": total_errors,
-                    "ignored_table_errors": (not args.include_table_errors),
-                    "file_patterns": file_patterns,
-                    "errors": out
-                }, jf, indent=2)
+                json.dump(json_data, jf, indent=2)
             print(color("\nJSON report written to %s" % args.json, "32", use_color))
         except Exception as e:
             sys.stderr.write("Failed to write JSON file %s: %s\n" % (args.json, e))
