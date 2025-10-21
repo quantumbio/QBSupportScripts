@@ -164,7 +164,7 @@ tutorial_9() {
   safe_cd_root
   clean_make_cd "templated_prepare"
   fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/cli/2VMF_1_model_1_relaxed-dssp.pdb
-  "${DIVCON_BIN}" 2vmf --template 2VMF_1_model_1_relaxed-dssp.pdb  --prepare all -h amberff14sb -np 2 -v 2 -O 2>&1
+  "${DIVCON_BIN}" 2vmf --template 2VMF_1_model_1_relaxed-dssp.pdb  --prepare all -h amberff14sb --np 2 -v 2 -O 2>&1
 }
 
 ###############################################################################
