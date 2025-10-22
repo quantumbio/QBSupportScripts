@@ -125,9 +125,9 @@ tutorial_3() {
   "${DIVCON_BIN}" 1lri \
       --prepare \
       --opt all 50 0.01 \
-      --qm-region /A/CLR/99// 3.0 0 \
+      --qm-region /A/CLR/99// 0.0 0 \
       -h pm6 amberff14sb \
-      --np 4 -O \
+      --np 4 -v3 -O \
       -p 1lri_refined.pdb 1lri_refined.mtz \
       || { echo "Tutorial #3 failed"; return 1; }
 }

@@ -125,11 +125,11 @@ tutorial_2() {
   safe_cd_root
   clean_make_cd "qbbuster_divcon"
 
-  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/2BSM.pdb
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/2bsm.pdb
   fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/2BSM.mtz
 
   # Preserved truncated command line exactly:
-  $QBHOME/bin/qbbuster --pdbFile 2BSM.pdb --sfFile 2BSM.mtz --protonation divcon --makeCIF divcon --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 1  --nSmallCycles 15 --selection "resname BSM" --region-radius 3.0 --np 4 --dir qmRun || { echo "Tutorial #2 failed"; return 1; }
+  $QBHOME/bin/qbbuster --pdbFile 2bsm.pdb --sfFile 2BSM.mtz --protonation divcon --makeCIF divcon --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 1  --nSmallCycles 15 --selection "resname BSM" --region-radius 3.0 --np 4 --dir qmRun || { echo "Tutorial #2 failed"; return 1; }
 }
 
 tutorial_3() {
@@ -140,7 +140,7 @@ tutorial_3() {
   fetch http://downloads.quantumbioinc.com/media/tutorials/XModeScore/4ntk.pdb
   fetch http://downloads.quantumbioinc.com/media/tutorials/XModeScore/4ntk.mtz
 
-  qbbuster --pdbFile 4ntk.pdb --sfFile 4ntk.mtz --XModeScore --protomers "-1" --protonation moe --protonateTautomers MOE --makeCIF moe --mmMethod amberff14sb --qmMethod pm6 --qmWeight 3.0 --engine buster --ncycles 1 --nSmallCycles 20 --selection "resname ZSP and resid 202 and chain A" --np 32 --buffer-radius 0.0 --region-radius 3.0 --dir xmodeScore_results || { echo "Tutorial #3 failed"; return 1; }
+  qbbuster --pdbFile 4ntk.pdb --sfFile 4ntk.mtz --XModeScore --protomers "-1" --protonation divcon --protonateTautomers divcon --makeCIF divcon --mmMethod amberff14sb --qmMethod pm6 --qmWeight 3.0 --engine buster --ncycles 1 --nSmallCycles 20 --selection "resname ZSP and resid 202 and chain A" --np 32 --buffer-radius 0.0 --region-radius 3.0 --dir xmodeScore_results || { echo "Tutorial #3 failed"; return 1; }
 }
 
 tutorial_4() {
@@ -180,7 +180,7 @@ tutorial_6() {
   # --cluster phenix_pbs.tmpl  (Set PBS template)
   # --clusterSub qsub          (Set PBS submission command)
 
-  qbbuster --pdbFile 5kcv+H.pdb --sfFile 5kcv.mtz --XModeScore --protomers "1" --exploreChiral --exploreFlip --protonation skip --makeCIF divcon --mmMethod amberff14sb --qmMethod pm6 --selection "r[...] || { echo "Tutorial #6 failed"; return 1; }
+  qbbuster --pdbFile 5kcv+H.pdb --sfFile 5kcv.mtz --XModeScore --protomers "1" --exploreChiral --exploreFlip --protonation skip --makeCIF divcon --mmMethod amberff14sb --qmMethod pm6 --selection "resname 6S1 and resid 501 and chain A" --ncycles 1 --nSmallCycles 10 --qmWeight 3.0 --engine divcon --np 4 --region-radius 3.0 --dir xmodeScore_results --cluster phenix_pbs.tmpl --clusterSub qsub || { echo "Tutorial #6 failed"; return 1; }
 }
 
 ###############################################################################
