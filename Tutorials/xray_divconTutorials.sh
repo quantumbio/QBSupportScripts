@@ -124,12 +124,18 @@ tutorial_3() {
 
   "${DIVCON_BIN}" 1lri \
       --prepare \
+      -h amberff14sb \
+      --np 4 -O \
+      -p 1lri+H.pdb \
+      || { echo "Tutorial #3 orotonation failed"; return 1; }
+
+  "${DIVCON_BIN}" 1lri+H.pdb 1lri-sf.cif \
       --opt all 50 0.01 \
       --qm-region /A/CLR/99// 0.0 0 \
       -h pm6 amberff14sb \
       --np 4 -v3 -O \
       -p 1lri_refined.pdb 1lri_refined.mtz \
-      || { echo "Tutorial #3 failed"; return 1; }
+      || { echo "Tutorial #3 oniom failed"; return 1; }
 }
 
 tutorial_4() {

@@ -244,6 +244,16 @@ tutorial_7() {
   fi
 }
 
+tutorial_8() {
+  section "Tutorial #8: XModeScore residue states (4g90)"
+  safe_cd_root
+  clean_make_cd "xmodeScore_residue_4g90"
+  "${DIVCON_BIN}" 4g90 --prepare all --np 2 -h amberff14sb -p 4g90+H.pdb -v 2
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/XModeScore/4g90.mtz
+  "${DIVCON_BIN}" ./4g90+H.pdb ./4g90.mtz --ligand /A/HIS/119// --protomer [-1..1] /A/HIS/119// --flip on --chirality on --np 2 -h pm6 amberff14sb --dock LIGAND --pH 7 --xmodescore opt all target 15 0.01 --confSearch LIGAND opt off --qm-region /A/HIS/119// 3.0 0 -v 2 \
+      || { echo "Tutorial 8 failed"; return 1; }
+}
+
 # ---------------------------
 # Menu & Dispatch
 # ---------------------------
@@ -259,6 +269,7 @@ Interactive XModeScore Tutorial Menu (-i to enable):
   6  Tutorial #5  : Automatic docking + XModeScore (5C3K)
   7  Tutorial #6  : Real-Space Ligand Statistics
   8  Tutorial #7  : XModeScore macrocycle states (8alx)
+  9  Tutorial #8  : XModeScore residue states (4g90)
   0 / A           : Run All
   Q               : Quit
 EOF
@@ -273,6 +284,7 @@ run_all() {
   tutorial_5
   tutorial_6
   tutorial_7
+  tutorial_8
 }
 
 usage() {
@@ -298,6 +310,7 @@ dispatch() {
     6) tutorial_5 ;;
     7) tutorial_6 ;;
     8) tutorial_7 ;;
+    9) tutorial_8 ;;
     0|A|a) run_all ;;
     Q|q) log "Quit requested"; exit 0 ;;
     *) echo "WARNING: Unknown selection: $1" ;;

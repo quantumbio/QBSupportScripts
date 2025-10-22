@@ -217,6 +217,7 @@ tutorial_6() {
   section "Tutorial #6: Protonation + Missing Loops: PDBid:7efc"
   safe_cd_root
   local dir="cryoEM_DivCon_gaps_7efc_tut6"
+  local QB_SKIP_END_GAP_PREPARE=1
   clean_make_cd "${dir}"
   fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/CryoEM/7efc.pdb
   fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/CryoEM/emd_31083.map
