@@ -32,6 +32,7 @@ DEFAULT_FILE_PATTERNS = ["OUT.*"]
 
 ERROR_TOKENS = [
     r"\bQBException\b",
+    r"\bSEGV\b",
     r"\bERROR\b",
     r"\bError\b",
     r"\bFAILED\b",
@@ -284,7 +285,7 @@ def main(argv=None):
             print(color("\n=== %s (%d error block(s)) ===" %
                         (tut, len(errs)), "36", use_color))
             for idx, block in enumerate(errs, 1):
-                label_color = "31" if block.error_type in ("QBException", "Traceback") else "33"
+                label_color = "31" if block.error_type in ("QBException", "SEGV", "Traceback") else "33"
                 header = "[%d] %s %s:%d-%d" % (idx, block.error_type, block.file,
                                                block.start_line, block.end_line)
                 print(color(header, label_color, use_color))
