@@ -231,6 +231,8 @@ tutorial_6() {
       || { echo "Tutorial #6 failed"; return 1; }
 }
 
+export SAVE_BLOP_MAP=1
+export OUTPUT_SCALED_MAPS=1
 tutorial_7() {
   section "Tutorial #7: Multi-Blob Docking (Cryo_EM) PDBid:7jsy"
   safe_cd_root

@@ -150,21 +150,21 @@ tutorial_4() {
 
   fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/4gr0+H.pdb
   fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/4gr0.mtz
-
   # C31 chiral atom noted in original comment
   qbbuster --pdbFile 4gr0+H.pdb --sfFile 4gr0.mtz --XModeScore --protomers "0" --exploreChiral "C31" --protonation skip --protonateTautomers MOE --makeCIF moe --mmMethod amberff14sb --qmMethod pm6 --qmWeight 3.0 --engine buster --ncycles 1 --nSmallCycles 20 --selection "resname R4B and resid 306 and chain A" --np 32 --region-radius 3.0 --dir xmodeScore_results || { echo "Tutorial #4 failed"; return 1; }
 }
 
 tutorial_5() {
-  section "Tutorial #5 (XModeScore; multiple flips): 3r4p"
+  pdbid=4at3
+  section "Tutorial #5 (XModeScore; multiple flips): $pdbid"
   safe_cd_root
-  clean_make_cd "qbbuster_3r4p"
+  clean_make_cd "qbbuster_${pdbid}"
 
-  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/3r4p+H.pdb
-  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/3r4p.mtz
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/4at3+H.pdb
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/4at3.mtz
 
-  # N6 flip exploration noted in original comment
-  qbbuster --pdbFile 3r4p+H.pdb --sfFile 3r4p.mtz --XModeScore --protomers "0" --exploreFLip "N6" --protonation skip --protonateTautomers MOE --makeCIF moe --mmMethod amberff14sb --qmMethod pm6 --qmWeight 3.0 --engine buster --ncycles 1 --nSmallCycles 20 --selection "resname FU7 and resid 901 and chain A" --np 32 --region-radius 3.0 --dir xmodeScore_results || { echo "Tutorial #5 failed"; return 1; }
+  #  flip of the group with C7 atom exploration only 
+  qbbuster --pdbFile ${pdbid}+H.pdb --sfFile $pdbid.mtz --XModeScore --protomers "0" --exploreFLip "C7" --protonation skip --protonateTautomers divcon --makeCIF moe --mmMethod amberff14sb --qmMethod pm6 --qmWeight 3.0 --engine buster --ncycles 1 --nSmallCycles 20 --selection "resname LTI and resid 1839 and chain A" --np 32 --region-radius 3.0 --dir xmodeScore_results || { echo "Tutorial #5 failed"; return 1; }
 }
 
 tutorial_6() {
@@ -194,7 +194,7 @@ BUSTER/DivCon Tutorial Menu (-i for interactive):
   2  Tutorial #2 : qbbuster Grade & DivCon protonation (2BSM)
   3  Tutorial #3 : XModeScore multiple ligand copies (4ntk)
   4  Tutorial #4 : XModeScore chiral centers (4gr0)
-  5  Tutorial #5 : XModeScore flips (3r4p)
+  5  Tutorial #5 : XModeScore flips (4at3)
   6  Tutorial #6 : XModeScore PBS cluster example (5kcv)
   0 / A          : Run All
   Q              : Quit
