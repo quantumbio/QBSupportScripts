@@ -167,6 +167,15 @@ tutorial_9() {
   "${DIVCON_BIN}" 2vmf --template 2VMF_1_model_1_relaxed-dssp.pdb  --prepare all -h amberff14sb --np 2 -v 2 -O 2>&1
 }
 
+tutorial_10() {
+  section "Tutorial 10: Prepare with fasta"
+  safe_cd_root
+  clean_make_cd "prepare_with_fasta"
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/cli/rcsb_pdb_2VMF.fasta
+  fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data/cli/2VMF_1_model_1_relaxed-dssp.pdb
+  "${DIVCON_BIN}" 2vmf rcsb_pdb_2VMF.fasta --prepare all -h amberff14sb --np 2 -v 2 -O 2>&1
+}
+
 ###############################################################################
 # Menu / Dispatch
 ###############################################################################
@@ -183,6 +192,7 @@ Interactive qmechanic Tutorial Menu (-i to enable):
   7  Macrocycle Protonation (JSON bond def)
   8  Covalently Bound Ligand (JSON bond def)
   9  Template Driven Prepare
+ 10  Prepare with fasta
   0 / A  Run All
   Q      Quit
 EOF
@@ -198,6 +208,7 @@ run_all() {
   tutorial_7
   tutorial_8
   tutorial_9
+  tutorial_10
 }
 
 usage() {
@@ -229,6 +240,7 @@ dispatch_number() {
     7) tutorial_7 ;;
     8) tutorial_8 ;;
     9) tutorial_9 ;;
+   10) tutorial_10 ;;
     0|A|a) run_all ;;
     Q|q) log "User requested quit."; exit 0 ;;
     *) echo "WARNING: Unknown selection: $1" ;;
