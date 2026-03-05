@@ -63,7 +63,7 @@ wait    # wait until all ligand tasks (docking) have been run
 
 # STEP 3: run the DivCon/MTScore tasks (one on each ligand) - this can be done completely in parallel
 
-for ligandfile in `ls 5-cmet-ligands-MOE-*.mol2 | grep -v -dock` ; do
+for ligandfile in `ls 5-cmet-ligands-MOE-*.mol2 | grep -v \-dock` ; do
     max_bg_procs $( echo "scale=0;((${PBS_NUM_PPN})+0.5)/2" | bc )
     ligandbasename=`basename "$ligandfile" .mol2`
     DOCKFILES="${ligandbasename}-dock.sdf"
