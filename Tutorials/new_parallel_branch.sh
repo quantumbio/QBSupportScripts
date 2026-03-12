@@ -13,6 +13,7 @@ fi
 
 WORKDIR="${PWD}"
 DATE_FMT="+%Y-%m-%d %H:%M:%S"
+PARALLEL=1
 
 # For these tests, MTDock is required.
 export MT_ALLOW_MTDOCK=1
@@ -232,9 +233,10 @@ Usage: $(basename "$0") [options]
 Default (no options): run ALL tutorial segments.
 
 Options:
-  -i    Interactive menu mode
-  -l    List tutorials only
-  -h    Help
+  --np N  Run tutorials in parallel with up to N simultaneous jobs
+  -i      Interactive menu mode
+  -l      List tutorials only
+  -h      Help
 EOF
 }
 
@@ -251,33 +253,117 @@ dispatch() {
   esac
 }
 
+run_parallel() {
+
+  local max_jobs="$1"
+  shift
+  local tasks=("$@")
+
+  # Export helper functions
+  export -f safe_cd_root clean_make_cd fetch log section
+
+  # Export tutorial functions
+  for t in "${tasks[@]}"; do
+    export -f "$t"
+  done
+
+  # Export variables needed by child shells
+  export WORKDIR DATE_FMT DIVCON MT_ALLOW_MTDOCK QBHOME
+
+  printf "%s\n" "${tasks[@]}" |
+  xargs -n1 -P "${max_jobs}" -I{} bash -c '
+      echo "Running {}"
+      {} > LOG_{}.txt 2>&1
+  '
+}
+
 main() {
+
   log "BEGIN new_parallel_branch tutorial batch (DIVCON=${DIVCON})"
 
   local mode="all"
-  while getopts ":ilh" opt; do
-    case "${opt}" in
-      i) mode="interactive" ;;
-      l) print_menu; exit 0 ;;
-      h) usage; exit 0 ;;
-      *) usage; exit 1 ;;
+  local selections=()
+
+  # -------------------------------
+  # Parse arguments
+  # -------------------------------
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --np)
+        PARALLEL="$2"
+        shift 2
+        ;;
+      -i)
+        mode="interactive"
+        shift
+        ;;
+      -l)
+        print_menu
+        exit 0
+        ;;
+      -h)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "Unknown option: $1"
+        usage
+        exit 1
+        ;;
     esac
   done
-  shift $((OPTIND-1))
 
-  if [[ "${mode}" == "all" ]]; then
-    run_all
-  else
+  # -------------------------------
+  # Define tutorial functions
+  # -------------------------------
+  local tutorials=(
+    tutorial_1a_pdb
+    tutorial_1a_mol2
+    tutorial_1b
+    tutorial_1c
+    tutorial_1d
+  )
+
+  # -------------------------------
+  # Interactive selection
+  # -------------------------------
+  if [[ "${mode}" == "interactive" ]]; then
+
     print_menu
     echo
     read -r -p "Select tutorials (ENTER=All): " sels
+
     if [[ -z "${sels}" ]]; then
-      run_all
+      selections=("${tutorials[@]}")
     else
       for s in ${sels}; do
-        dispatch "${s}"
+        case "${s}" in
+          1) selections+=(tutorial_1a_pdb) ;;
+          2) selections+=(tutorial_1a_mol2) ;;
+          3) selections+=(tutorial_1b) ;;
+          4) selections+=(tutorial_1c) ;;
+          5) selections+=(tutorial_1d) ;;
+          0|A|a) selections=("${tutorials[@]}") ;;
+          Q|q) log "Quit requested"; exit 0 ;;
+          *) echo "WARNING: Unknown selection: ${s}" ;;
+        esac
       done
     fi
+
+  else
+    selections=("${tutorials[@]}")
+  fi
+
+  # -------------------------------
+  # Execute tutorials
+  # -------------------------------
+  if (( PARALLEL > 1 )); then
+    log "Running tutorials in parallel (np=${PARALLEL})"
+    run_parallel "${PARALLEL}" "${selections[@]}"
+  else
+    for t in "${selections[@]}"; do
+      "$t"
+    done
   fi
 
   log "END new_parallel_branch tutorial batch"
