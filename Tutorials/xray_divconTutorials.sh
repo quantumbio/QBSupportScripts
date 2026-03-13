@@ -33,6 +33,7 @@ fi
 
 WORKDIR="${PWD}"
 DATE_FMT="+%Y-%m-%d %H:%M:%S"
+PARALLEL=1
 
 log() {
   printf "[%s] %s\n" "$(date "${DATE_FMT}")" "$*"
@@ -251,9 +252,10 @@ Usage: $(basename "$0") [options]
 Default (no options): Run ALL tutorials non-interactively.
 
 Options:
-  -i    Interactive menu mode
-  -l    List tutorials only
-  -h    Help
+  --np N  Run tutorials in parallel with up to N simultaneous jobs
+  -i      Interactive menu mode
+  -l      List tutorials only
+  -h      Help
 
 Examples:
   $(basename "$0")       # Run all tutorials
@@ -276,33 +278,100 @@ dispatch() {
   esac
 }
 
+run_parallel() {
+
+  local max_jobs="$1"
+  shift
+  local tasks=("$@")
+
+  # Export common helper functions
+  export -f safe_cd_root clean_make_cd fetch log section
+
+  # Export tutorial functions
+  for t in "${tasks[@]}"; do
+    export -f "$t"
+  done
+
+  # Export common variables used by tutorials
+  export WORKDIR DATE_FMT QBHOME
+  export DIVCON_BIN QBPHENIX_BIN QBDIVCON_BIN QBBUSTER_BIN
+  export qbExec cloud ENGINE_DIVCON_ARGS
+
+  printf "%s\n" "${tasks[@]}" |
+  xargs -n1 -P "${max_jobs}" -I{} bash -c '
+      echo "Running {}"
+      {} > LOG_{}.txt 2>&1
+  '
+}
+
 main() {
+
   log "BEGIN DivCon Xray Tutorial Batch (DIVCON_BIN=${DIVCON_BIN})"
 
   local mode="all"
-  while getopts ":ilh" opt; do
-    case "${opt}" in
-      i) mode="interactive" ;;
-      l) print_menu; exit 0 ;;
-      h) usage; exit 0 ;;
-      *) usage; exit 1 ;;
+  local selections=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --np)
+        PARALLEL="$2"
+        shift 2
+        ;;
+      -i)
+        mode="interactive"
+        shift
+        ;;
+      -l)
+        print_menu
+        exit 0
+        ;;
+      -h)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "Unknown option: $1"
+        usage
+        exit 1
+        ;;
     esac
   done
-  shift $((OPTIND-1))
 
-  if [[ "${mode}" == "all" ]]; then
-    run_all
-  else
+  local tutorials=(
+    tutorial_1
+    tutorial_2
+    tutorial_3
+    tutorial_4
+    tutorial_5
+    tutorial_6
+  )
+
+  if [[ "${mode}" == "interactive" ]]; then
+
     print_menu
     echo
     read -r -p "Select tutorials (ENTER=All): " sels
+
     if [[ -z "${sels}" ]]; then
-      run_all
+      selections=("${tutorials[@]}")
     else
       for s in ${sels}; do
         dispatch "${s}"
       done
+      exit 0
     fi
+
+  else
+    selections=("${tutorials[@]}")
+  fi
+
+  if (( PARALLEL > 1 )); then
+    log "Running tutorials in parallel (np=${PARALLEL})"
+    run_parallel "${PARALLEL}" "${selections[@]}"
+  else
+    for t in "${selections[@]}"; do
+      "$t"
+    done
   fi
 
   log "END DivCon Xray Tutorial Batch"

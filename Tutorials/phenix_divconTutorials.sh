@@ -53,6 +53,7 @@ fi
 
 DATE_FMT="+%Y-%m-%d %H:%M:%S"
 log() { printf "[%s] %s\n" "$(date "${DATE_FMT}")" "$*"; }
+PARALLEL=1
 
 section() {
   echo
@@ -187,12 +188,14 @@ Usage: $(basename "$0") [options]
 Default (no options): Run ALL tutorials sequentially.
 
 Options:
-  -i    Interactive menu mode
-  -l    List tutorials only (no execution)
-  -h    Help
+  --np N  Run tutorials in parallel with up to N simultaneous jobs
+  -i      Interactive menu mode
+  -l      List tutorials only (no execution)
+  -h      Help
 
 Examples:
   $(basename "$0")
+  $(basename "$0") --np 4
   $(basename "$0") -i
 EOF
 }
@@ -212,35 +215,114 @@ dispatch() {
   esac
 }
 
+run_parallel() {
+
+  local max_jobs="$1"
+  shift
+  local tasks=("$@")
+
+  # Export helper functions
+  export -f clean_make_cd fetch log section
+
+  # Export tutorial functions
+  for t in "${tasks[@]}"; do
+    export -f "$t"
+  done
+
+  # Export required variables
+  export WORKDIR DATE_FMT QBHOME PHENIX DIVCON_BIN ENGINE_DIVCON
+
+  printf "%s\n" "${tasks[@]}" |
+  xargs -n1 -P "${max_jobs}" -I{} bash -c '
+      echo "Running {}"
+      {} > LOG_{}.txt 2>&1
+  '
+}
+
 main() {
+
   local startDate
   startDate="$(date)"
   echo "BEGIN PHENIX/DivCon Tutorial Test at ${startDate} using ${DIVCON_BIN}"
 
   local mode="all"
-  while getopts ":ilh" opt; do
-    case "${opt}" in
-      i) mode="interactive" ;;
-      l) print_menu; exit 0 ;;
-      h) usage; exit 0 ;;
-      *) usage; exit 1 ;;
+  local selections=()
+
+  # -------------------------------
+  # Parse arguments
+  # -------------------------------
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --np)
+        PARALLEL="$2"
+        shift 2
+        ;;
+      -i)
+        mode="interactive"
+        shift
+        ;;
+      -l)
+        print_menu
+        exit 0
+        ;;
+      -h)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "Unknown option: $1"
+        usage
+        exit 1
+        ;;
     esac
   done
-  shift $((OPTIND-1))
 
-  if [[ "${mode}" == "all" ]]; then
-    run_all
-  else
+  local tutorials=(
+    tutorial_1
+    tutorial_2a
+    tutorial_2b
+    tutorial_3
+    tutorial_4
+    tutorial_5
+    tutorial_6
+  )
+
+  if [[ "${mode}" == "interactive" ]]; then
+
     print_menu
     echo
     read -r -p "Select tutorials (ENTER=All): " sels
+
     if [[ -z "${sels}" ]]; then
-      run_all
+      selections=("${tutorials[@]}")
     else
       for s in ${sels}; do
-        dispatch "${s}"
+        case "${s}" in
+          1) selections+=(tutorial_1) ;;
+          2) selections+=(tutorial_2a) ;;
+          3) selections+=(tutorial_2b) ;;
+          4) selections+=(tutorial_3) ;;
+          5) selections+=(tutorial_4) ;;
+          6) selections+=(tutorial_5) ;;
+          7) selections+=(tutorial_6) ;;
+          0|A|a) selections=("${tutorials[@]}") ;;
+          Q|q) log "Quit requested"; exit 0 ;;
+          *) echo "WARNING: Unknown selection: ${s}" ;;
+        esac
       done
     fi
+
+  else
+    selections=("${tutorials[@]}")
+  fi
+
+  if (( PARALLEL > 1 )); then
+    log "Running tutorials in parallel (np=${PARALLEL})"
+    run_parallel "${PARALLEL}" "${selections[@]}"
+  else
+    for t in "${selections[@]}"; do
+      "$t"
+    done
   fi
 
   local endDate
