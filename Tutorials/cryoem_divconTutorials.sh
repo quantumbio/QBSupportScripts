@@ -35,6 +35,7 @@ fi
 
 WORKDIR="${PWD}"
 DATE_FMT="+%Y-%m-%d %H:%M:%S"
+PARALLEL=1
 
 log() {
   printf "[%s] %s\n" "$(date "${DATE_FMT}")" "$*"
@@ -288,14 +289,16 @@ Usage: $(basename "$0") [options]
 Default (no options): Run ALL tutorials non-interactively.
 
 Options:
-  -i    Interactive menu mode
-  -l    List tutorials only
-  -h    Help
+  --np N Run tutorials in parallel with up to N simultaneous jobs
+  -i     Interactive menu mode
+  -l     List tutorials only
+  -h     Help
 
 Examples:
-  $(basename "$0")       # Run all
-  $(basename "$0") -i    # Interactive selection
-  $(basename "$0") -l    # List tutorials
+  $(basename "$0")         # Run all
+  $(basename "$0") --np 4  # Run 4 tutorials in parallel
+  $(basename "$0") -i      # Interactive selection
+  $(basename "$0") -l      # List tutorials
 EOF
 }
 
@@ -314,33 +317,112 @@ dispatch() {
   esac
 }
 
+run_parallel() {
+
+  local max_jobs="$1"
+  shift
+  local tasks=("$@")
+
+  # Export helper functions
+  export -f safe_cd_root clean_make_cd fetch log section
+
+  # Export tutorial functions
+  for t in "${tasks[@]}"; do
+    export -f "$t"
+  done
+
+  # Export variables used by tutorials
+  export WORKDIR DATE_FMT DIVCON_BIN QBDIVCON_BIN QBHOME
+  export SAVE_BLOP_MAP OUTPUT_SCALED_MAPS
+
+  printf "%s\n" "${tasks[@]}" |
+  xargs -n1 -P "${max_jobs}" -I{} bash -c '
+      echo "Running {}"
+      {} > LOG_{}.txt 2>&1
+  '
+}
+
 main() {
   log "BEGIN DivCon CryoEM Tutorial Batch (DIVCON_BIN=${DIVCON_BIN})"
 
   local mode="all"
-  while getopts ":ilh" opt; do
-    case "${opt}" in
-      i) mode="interactive" ;;
-      l) print_menu; exit 0 ;;
-      h) usage; exit 0 ;;
-      *) usage; exit 1 ;;
+  local selections=()
+
+  # -------------------------------
+  # Parse arguments
+  # -------------------------------
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --np)
+        PARALLEL="$2"
+        shift 2
+        ;;
+      -i)
+        mode="interactive"
+        shift
+        ;;
+      -l)
+        print_menu
+        exit 0
+        ;;
+      -h)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "Unknown option: $1"
+        usage
+        exit 1
+        ;;
     esac
   done
-  shift $((OPTIND-1))
 
-  if [[ "${mode}" == "all" ]]; then
-    run_all
-  else
+  local tutorials=(
+    tutorial_1
+    tutorial_2
+    tutorial_3
+    tutorial_4
+    tutorial_5
+    tutorial_6
+    tutorial_7
+  )
+
+  if [[ "${mode}" == "interactive" ]]; then
+
     print_menu
     echo
     read -r -p "Select tutorials (ENTER=All): " sels
+
     if [[ -z "${sels}" ]]; then
-      run_all
+      selections=("${tutorials[@]}")
     else
       for s in ${sels}; do
-        dispatch "${s}"
+        case "${s}" in
+          1) selections+=(tutorial_1) ;;
+          2) selections+=(tutorial_2) ;;
+          3) selections+=(tutorial_3) ;;
+          4) selections+=(tutorial_4) ;;
+          5) selections+=(tutorial_5) ;;
+          6) selections+=(tutorial_6) ;;
+          7) selections+=(tutorial_7) ;;
+          0|A|a) selections=("${tutorials[@]}") ;;
+          Q|q) log "Quit requested"; exit 0 ;;
+          *) echo "WARNING: Unknown selection: ${s}" ;;
+        esac
       done
     fi
+
+  else
+    selections=("${tutorials[@]}")
+  fi
+
+  if (( PARALLEL > 1 )); then
+    log "Running tutorials in parallel (np=${PARALLEL})"
+    run_parallel "${PARALLEL}" "${selections[@]}"
+  else
+    for t in "${selections[@]}"; do
+      "$t"
+    done
   fi
 
   log "END DivCon CryoEM Tutorial Batch"
