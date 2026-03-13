@@ -37,6 +37,7 @@ fi
 
 WORKDIR="${PWD}"
 DATE_FMT="+%Y-%m-%d %H:%M:%S"
+PARALLEL=1
 
 #############################################
 # Utility Functions
@@ -316,14 +317,16 @@ Usage: $(basename "$0") [options]
 Default behavior (no options): run ALL tutorials non-interactively.
 
 Options:
+  --np N    Run tutorials in parallel with up to N simultaneous jobs
   -i        Interactive menu mode (lets you pick specific tutorials)
   -l        List tutorials (no execution)
   -h        Show this help
 
 Examples:
-  $(basename "$0")        # Run all tutorials
-  $(basename "$0") -i     # Show interactive menu
-  $(basename "$0") -l     # List tutorials then exit
+  $(basename "$0")          # Run all tutorials
+  $(basename "$0") --np 4   # Run 4 tutorials in parallel
+  $(basename "$0") -i       # Interactive menu
+  $(basename "$0") -l       # List tutorials
 EOF
 }
 
@@ -348,6 +351,31 @@ dispatch_number() {
   esac
 }
 
+run_parallel() {
+
+  local max_jobs="$1"
+  shift
+  local tasks=("$@")
+
+  # Export helper functions
+  export -f safe_cd_root clean_make_cd fetch log section need_moebatch
+
+  # Export tutorial functions
+  for t in "${tasks[@]}"; do
+    export -f "$t"
+  done
+
+  # Export variables required by tutorials
+  export WORKDIR DATE_FMT DIVCON_BIN QBHOME
+  export MOEBATCH_BIN HAVE_MOEBATCH
+
+  printf "%s\n" "${tasks[@]}" |
+  xargs -n1 -P "${max_jobs}" -I{} bash -c '
+      echo "Running {}"
+      {} > LOG_{}.txt 2>&1
+  '
+}
+
 #############################################
 # Main
 #############################################
@@ -356,30 +384,95 @@ main() {
   log "MOEBATCH available: ${HAVE_MOEBATCH}"
 
   local mode="all"
+  local selections=()
 
-  while getopts ":ilh" opt; do
-    case "${opt}" in
-      i) mode="interactive" ;;
-      l) print_menu; exit 0 ;;
-      h) usage; exit 0 ;;
-      *) usage; exit 1 ;;
+  # -------------------------------
+  # Parse arguments
+  # -------------------------------
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --np)
+        PARALLEL="$2"
+        shift 2
+        ;;
+      -i)
+        mode="interactive"
+        shift
+        ;;
+      -l)
+        print_menu
+        exit 0
+        ;;
+      -h)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "Unknown option: $1"
+        usage
+        exit 1
+        ;;
     esac
   done
-  shift $((OPTIND-1))
 
-  if [[ "${mode}" == "all" ]]; then
-    run_all
-  else
+  local tutorials=(
+    tutorial_1a
+    tutorial_1b
+    tutorial_1c
+    tutorial_1d
+    tutorial_2
+    tutorial_3
+    tutorial_4
+    tutorial_5
+    tutorial_6
+    tutorial_7
+    tutorial_8
+    tutorial_9
+    tutorial_10
+  )
+
+  if [[ "${mode}" == "interactive" ]]; then
+
     print_menu
     echo
-    read -r -p "Select tutorials (ENTER=All): " selections
-    if [[ -z "${selections}" ]]; then
-      run_all
+    read -r -p "Select tutorials (ENTER=All): " sels
+
+    if [[ -z "${sels}" ]]; then
+      selections=("${tutorials[@]}")
     else
-      for sel in ${selections}; do
-        dispatch_number "${sel}"
+      for s in ${sels}; do
+        case "${s}" in
+          1) selections+=(tutorial_1a) ;;
+          2) selections+=(tutorial_1b) ;;
+          3) selections+=(tutorial_1c) ;;
+          4) selections+=(tutorial_1d) ;;
+          5) selections+=(tutorial_2) ;;
+          6) selections+=(tutorial_3) ;;
+          7) selections+=(tutorial_4) ;;
+          8) selections+=(tutorial_5) ;;
+          9) selections+=(tutorial_6) ;;
+          10) selections+=(tutorial_7) ;;
+          11) selections+=(tutorial_8) ;;
+          12) selections+=(tutorial_9) ;;
+          13) selections+=(tutorial_10) ;;
+          0|A|a) selections=("${tutorials[@]}") ;;
+          Q|q) log "User requested quit."; exit 0 ;;
+          *) echo "WARNING: Unknown selection: ${s}" ;;
+        esac
       done
     fi
+
+  else
+    selections=("${tutorials[@]}")
+  fi
+
+  if (( PARALLEL > 1 )); then
+    log "Running tutorials in parallel (np=${PARALLEL})"
+    run_parallel "${PARALLEL}" "${selections[@]}"
+  else
+    for t in "${selections[@]}"; do
+      "$t"
+    done
   fi
 
   log "END Tutorial Test using ${DIVCON_BIN}"
