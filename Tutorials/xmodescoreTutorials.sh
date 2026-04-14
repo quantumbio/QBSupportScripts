@@ -145,7 +145,7 @@ tutorial_3() {
     qbbuster --pdbFile 2BSM+H.pdb --sfFile 2BSM.mtz \
       --XModeScore --protomers "-1..1" --protonation skip --makeCIF divcon \
       --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 1 \
-      --resname BSM --engine buster --np 8 -v 2 \
+      --resname BSM --engine buster --np 8 --v 2 \
       || { echo "Tutorial 3 failed"; return 1; }
   else
     echo "SKIP: qbbuster not available."
@@ -165,7 +165,7 @@ tutorial_4() {
     qbbuster --pdbFile 4wq6+H.pdb --sfFile 4wq6.mtz \
       --XModeScore --protomers "-1..1" --exploreFlip --exploreChiral \
       --protonation skip --makeCIF grade --mmMethod amberff14sb \
-      --qmMethod pm6 --engine buster --np 8 -v 2 \
+      --qmMethod pm6 --engine buster --np 8 --v 2 \
       || { echo "Tutorial 4 failed"; return 1; }
   else
     echo "SKIP: qbbuster not available."
@@ -238,7 +238,7 @@ tutorial_7() {
       --mmMethod amberff14sb \
       --qmMethod pm6 \
       --engine buster \
-      --np 8 -v 2 \
+      --np 8 --v 2 \
       || { echo "Tutorial 7 failed"; return 1; }
   else
     echo "SKIP: qbbuster not available."
