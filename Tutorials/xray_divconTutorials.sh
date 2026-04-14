@@ -159,7 +159,7 @@ tutorial_4() {
       --protonateTautomers divcon \
       --qmMethod pm6 \
       --mmMethod amberff14sb \
-      --np 4 -v 2 -O \
+      --np 4 --v 2 -O \
       || { echo "Tutorial #4 failed"; return 1; }
   else
     echo "SKIP: qbdivcon not available."
@@ -190,7 +190,7 @@ tutorial_5() {
       --protonateTautomers divcon \
       --qmMethod pm6 \
       --mmMethod amberff14sb \
-      --np 4 -v 2 -O \
+      --np 4 --v 2 -O \
       || { echo "Tutorial #5 failed"; export MT_ALLOW_MTDOCK=; return 1; }
     unset MT_ALLOW_MTDOCK
   else
