@@ -1,167 +1,157 @@
 import sys
-from pymol import cmd
 import os
 import glob
+import math
 import argparse
-import math
-
+import tempfile
+import shutil
+import gzip
+import logging
+from pathlib import Path
+from pymol import cmd
 from pymol.cgo import *
-import math
+import mdtraj as md
+
+# ──────────────────────────  HELPERS  ────────────────────────────────────────
+def decompress_if_gz(path: Path, tmp_files: list[Path]) -> Path:
+    if path.suffix != ".gz":
+        return path
+
+    # Extract extension from e.g. output.dcd.gz → .dcd
+    inner_ext = "".join(Path(path.stem).suffixes) or ".dat"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=inner_ext, prefix="mdtraj_")
+    with gzip.open(path, "rb") as gz_in, open(tmp.name, "wb") as out:
+        shutil.copyfileobj(gz_in, out)
+
+    tmp_path = Path(tmp.name)
+    print(f"Decompressed {path} → {tmp_path}")
+    tmp_files.append(tmp_path)
+    return tmp_path
 
 def create_gap_spheres(frame, object_name="trajectory", distance_threshold=6.0, previous_spheres=[]):
-    """
-    Detects gaps in a protein by checking CA-CA distances greater than the specified threshold,
-    and creates a magenta, transparent sphere centered on the gap with a radius based on the CA-CA distance.
-    
-    Parameters:
-    frame (int): The trajectory frame to analyze.
-    object_name (str): The name of the object to use (default is "trajectory").
-    distance_threshold (float): The distance (in Å) above which to consider a gap (default is 6.0 Å).
-    previous_spheres (list): List of previously created sphere names to delete.
-    """
-    # Ensure the correct frame is set
     cmd.frame(frame)
+    for name in previous_spheres:
+        cmd.delete(name)
 
-    # Delete spheres from the previous frame
-    for sphere_name in previous_spheres:
-        cmd.delete(sphere_name)
-    
-    # Get the list of all Cα (CA) atoms in the current frame
     atoms = cmd.get_model(f"{object_name} and name CA", frame).atom
-
-    # Initialize the list of CGO commands for spheres
+    prev_atom = None
     spherelist = []
 
-    # Iterate over the CA atoms to calculate distances between consecutive atoms
-    prev_atom = None
     for atom in atoms:
-        if prev_atom is not None:
-            # Calculate the distance between the previous CA atom and the current CA atom
-            dist = math.sqrt((atom.coord[0] - prev_atom.coord[0]) ** 2 +
-                             (atom.coord[1] - prev_atom.coord[1]) ** 2 +
-                             (atom.coord[2] - prev_atom.coord[2]) ** 2)
-
-            # Check if the distance exceeds the gap threshold
+        if prev_atom:
+            dist = math.dist(atom.coord, prev_atom.coord)
             if dist > distance_threshold:
-                # Calculate the midpoint of the gap
-                midpoint = [(atom.coord[0] + prev_atom.coord[0]) / 2,
-                            (atom.coord[1] + prev_atom.coord[1]) / 2,
-                            (atom.coord[2] + prev_atom.coord[2]) / 2]
-
-                # Calculate the radius to be 50% of the CA-CA distance
+                midpoint = [(a + b) / 2 for a, b in zip(atom.coord, prev_atom.coord)]
                 radius = dist / 2
-
-                # Add the sphere to the spherelist
-                spherelist.append(
-#                    [COLOR, 1.0, 0.0, 1.0,  # Magenta color
-#                     SPHERE, midpoint[0], midpoint[1], midpoint[2], radius]
-                     [CYLINDER, atom.coord[0], atom.coord[1], atom.coord[2], prev_atom.coord[0], prev_atom.coord[1], prev_atom.coord[2], radius, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0,]
-                )
-
-        # Update prev_atom for next iteration
+                spherelist.append([
+                    CYLINDER,
+                    atom.coord[0], atom.coord[1], atom.coord[2],
+                    prev_atom.coord[0], prev_atom.coord[1], prev_atom.coord[2],
+                    radius, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0
+                ])
         prev_atom = atom
 
-    # Load the spheres into PyMOL
     current_spheres = []
     for i, sphere in enumerate(spherelist):
-        sphere_name = f'gap_sphere_{frame}_{i}'
-        cmd.load_cgo(sphere, sphere_name)
-
-        # Set the transparency of the sphere (75% transparent)
-        cmd.set("cgo_transparency", 0.75, sphere_name)
-
-        # Add the sphere name to the current_spheres list
-        current_spheres.append(sphere_name)
-
-    # Return the current list of sphere names for the next frame
+        name = f'gap_sphere_{frame}_{i}'
+        cmd.load_cgo(sphere, name)
+        cmd.set("cgo_transparency", 0.75, name)
+        current_spheres.append(name)
     return current_spheres
 
-# Parse Command-Line Arguments
-parser = argparse.ArgumentParser(description="Process a PDB trajectory and generate a movie with optional gap highlighting.")
-parser.add_argument("trajectory_file", help="The trajectory file (PDB format).")
-parser.add_argument("ligand_code", help="The 3-letter code of the ligand.")
-parser.add_argument("--addgap", action="store_true", help="Optional flag to add gap highlighting.")
+# ──────────────────────────  CLI ARGUMENTS  ──────────────────────────────────
+parser = argparse.ArgumentParser(description="Render PyMOL movie with optional gap highlighting.")
+parser.add_argument("--top", required=True, help="Topology file (.prmtop or .pdb)")
+parser.add_argument("--traj", required=True, help="Trajectory file (.dcd or multi-model .pdb)")
+parser.add_argument("--ligand_code", required=True, help="3-letter ligand code")
+parser.add_argument("--frame", type=int, default=1, help="Stride between frames (default=1)")
+parser.add_argument("--addgap", action="store_true", help="Highlight gaps with magenta cylinders")
 args = parser.parse_args()
 
-# Output configuration
+# ──────────────────────────  TRAJECTORY SETUP  ───────────────────────────────
+tmp_files = []
+top_path = decompress_if_gz(Path(args.top), tmp_files)
+traj_path = decompress_if_gz(Path(args.traj), tmp_files)
+
+# Convert DCD+PRMTOP to multi-model PDB if needed
+if traj_path.suffix == ".dcd":
+    print("Converting DCD + PRMTOP to PDB trajectory...")
+    traj = md.load(traj_path, top=top_path)
+    traj = traj[::args.frame]
+    pdb_out = Path(tempfile.mktemp(suffix=".pdb", prefix="pymol_traj_"))
+    traj.save(str(pdb_out))
+    tmp_files.append(pdb_out)
+    pymol_traj_file = str(pdb_out)
+else:
+    pymol_traj_file = str(traj_path)
+
+# ──────────────────────────  PYMOL SETUP  ────────────────────────────────────
 output_folder = "movie_frames"
 output_movie = "trajectory_movie.mp4"
+viewwidth = 1920
+viewheight = 2160
 
-# Step 1: Clean Output Folder
-if not os.path.exists(output_folder):
-    os.mkdir(output_folder)
-else:
-    # Remove existing PNG files in the output folder
-    for file in glob.glob(f"{output_folder}/*.png"):
-        os.remove(file)
+# Clean output folder
+os.makedirs(output_folder, exist_ok=True)
+for f in glob.glob(f"{output_folder}/*.png"):
+    os.remove(f)
 
-# Step 2: Load the PDB Trajectory
-cmd.load(args.trajectory_file, "trajectory")
-
-# Step 3: Set up representations
-# Hide all and show cartoons for protein
+# Load trajectory
+cmd.load(pymol_traj_file, "trajectory")
 cmd.hide("everything", "all")
-cmd.show("cartoon", "polymer")  # Show protein as cartoon
+cmd.show("cartoon", "polymer")
+cmd.remove("resn HOH")
+cmd.show("spheres", f"resn {args.ligand_code}")
 
-# Remove water for clarity
-cmd.remove("resn HOH")  # Removes water molecules
-
-# Highlight ligand in CPK representation
-ligand_selection = f"resn {args.ligand_code}"  # Use the input ligand code
-cmd.show("spheres", ligand_selection)  # Show ligand as spheres
-
-# Step 4: Setup DSSP for Secondary Structure Assignment
 cmd.dss("trajectory")
 cmd.color("red", "ss H")
 cmd.color("yellow", "ss S")
 cmd.color("green", "ss L")
 
-# Ray tracing and rendering settings
 cmd.set("ray_trace_frames", 1)
-cmd.set("ray_shadow", "on")  # Enable ray tracing shadows
-cmd.set("ambient_occlusion_mode", 1)  # Enable ambient occlusion for softer lighting
-cmd.set("light_count", 1)  # Increase the number of light sources for smoother shadows
+cmd.set("ray_shadow", "on")
+cmd.set("ambient_occlusion_mode", 1)
+cmd.set("light_count", 8)
 cmd.set("antialias", 2)
 
-# this modification is for 1/2 a widescreen (for a side-by-side view)
-viewwidth=3840/2
-viewheight=2160
-
-cmd.viewport(viewwidth, viewheight)  # 16:9 aspect ratio for 4K
-cmd.clip("near", 10)     # Move the near clipping plane closer
-cmd.clip("far", -10)     # Move the far clipping plane further away
+cmd.viewport(viewwidth, viewheight)
+cmd.clip("near", 10)
+cmd.clip("far", -10)
 
 cmd.select("zoom_selection", "polymer or organic and not resn HOH+NA+CL")
-#cmd.orient("zoom_selection")  # Orient the selected atoms
-cmd.zoom("zoom_selection")  # Zoom with a buffer around the selection
+cmd.zoom("zoom_selection", buffer=5)
+view = cmd.get_view()
 
-current_view = cmd.get_view()
-cmd.png(f"{output_folder}/test.png", width=viewwidth, height=viewheight, ray=1)
-
-# Step 5: Iterate through Frames and Save 4K Image
+# ──────────────────────────  FRAME RENDERING  ────────────────────────────────
 frame_count = cmd.count_states("trajectory")
 previous_spheres = []
 for frame in range(1, frame_count + 1):
     cmd.frame(frame)
     if args.addgap:
         previous_spheres = create_gap_spheres(frame, previous_spheres=previous_spheres)
-    # Save the PNG frame at 4K resolution
-    cmd.set_view(current_view)
+    cmd.set_view(view)
     cmd.png(f"{output_folder}/frame{frame:04d}.png", width=viewwidth, height=viewheight, ray=1)
-    
-    # Break the loop after 10 frames
-#    if frame >= 1:
-#        break
+    # Uncomment to render only the first N frames
+    # if frame >= 10:
+    #     break
 
-# Step 6: Convert PNG Frames to 4K MP4 Using Two-Pass FFmpeg
-# First pass
-os.system(f"ffmpeg -y -framerate 24 -i {output_folder}/frame%04d.png -c:v libx264 -pix_fmt yuv420p -crf 18 -preset slow -b:v 20M -pass 1 -an -f mp4 /dev/null")
+# ──────────────────────────  FFMPEG ENCODING  ────────────────────────────────
+print("Encoding video with FFmpeg (2-pass)...")
+os.system(f"ffmpeg -y -framerate 24 -i {output_folder}/frame%04d.png -c:v libx264 "
+          f"-pix_fmt yuv420p -crf 18 -preset slow -b:v 20M -pass 1 -an -f mp4 /dev/null")
+os.system(f"ffmpeg -framerate 24 -i {output_folder}/frame%04d.png -c:v libx264 "
+          f"-pix_fmt yuv420p -crf 18 -preset slow -b:v 20M -pass 2 {output_movie}")
 
-# Second pass
-os.system(f"ffmpeg -framerate 24 -i {output_folder}/frame%04d.png -c:v libx264 -pix_fmt yuv420p -crf 18 -preset slow -b:v 20M -pass 2 {output_movie}")
-
-# Optional: Print completion message
 print(f"Movie saved as {output_movie}")
+
+# ──────────────────────────  CLEANUP TEMP FILES  ─────────────────────────────
+for tmp in tmp_files:
+    try:
+        tmp.unlink()
+        print(f"Deleted temp file: {tmp}")
+    except Exception as e:
+        print(f"Warning: Could not delete temp file {tmp}: {e}")
+
 
 # Usage Note: Upon completion of the LEFT.mp4 and the RIGHT.mp4, use the following to generate the combined:
 # % ffmpeg -i LEFT.mp4 -i RIGHT.mp4 -filter_complex "\

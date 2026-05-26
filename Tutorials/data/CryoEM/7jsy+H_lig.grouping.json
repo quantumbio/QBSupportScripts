@@ -1,0 +1,264 @@
+{
+  "schema_version": "DivConGrouping-JSON.step45",
+  "producer": "pdb_grouping_gemmi_only_step45.py",
+  "pdb_id": "7jsy+H_lig.pdb",
+  "groups": [
+    {
+      "group_id": "group0",
+      "label": "group0",
+      "kind": "always_on",
+      "method": "always_on",
+      "members": [],
+      "states": [],
+      "atom_count_total": 18
+    }
+  ],
+  "atom_index": [
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "I3",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "I2",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "I1",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "O8",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "O9",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "C10",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "N13",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "C1",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "C6",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "C5",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "C4",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "C3",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "C2",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "C7",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "O11",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "O12",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "HN13",
+      "alt": " ",
+      "group": "group0"
+    },
+    {
+      "chain": "A",
+      "resname": "I3C",
+      "resseq": 501,
+      "icode": " ",
+      "atom": "HN1A",
+      "alt": " ",
+      "group": "group0"
+    }
+  ],
+  "couplings": [],
+  "expansions": [],
+  "writer_params": {
+    "allow_loop_merge": true,
+    "merge_altset_mode": "strict",
+    "merge_min_len": 2,
+    "merge_max_span": 100,
+    "merge_require_backbone": true,
+    "merge_blank_policy": "same",
+    "merge_occ_similarity_tol": 0.25,
+    "merge_disruptive_guard": false,
+    "merge_max_atoms": 600,
+    "merge_allow_gaps": false,
+    "allow_remote_merge": true,
+    "remote_merge_occ_tol": 0.05,
+    "promote_atom_max": 0,
+    "hbond_dist": 3.5,
+    "hb_angle_min": 130.0,
+    "hb_angle_tol": 10.0,
+    "hb_hard_min": 4,
+    "max_cn": 6,
+    "metal_angle_min": 90.0,
+    "metal_tuples_project": "loose",
+    "clash_topk": 12,
+    "blank_epsilon": 0.01,
+    "occ_roundoff_tol": 0.001,
+    "connectivity_state_policy": "map",
+    "state_keys": {
+      "group_state": "alt",
+      "atom_state": "state",
+      "pattern_state": "alt"
+    },
+    "id_mode": "sequential",
+    "pdb_altloc_blank": " ",
+    "label_policy": "mirror-or-AB",
+    "lig_site_cut": 2.2,
+    "peptide_cistrans_mode": "advisory",
+    "soft_pipi": false,
+    "soft_catpi": false,
+    "qmmm_ligand_select": [],
+    "qmmm_shell_dist": null,
+    "qmmm_shell_include_h": false,
+    "qmmm_cluster_disorder": true,
+    "link_bond_max": 2.2,
+    "pair_radius": 5.0,
+    "vdw_buffer": 0.6,
+    "metal_dist": 2.6,
+    "ssbond_cut": 2.5,
+    "salt_search_radius": 8.0,
+    "salt_contact_cut": 4.0,
+    "salt_k_coulomb": 332.0636,
+    "salt_eps_const": 80.0,
+    "water_same_site": 1.4,
+    "water_alt_clash": 2.2,
+    "occ_comp_dist": 6.0,
+    "promotion_bfs": {
+      "LINK": {
+        "depth": 2,
+        "include_h": true
+      },
+      "SSBOND": {
+        "depth": 2,
+        "include_h": true
+      },
+      "HONLY": {
+        "depth": 0,
+        "include_h": true
+      },
+      "HEAVY": {
+        "depth": 1,
+        "include_h": true
+      }
+    },
+    "promote_metals": false,
+    "qmmm_debug": false,
+    "promotions_applied": false
+  },
+  "id_map": {
+    "group0": "group0"
+  },
+  "connectivity": {
+    "bonds": [],
+    "links": []
+  }
+}
