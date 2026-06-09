@@ -82,10 +82,16 @@ fetch() {
 # ---------------------------
 
 tutorial_1() {
-  section "Tutorial #1: XModeScore (commented example, no execution)"
+  section "Tutorial #1: XModeScore executed on PDBid:1OPK"
   safe_cd_root
   clean_make_cd "xmodeScore_4YJR"
-  log "Original qbphenix example was commented out in source; nothing to run."
+  if [[ -x "${QBPHENIX_BIN}" ]]; then
+    "${QBPHENIX_BIN}" --pdbID 4YJR --XModeScore --protomers "-1..1" --mmMethod amberff14sb --qmMethod pm6 --protonation MOE --selection "chain A resname 4DJ resid 701" --np 20 --dir test1 $ENGINE_DIVCON \
+      || { echo "Tutorial 1 failed"; return 1; }
+  else
+    echo "SKIP: qbphenix not available."
+  fi
+
 }
 
 tutorial_2a() {
