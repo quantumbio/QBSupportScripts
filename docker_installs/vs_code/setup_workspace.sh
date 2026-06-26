@@ -19,7 +19,7 @@ fi
 echo "Starting workspace configuration for user: ${GIT_USER}"
 
 # --- 1. Pull Support Libraries ---
-declare -a arr=("zlib" "bzip2" "openssl" "hdf5" "cython" "numpy" "h5py" "lemon" "lmx" "rapidjson" "antlr" "fmt" "icu4c" "log4cplus" "boost" "pion" "saxon-c" "gemmi" "mmdb2" "libccp4" "clipper" )
+declare -a arr=("zlib" "bzip2" "openssl" "hdf5" "cython" "numpy" "h5py" "lemon" "lmx" "rapidjson" "antlr" "cif" "icu4c" "log4cplus" "boost" "pion" "saxon-c" "gemmi" "mmdb2" "libccp4" "clipper" )
 
 for i in "${arr[@]}"
 do
@@ -35,19 +35,6 @@ do
       # Scan the unzipped folder for any concrete shared libraries with version numbers
       # and dynamically link them to the base .so name NetBeans needs.
       if [ -d "${i}" ]; then
-        # Rename the directory if the target folder doesn't exist yet
-        if [ ! -d "antlr4" ]; then
-            mv antlr antlr4
-        fi
-
-        # Step into the correct antlr4 directory to fix lib64
-        cd antlr4
-        if [ -d "lib64" ]; then
-            echo "🗂️ Flattening lib64 into standard lib folder..."
-            mkdir -p lib
-            cp -rp lib64/* lib/
-            rm -rf lib64
-        fi
          echo "Checking ${i} for unzipped shared libraries needing symlink repair..."
          
          # Find files matching *.so.* (like libclipper-core.so.2.0.1)
@@ -65,26 +52,11 @@ do
                # Run the symlink creation inside its matching library directory
                (cd "$so_dir" && ln -sf "$so_filename" "$base_so_name")
             fi
-
-            # 2. NEW: Generate the intermediate SONAME link (e.g., libclipper-minimol.so.2)
-            # This captures just the first digit after the .so
-            major_so_name=$(echo "$so_filename" | sed -E 's/(\.so\.[0-9]+).*/\1/')
-            if [ "$major_so_name" != "$so_filename" ]; then
-               if [ ! -f "${so_dir}/${major_so_name}" ] && [ ! -L "${so_dir}/${major_so_name}" ]; then
-                  echo "🔗 Restoring intermediate SONAME link: ${major_so_name} -> ${so_filename}"
-                  (cd "$so_dir" && ln -sf "$so_filename" "$major_so_name")
-               fi
-            fi
          done
       fi
    fi
 done
 
-pause
-if ! [ -d "eigen" ] ; then
-mv eigeneigen/include/eigen3 eigen
-rm eigeneigen
-fi
 pause
 # --- 2. Configure Git + Dynamic GHP Token Mapping ---
 # Use the dynamic username variable here
@@ -98,7 +70,7 @@ if [ -n "$GITHUB_TOKEN" ]; then
 fi
 
 # --- 3. Pull GitHub Repositories ---
-declare -a projectarr=("FockianIntegrals" "Persistence" "OOBackbone" "ExpDensity" "JPRoothaan" "OBMM" "Solvation" "SpeciesService" "libMovableType" "qbdiff" "QMechanic")
+declare -a projectarr=("FockianIntegrals" "Persistence" "OOBackbone" "JPRoothaan" "OBMM" "ExpDensity" "Solvation" "SpeciesService" "libMovableType" "qbdiff" "QMechanic")
 declare -a projectbranch=("develop" "develop" "develop" "develop" "develop" "develop" "develop" "develop" "develop" "develop" "develop")
 
 ii=0
