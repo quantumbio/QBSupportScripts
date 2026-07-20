@@ -31,6 +31,7 @@ fi
 
 WORKDIR="${PWD}"
 DATE_FMT="+%Y-%m-%d %H:%M:%S"
+PARALLEL=1
 
 # Always declare the array to avoid unbound errors with set -u
 ENGINE_DIVCON_ARGS=""
@@ -81,10 +82,16 @@ fetch() {
 # ---------------------------
 
 tutorial_1() {
-  section "Tutorial #1: XModeScore (commented example, no execution)"
+  section "Tutorial #1: XModeScore executed on PDBid:1OPK"
   safe_cd_root
   clean_make_cd "xmodeScore_4YJR"
-  log "Original qbphenix example was commented out in source; nothing to run."
+  if [[ -x "${QBPHENIX_BIN}" ]]; then
+    "${QBPHENIX_BIN}" --pdbID 4YJR --XModeScore --protomers "-1..1" --mmMethod amberff14sb --qmMethod pm6 --protonation MOE --selection "chain A resname 4DJ resid 701" --np 20 --dir test1 $ENGINE_DIVCON \
+      || { echo "Tutorial 1 failed"; return 1; }
+  else
+    echo "SKIP: qbphenix not available."
+  fi
+
 }
 
 tutorial_2a() {
@@ -144,7 +151,7 @@ tutorial_3() {
     qbbuster --pdbFile 2BSM+H.pdb --sfFile 2BSM.mtz \
       --XModeScore --protomers "-1..1" --protonation skip --makeCIF divcon \
       --mmMethod amberff14sb --qmMethod pm6 --qmWeight 5.0 --ncycles 1 \
-      --resname BSM --engine buster --np 8 -v 2 \
+      --resname BSM --engine buster --np 8 --v 2 \
       || { echo "Tutorial 3 failed"; return 1; }
   else
     echo "SKIP: qbbuster not available."
@@ -164,7 +171,7 @@ tutorial_4() {
     qbbuster --pdbFile 4wq6+H.pdb --sfFile 4wq6.mtz \
       --XModeScore --protomers "-1..1" --exploreFlip --exploreChiral \
       --protonation skip --makeCIF grade --mmMethod amberff14sb \
-      --qmMethod pm6 --engine buster --np 8 -v 2 \
+      --qmMethod pm6 --engine buster --np 8 --v 2 \
       || { echo "Tutorial 4 failed"; return 1; }
   else
     echo "SKIP: qbbuster not available."
@@ -237,7 +244,7 @@ tutorial_7() {
       --mmMethod amberff14sb \
       --qmMethod pm6 \
       --engine buster \
-      --np 8 -v 2 \
+      --np 8 --v 2 \
       || { echo "Tutorial 7 failed"; return 1; }
   else
     echo "SKIP: qbbuster not available."
@@ -294,9 +301,10 @@ Usage: $(basename "$0") [options]
 Default (no options): Run ALL tutorials non-interactively.
 
 Options:
-  -i    Interactive menu mode (choose specific tutorials)
-  -l    List tutorials only
-  -h    Help
+  --np N  Run tutorials in parallel with up to N simultaneous jobs
+  -i      Interactive menu mode (choose specific tutorials)
+  -l      List tutorials only
+  -h      Help
 EOF
 }
 
@@ -317,33 +325,103 @@ dispatch() {
   esac
 }
 
+run_parallel() {
+
+  local max_jobs="$1"
+  shift
+  local tasks=("$@")
+
+  # Export common helper functions
+  export -f safe_cd_root clean_make_cd fetch log section
+
+  # Export tutorial functions
+  for t in "${tasks[@]}"; do
+    export -f "$t"
+  done
+
+  # Export common variables used by tutorials
+  export WORKDIR DATE_FMT QBHOME
+  export DIVCON_BIN QBPHENIX_BIN QBDIVCON_BIN QBBUSTER_BIN
+  export qbExec cloud ENGINE_DIVCON_ARGS
+
+  printf "%s\n" "${tasks[@]}" |
+  xargs -n1 -P "${max_jobs}" -I{} bash -c '
+      echo "Running {}"
+      {} > LOG_{}.txt 2>&1
+  '
+}
+
 main() {
+
   log "BEGIN XModeScore Tutorial Batch (DIVCON=${DIVCON_BIN})"
 
   local mode="all"
-  while getopts ":ilh" opt; do
-    case "${opt}" in
-      i) mode="interactive" ;;
-      l) print_menu; exit 0 ;;
-      h) usage; exit 0 ;;
-      *) usage; exit 1 ;;
+  local selections=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --np)
+        PARALLEL="$2"
+        shift 2
+        ;;
+      -i)
+        mode="interactive"
+        shift
+        ;;
+      -l)
+        print_menu
+        exit 0
+        ;;
+      -h)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "Unknown option: $1"
+        usage
+        exit 1
+        ;;
     esac
   done
-  shift $((OPTIND-1))
 
-  if [[ "${mode}" == "all" ]]; then
-    run_all
-  else
+  local tutorials=(
+    tutorial_1
+    tutorial_2a
+    tutorial_2b
+    tutorial_3
+    tutorial_4
+    tutorial_5
+    tutorial_6
+    tutorial_7
+    tutorial_8
+  )
+
+  if [[ "${mode}" == "interactive" ]]; then
+
     print_menu
     echo
     read -r -p "Select tutorials (ENTER=All): " sels
+
     if [[ -z "${sels}" ]]; then
-      run_all
+      selections=("${tutorials[@]}")
     else
       for s in ${sels}; do
         dispatch "${s}"
       done
+      exit 0
     fi
+
+  else
+    selections=("${tutorials[@]}")
+  fi
+
+  if (( PARALLEL > 1 )); then
+    log "Running tutorials in parallel (np=${PARALLEL})"
+    run_parallel "${PARALLEL}" "${selections[@]}"
+  else
+    for t in "${selections[@]}"; do
+      "$t"
+    done
   fi
 
   log "END XModeScore Tutorial Batch"

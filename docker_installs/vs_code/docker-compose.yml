@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  cpp-ide:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gcc15-copilot-sandbox
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      # Directs 'localhost' traffic within the container out to the CentOS host system
+      - "localhost:host-gateway"
+    environment:
+      - PASSWORD=befrodo
+      - TZ=America/Pennsylvania
+      # Pass your GitHub token into the container's shell environment securely
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+    volumes:
+      - project-code:/workspace
+      - code-server-config:/root/.config
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    restart: unless-stopped
+
+volumes:
+  project-code:
+  code-server-config:
