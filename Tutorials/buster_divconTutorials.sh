@@ -164,7 +164,7 @@ tutorial_5() {
   fetch https://raw.githubusercontent.com/quantumbio/QBSupportScripts/master/Tutorials/data//XModeScore/4at3.mtz
 
   #  flip of the group with C7 atom exploration only 
-  qbbuster --pdbFile ${pdbid}+H.pdb --sfFile $pdbid.mtz --XModeScore --protomers "0" --exploreFLip "C7" --protonation skip --protonateTautomers divcon --makeCIF moe --mmMethod amberff14sb --qmMethod pm6 --qmWeight 3.0 --engine buster --ncycles 1 --nSmallCycles 20 --selection "resname LTI and resid 1839 and chain A" --np 32 --region-radius 3.0 --dir xmodeScore_results || { echo "Tutorial #5 failed"; return 1; }
+  qbbuster --pdbFile ${pdbid}+H.pdb --sfFile $pdbid.mtz --XModeScore --protomers "0" --exploreFLip "C7" --protonation skip --protonateTautomers divcon --makeCIF divcon --mmMethod amberff14sb --qmMethod pm6 --qmWeight 3.0 --engine buster --ncycles 1 --nSmallCycles 15 --selection "resname LTI and resid 1839 and chain A" --np 32 --region-radius 3.0 --dir xmodeScore_results || { echo "Tutorial #5 failed"; return 1; }
 }
 
 tutorial_6() {
