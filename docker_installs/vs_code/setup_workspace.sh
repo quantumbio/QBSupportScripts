@@ -1,10 +1,18 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+# --- 1. Strict Error Trap Settings ---
+# Exit immediately if a command exits with a non-zero status
+set -e
+# Ensure variables are defined before use; stop execution on a pipeline failure
+set -u
+set -o pipefail
 
 function pause(){
-   read -n 1 -p "Press any key to continue..."
+   read -n 1 -s -p "Press any key to continue..."
+   echo ""
 }
 
-GIT_USER="$1"
+GIT_USER="${1:-}"
 
 # If no argument was provided, ask for it interactively
 if [ -z "$GIT_USER" ]; then
@@ -12,78 +20,110 @@ if [ -z "$GIT_USER" ]; then
 fi
 
 if [ -z "$GIT_USER" ]; then
-    echo "❌ Error: Username cannot be blank."
+    echo "❌ Error: Username cannot be blank." >&2
     exit 1
 fi
 
 echo "Starting workspace configuration for user: ${GIT_USER}"
 
-# --- 1. Pull Support Libraries ---
-declare -a arr=("zlib" "bzip2" "openssl" "hdf5" "cython" "numpy" "h5py" "lemon" "lmx" "rapidjson" "antlr" "cif" "icu4c" "log4cplus" "boost" "pion" "saxon-c" "gemmi" "mmdb2" "libccp4" "clipper" )
+# --- 2. Pull Support Libraries ---
+declare -a arr=("zlib" "bzip2" "openssl" "hdf5" "cython" "numpy" "h5py" "lemon" "lmx" "rapidjson" "antlr" "cif" "icu4c" "log4cplus" "boost" "pion" "fmt" "gemmi" "mmdb2" "libccp4" "clipper" )
 
 for i in "${arr[@]}"
 do
-   echo "Fetching support library: $i"
-   if ! [ -d "${i}" ] ; then
-      # Note: 'localhost' automatically works here because of our compose 'extra_hosts' mapping!
-      #wget --no-check-certificate http://ci.quantumbioinc.com:8081/view/darwin/job/${i}-darwin/lastSuccessfulBuild/artifact/${i}/*zip*/${i}.zip
-      wget --no-check-certificate http://ci.quantumbioinc.com:8081/view/rhel-build64/job/${i}/lastSuccessfulBuild/artifact/${i}/*zip*/${i}.zip
-      #wget --no-check-certificate http://roger:plum@localhost:8080/job/${i}/lastSuccessfulBuild/artifact/${i}/*zip*/${i}.zip
-      #curl -o ${i}.zip -0 http://roger:plum@localhost:8080/job/${i}/lastSuccessfulBuild/artifact/${i}/*zip*/${i}.zip
-      unzip -o ${i}.zip
+   if [ -d "${i}" ] ; then
+      echo "ℹ️  Support library [${i}] already exists. Skipping download."
+      continue
+   fi
+
+   echo "🚀 Fetching support library: ${i}"
+   
+   # Download to a targeted zip name to avoid collisions
+   ZIP_FILE="${i}_download.zip"
+   
+   # Using a subshell loop block to capture failures elegantly
+   if ! wget --no-check-certificate -q --show-progress \
+      "http://ci.quantumbioinc.com:8081/view/rhel-build64/job/${i}/lastSuccessfulBuild/artifact/${i}/*zip*/${i}.zip" \
+      -O "${ZIP_FILE}"; then
+         echo "❌ Error: Failed to download archive for ${i}." >&2
+         rm -f "${ZIP_FILE}"
+         exit 1
+   fi
+
+   # Force unzip and instantly clean up the file chunk
+   if ! unzip -q -o "${ZIP_FILE}"; then
+         echo "❌ Error: Failed to extract zip archive for ${i}." >&2
+         rm -f "${ZIP_FILE}"
+         exit 1
+   fi
+   rm -f "${ZIP_FILE}"
+
       # 🛠️ JENKINS SYMLINK REPAIR WORKAROUND 🛠️
-      # Scan the unzipped folder for any concrete shared libraries with version numbers
-      # and dynamically link them to the base .so name NetBeans needs.
       if [ -d "${i}" ]; then
-         echo "Checking ${i} for unzipped shared libraries needing symlink repair..."
+      echo "⚙️  Checking ${i} for unzipped shared libraries needing symlink repair..."
          
-         # Find files matching *.so.* (like libclipper-core.so.2.0.1)
-         find "${i}" -type f -name "*.so.*" | while read -r real_so_file; do
-            # Extract the folder path and the file name
+      # Find files matching *.so.* (like libclipper-core.so.2.0.1) Safely handles spaces
+      find "${i}" -type f -name "*.so.*" -print0 | while read -r -d '' real_so_file; do
             so_dir=$(dirname "$real_so_file")
             so_filename=$(basename "$real_so_file")
             
-            # Isolate the base name (e.g., cut libclipper-core.so.2.0.1 down to libclipper-core.so)
+         # Isolate the base name (e.g., cuts down to libclipper-core.so)
             base_so_name=$(echo "$so_filename" | sed -E 's/(\.so)(\.[0-9]+)+$/\1/')
             
             # Check if the clean base .so file name is missing in that directory
             if [ ! -f "${so_dir}/${base_so_name}" ] && [ ! -L "${so_dir}/${base_so_name}" ]; then
                echo "🔗 Restoring symlink: ${base_so_name} -> ${so_filename}"
-               # Run the symlink creation inside its matching library directory
+            # Run the symlink creation inside its matching library directory safely
                (cd "$so_dir" && ln -sf "$so_filename" "$base_so_name")
             fi
          done
       fi
-   fi
 done
 
 pause
-# --- 2. Configure Git + Dynamic GHP Token Mapping ---
-# Use the dynamic username variable here
+
+# --- 3. Configure Git + Dynamic GHP Token Mapping ---
 git config --global user.name "${GIT_USER}"
 
-# Automatically intercept GitHub authentication headers using your ghp_ variable
-if [ -n "$GITHUB_TOKEN" ]; then
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    echo "🔒 Applying secure GitHub credential intercept maps..."
     git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
-    # If your original URL format includes ${GIT_USER}@, explicitly match it:
     git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/quantumbio/".insteadOf "https://${GIT_USER}@github.com/quantumbio/"
 fi
 
-# --- 3. Pull GitHub Repositories ---
-declare -a projectarr=("FockianIntegrals" "Persistence" "OOBackbone" "JPRoothaan" "OBMM" "ExpDensity" "Solvation" "SpeciesService" "libMovableType" "qbdiff" "QMechanic")
-declare -a projectbranch=("develop" "develop" "develop" "develop" "develop" "develop" "develop" "develop" "develop" "develop" "develop")
+# --- 4. Pull GitHub Repositories (Safe Multi-Value Array Map) ---
+# We bundle the project and its branch explicitly inside a single string loop.
+# Format: "ProjectName:BranchName"
+declare -a projects=(
+    "FockianIntegrals:develop"
+    "Persistence:develop"
+    "OOBackbone:develop"
+    "JPRoothaan:develop"
+    "OBMM:develop"
+    "ExpDensity:develop"
+    "Solvation:develop"
+    "SpeciesService:develop"
+    "libMovableType:develop"
+    "qbdiff:develop"
+    "QMechanic:develop"
+)
 
-ii=0
-for i in "${projectarr[@]}"
+for project_entry in "${projects[@]}"
 do
-   echo "Cloning repo: $i [Branch: ${projectbranch[$ii]}]"
-   if ! [ -d "${i}" ] ; then
-      git clone -b ${projectbranch[$ii]} https://${GIT_USER}@github.com/quantumbio/${i}.git ${i}
-      #cd ${i}
-      #git reset --hard $(git rev-list -1 $(git rev-parse --until=2024-04-11) ${projectbranch[$ii]})
-      #cd ..
+   # Parse the project name and branch using bash pattern matching
+   repo="${project_entry%%:*}"
+   branch="${project_entry#*:}"
+
+   if [ -d "${repo}" ]; then
+      echo "ℹ️  Repository [${repo}] already cloned. Skipping."
+      continue
    fi
-   ii=$((ii+1))
+
+   echo "📥 Cloning repo: ${repo} [Branch: ${branch}]"
+   if ! git clone -b "${branch}" "https://${GIT_USER}@github.com/quantumbio/${repo}.git" "${repo}"; then
+      echo "❌ Error: Failed to clone repository ${repo}." >&2
+      exit 1
+   fi
 done
 
-echo "✅ Workspace initialization complete!"
+echo "✅ Workspace initialization completely successful and verified!"
