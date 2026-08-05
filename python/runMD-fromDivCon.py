@@ -65,11 +65,13 @@ parser = argparse.ArgumentParser(description="Run OpenMM MD simulation with opti
 parser.add_argument("prmtop", help="Path to AMBER prmtop file")
 parser.add_argument("inpcrd", help="Path to AMBER inpcrd file")
 parser.add_argument("--test-run", action="store_true", help="Run a short test simulation")
+parser.add_argument("--medium-run", action="store_true", help="Run a medium simulation")
 
 args = parser.parse_args()
 prmtopFile = args.prmtop
 inpcrdFile = args.inpcrd
 test_run = args.test_run
+medium_run = args.medium_run
 
 if test_run:
     minimize_nsteps   = 500  # ~quick minimization
@@ -78,6 +80,13 @@ if test_run:
     production_nsteps = 5000  # 10 ps at 0.002 ps timestep
     preport_interval  = 100
     print("Test run mode enabled: using reduced step counts for quick validation.")
+elif medium_run:
+    minimize_nsteps   = 50000
+    nvt_equil_nsteps  = 50000
+    ntp_equil_nsteps  = 50000
+    production_nsteps = 200000
+    preport_interval  = 10000
+    print("Medium run mode enabled: using intermediate step counts.")
 else:
     minimize_nsteps   = round(5000 / 10)
     nvt_equil_nsteps  = round(100000 / 10)
