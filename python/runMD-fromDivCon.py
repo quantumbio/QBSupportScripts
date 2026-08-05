@@ -76,12 +76,14 @@ if test_run:
     nvt_equil_nsteps  = 1000
     ntp_equil_nsteps  = 1000
     production_nsteps = 5000  # 10 ps at 0.002 ps timestep
+    preport_interval  = 100
     print("Test run mode enabled: using reduced step counts for quick validation.")
 else:
     minimize_nsteps   = round(5000 / 10)
     nvt_equil_nsteps  = round(100000 / 10)
     ntp_equil_nsteps  = round(100000 / 10)
     production_nsteps = 25000000  # 50 ns for 0.002 ps timestep
+    preport_interval  = 25000
 
 # Load the Amber topology and coordinate files
 prmtop = pmd.load_file(prmtopFile, inpcrdFile)
@@ -522,12 +524,11 @@ print(f"Elapsed time: {elapsed_time:.6f} seconds")
 # Save final equilibrated positions
 save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
-report_interval = min(production_nsteps,25000)
 simulation.context.setVelocitiesToTemperature(300*unit.kelvin)
-#simulation.reporters.append(app.PDBReporter('output.pdb', report_interval))
-simulation.reporters.append(app.StateDataReporter(sys.stdout, report_interval, step=True, potentialEnergy=True, temperature=True))
-simulation.reporters.append(app.StateDataReporter('energies.csv', report_interval, step=True, potentialEnergy=True, temperature=True))
-simulation.reporters.append(app.DCDReporter('output.dcd', report_interval))
+#simulation.reporters.append(app.PDBReporter('output.pdb', preport_interval))
+simulation.reporters.append(app.StateDataReporter(sys.stdout, preport_interval, step=True, potentialEnergy=True, temperature=True))
+simulation.reporters.append(app.StateDataReporter('energies.csv', preport_interval, step=True, potentialEnergy=True, temperature=True))
+simulation.reporters.append(app.DCDReporter('output.dcd', preport_interval))
 print (f'Running Production NPT Simulation - {production_nsteps * 0.002} ps ....', flush=True)
 start_time = time.time()
 simulation.step(production_nsteps)
