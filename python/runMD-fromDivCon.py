@@ -66,12 +66,14 @@ parser.add_argument("prmtop", help="Path to AMBER prmtop file")
 parser.add_argument("inpcrd", help="Path to AMBER inpcrd file")
 parser.add_argument("--test-run", action="store_true", help="Run a short test simulation")
 parser.add_argument("--medium-run", action="store_true", help="Run a medium simulation")
+parser.add_argument("--skip-waterbox", action="store_true", help="Skip adding the water box")
 
 args = parser.parse_args()
 prmtopFile = args.prmtop
 inpcrdFile = args.inpcrd
 test_run = args.test_run
 medium_run = args.medium_run
+skip_waterbox = args.skip_waterbox
 
 if test_run:
     minimize_nsteps   = 500  # ~quick minimization
@@ -112,7 +114,10 @@ for residue in prmtop.residues:
                 h2.bonds.remove(bond)
                 break  # Exit loop after removing the bond
 
-prmtop.save('initial.pdb')
+#prmtop.save('initial.pdb')
+from openmm.app import PDBFile
+with open('initial.pdb', 'w') as f:
+    PDBFile.writeFile(prmtop.topology, prmtop.positions, f)
 
 # Initialize for unique residue names
 alphabet = string.ascii_uppercase  # 'A', 'B', 'C', ..., 'Z'
@@ -355,8 +360,9 @@ box_size_z = (max_z - min_z) + 2 * padding.value_in_unit(unit.nanometers)
 # Create box vector for solvent addition
 box_vector = mm.Vec3(box_size_x, box_size_y, box_size_z)
 
-# Add a water box and neutralize the system with counterions
-modeller.addSolvent(forcefield, model='tip3p', boxSize=box_vector, ionicStrength=0.15*unit.molar)
+if not skip_waterbox:
+    # Add a water box and neutralize the system with counterions
+    modeller.addSolvent(forcefield, model='tip3p', boxSize=box_vector, ionicStrength=0.15*unit.molar)
 
 # Now create the system again after modifying the topology
 system = forcefield.createSystem(
@@ -429,6 +435,7 @@ for i in range(0, minimize_nsteps, 500):
     simulation.minimizeEnergy(maxIterations=500)
     state = simulation.context.getState(getEnergy=True)
     energy = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+    print(f"Step {i} Current Potential Energy: {energy:.2f} kJ/mol")
     if abs(prev_energy - energy) < tolerance:
         print(f'Converged (tolerance: {tolerance:.2f} kJ/mol) at step: {i}')
         break
@@ -556,6 +563,18 @@ positions = simulation.context.getState(getPositions=True).getPositions()   # up
 structure = pmd.openmm.topsystem.load_topology(simulation.topology, system=tmpSystem, xyz=positions)
 structure.save("output.prmtop", format="amber") 
 structure.save("output.inpcrd", format="rst7") 
+
+summary_state = simulation.context.getState(getEnergy=True, enforcePeriodicBox=True)
+summary_values = {
+    "step": simulation.currentStep,
+    "potential_energy_kj_per_mol": summary_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole),
+    "kinetic_energy_kj_per_mol": summary_state.getKineticEnergy().value_in_unit(unit.kilojoule_per_mole),
+    "temperature_k": simulation.integrator.getTemperature().value_in_unit(unit.kelvin),
+}
+
+print("Simulation summary:")
+for label, value in summary_values.items():
+    print(f"  {label}: {value}")
 
 sys.exit()
 
