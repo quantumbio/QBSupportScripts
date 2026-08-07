@@ -544,21 +544,21 @@ def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_st
         print(f"Maximum equilibration steps {max_steps} reached without full convergence.")
 
 
-def compute_pressure_bar(simulation, barostat=None):
-    """Return pressure in bar.
+def compute_target_pressure_bar(barostat=None):
+    """Return barostat target pressure in bar."""
+    if barostat is None:
+        return float("nan")
+    return barostat.getDefaultPressure().value_in_unit(unit.bar)
 
-    Prefer instantaneous pressure if available; otherwise fall back to barostat target pressure.
-    """
+
+def compute_instantaneous_pressure_bar(simulation):
+    """Return instantaneous pressure in bar when available, otherwise NaN."""
     if not hasattr(mm.MonteCarloBarostat, "computeCurrentPressure"):
-        if barostat is not None:
-            return barostat.getDefaultPressure().value_in_unit(unit.bar)
         return float("nan")
     try:
         pressure = mm.MonteCarloBarostat.computeCurrentPressure(simulation.context)
         return pressure.value_in_unit(unit.bar)
     except Exception:
-        if barostat is not None:
-            return barostat.getDefaultPressure().value_in_unit(unit.bar)
         return float("nan")
 
 
@@ -674,9 +674,16 @@ print (f'Running Production NPT Simulation - {production_nsteps * 0.002} ps ....
 production_reference_state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
 production_reference_positions = production_reference_state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
 production_dof = compute_degrees_of_freedom(system)
+instantaneous_pressure_supported = hasattr(mm.MonteCarloBarostat, "computeCurrentPressure")
+
+if not instantaneous_pressure_supported:
+    print(
+        "Note: instantaneous pressure not supported on this OpenMM build; reporting NaN for instantaneous_pressure_bar.",
+        flush=True,
+    )
 
 print(
-    "Production metrics (step, pe_kj_per_mol, ke_kj_per_mol, temp_k, volume_nm3, density_g_per_ml, pressure_bar, rmsd_nm, rg_nm, wall_time_s):",
+    "Production metrics (step, pe_kj_per_mol, ke_kj_per_mol, temp_k, volume_nm3, density_g_per_ml, target_pressure_bar, instantaneous_pressure_bar, rmsd_nm, rg_nm, wall_time_s):",
     flush=True,
 )
 start_time = time.time()
@@ -690,7 +697,9 @@ with open("production_metrics.csv", "w", newline="") as metrics_csv:
         "temperature_k",
         "volume_nm3",
         "density_g_per_ml",
-        "pressure_bar",
+        "target_pressure_bar",
+        "instantaneous_pressure_bar",
+        "pressure_source",
         "rmsd_nm",
         "rg_nm",
         "wall_time_s",
@@ -709,7 +718,9 @@ with open("production_metrics.csv", "w", newline="") as metrics_csv:
             temp_k = compute_temperature_k(ke_quantity, production_dof)
             volume_nm3 = report_state.getPeriodicBoxVolume().value_in_unit(unit.nanometer**3)
             density_g_per_ml = compute_density_g_per_ml(simulation, report_state)
-            pressure_bar = compute_pressure_bar(simulation, barostat=barostat)
+            target_pressure_bar = compute_target_pressure_bar(barostat)
+            instantaneous_pressure_bar = compute_instantaneous_pressure_bar(simulation)
+            pressure_source = "instantaneous" if not np.isnan(instantaneous_pressure_bar) else "target_only"
             rmsd_nm, rg_nm = compute_structural_metrics(
                 simulation,
                 production_reference_positions,
@@ -724,14 +735,16 @@ with open("production_metrics.csv", "w", newline="") as metrics_csv:
                 temp_k,
                 volume_nm3,
                 density_g_per_ml,
-                pressure_bar,
+                target_pressure_bar,
+                instantaneous_pressure_bar,
+                pressure_source,
                 rmsd_nm,
                 rg_nm,
                 wall_time_s,
             ])
 
             print(
-                f"  {simulation.currentStep}, {pe_kj_per_mol:.6f}, {ke_kj_per_mol:.6f}, {temp_k:.3f}, {volume_nm3:.6f}, {density_g_per_ml:.6f}, {pressure_bar:.6f}, {rmsd_nm:.6f}, {rg_nm:.6f}, {wall_time_s:.3f}",
+                f"  {simulation.currentStep}, {pe_kj_per_mol:.6f}, {ke_kj_per_mol:.6f}, {temp_k:.3f}, {volume_nm3:.6f}, {density_g_per_ml:.6f}, {target_pressure_bar:.6f}, {instantaneous_pressure_bar:.6f}, {rmsd_nm:.6f}, {rg_nm:.6f}, {wall_time_s:.3f}",
                 flush=True,
             )
         except Exception as exc:
@@ -764,7 +777,8 @@ summary_values = {
     "temperature_k": compute_temperature_k(summary_state.getKineticEnergy(), production_dof),
     "volume_nm3": summary_state.getPeriodicBoxVolume().value_in_unit(unit.nanometer**3),
     "density_g_per_ml": compute_density_g_per_ml(simulation, summary_state),
-    "pressure_bar": compute_pressure_bar(simulation, barostat=barostat),
+    "target_pressure_bar": compute_target_pressure_bar(barostat),
+    "instantaneous_pressure_bar": compute_instantaneous_pressure_bar(simulation),
     "rmsd_nm": compute_structural_metrics(simulation, production_reference_positions, equilibration_atom_indices)[0],
     "rg_nm": compute_structural_metrics(simulation, production_reference_positions, equilibration_atom_indices)[1],
     "wall_time_s": elapsed_time,
