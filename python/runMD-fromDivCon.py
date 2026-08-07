@@ -530,7 +530,7 @@ with open("nvt_equilibrated.xml", "w") as f:
     
 # NPT Equilibration with RMSD monitoring
 print('Equilibrating (NPT) with RMSD monitoring...', flush=True)
-system.addForce(mm.MonteCarloBarostat(1 * unit.atmospheres, 298 * unit.kelvin, 25))
+system.addForce(mm.MonteCarloBarostat(1 * unit.bar, 298 * unit.kelvin, 25))
 simulation.context.reinitialize(preserveState=True)
 start_time = time.time()
 monitor_rmsd_equilibration(simulation, "nvt_equilibrated.xml", 0.05, ntp_equil_nsteps)
