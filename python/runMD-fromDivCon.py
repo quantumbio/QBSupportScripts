@@ -57,6 +57,7 @@ import string
 import importlib.resources
 import mdtraj as md
 import time
+import csv
 
 import argparse
 
@@ -542,6 +543,89 @@ def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_st
     if not converged:
         print(f"Maximum equilibration steps {max_steps} reached without full convergence.")
 
+
+def compute_pressure_bar(simulation, barostat=None):
+    """Return pressure in bar.
+
+    Prefer instantaneous pressure if available; otherwise fall back to barostat target pressure.
+    """
+    if not hasattr(mm.MonteCarloBarostat, "computeCurrentPressure"):
+        if barostat is not None:
+            return barostat.getDefaultPressure().value_in_unit(unit.bar)
+        return float("nan")
+    try:
+        pressure = mm.MonteCarloBarostat.computeCurrentPressure(simulation.context)
+        return pressure.value_in_unit(unit.bar)
+    except Exception:
+        if barostat is not None:
+            return barostat.getDefaultPressure().value_in_unit(unit.bar)
+        return float("nan")
+
+
+def compute_structural_metrics(simulation, reference_positions_nm, atom_indices):
+    """Compute aligned RMSD and radius of gyration (nm) on selected atoms."""
+    state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
+    cur_positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
+
+    idx = np.asarray(atom_indices, dtype=np.int64)
+    ref_subset = np.asarray(reference_positions_nm)[idx]
+    cur_subset = np.asarray(cur_positions)[idx]
+
+    # Center both subsets.
+    ref_centered = ref_subset - ref_subset.mean(axis=0)
+    cur_centered = cur_subset - cur_subset.mean(axis=0)
+
+    # Kabsch alignment: rotate current subset onto reference subset.
+    covariance = cur_centered.T @ ref_centered
+    u_mat, _, v_t = np.linalg.svd(covariance)
+    rotation = v_t.T @ u_mat.T
+    if np.linalg.det(rotation) < 0:
+        v_t[-1, :] *= -1
+        rotation = v_t.T @ u_mat.T
+
+    cur_aligned = cur_centered @ rotation
+    diff = cur_aligned - ref_centered
+    rmsd_nm = float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
+
+    # Radius of gyration from current coordinates (translation invariant).
+    rg_nm = float(np.sqrt(np.mean(np.sum(cur_centered * cur_centered, axis=1))))
+    return rmsd_nm, rg_nm
+
+
+def compute_degrees_of_freedom(system):
+    """Compute mechanical degrees of freedom for instantaneous temperature estimates."""
+    dof = 0
+    for i in range(system.getNumParticles()):
+        if system.getParticleMass(i) > 0 * unit.dalton:
+            dof += 3
+
+    dof -= system.getNumConstraints()
+
+    for i in range(system.getNumForces()):
+        if isinstance(system.getForce(i), mm.CMMotionRemover):
+            dof -= 3
+            break
+
+    return max(dof, 1)
+
+
+def compute_density_g_per_ml(simulation, state):
+    """Compute density from topology mass and periodic volume."""
+    total_mass = 0.0 * unit.dalton
+    for atom in simulation.topology.atoms():
+        if atom.element is not None:
+            total_mass += atom.element.mass
+
+    # Atom masses are molar masses; convert to absolute mass via Avogadro's constant.
+    absolute_mass = total_mass / unit.AVOGADRO_CONSTANT_NA
+    density = absolute_mass / state.getPeriodicBoxVolume()
+    return density.value_in_unit(unit.gram / unit.milliliter)
+
+
+def compute_temperature_k(kinetic_energy, dof):
+    """Compute instantaneous temperature from kinetic energy and DOF."""
+    return (2 * kinetic_energy / (dof * unit.MOLAR_GAS_CONSTANT_R)).value_in_unit(unit.kelvin)
+
 # NVT Equilibration with RMSD monitoring
 print('Equilibrating (NVT) with RMSD monitoring...', flush=True)
 start_time = time.time()
@@ -557,7 +641,8 @@ with open("nvt_equilibrated.xml", "w") as f:
     
 # NPT Equilibration with RMSD monitoring
 print('Equilibrating (NPT) with RMSD monitoring...', flush=True)
-system.addForce(mm.MonteCarloBarostat(1 * unit.bar, 298 * unit.kelvin, 25))
+barostat = mm.MonteCarloBarostat(1 * unit.bar, 298 * unit.kelvin, 25)
+system.addForce(barostat)
 simulation.context.reinitialize(preserveState=True)
 start_time = time.time()
 monitor_rmsd_equilibration(simulation, "nvt_equilibrated.xml", 0.05, ntp_equil_nsteps, atom_indices=equilibration_atom_indices)
@@ -571,12 +656,90 @@ simulation.context.setVelocitiesToTemperature(298*unit.kelvin)
 # Reset step count so production logs/reporters are production-relative.
 simulation.currentStep = 0
 #simulation.reporters.append(app.PDBReporter('output.pdb', preport_interval))
-simulation.reporters.append(app.StateDataReporter(sys.stdout, preport_interval, step=True, potentialEnergy=True, temperature=True))
-simulation.reporters.append(app.StateDataReporter('energies.csv', preport_interval, step=True, potentialEnergy=True, temperature=True))
+simulation.reporters.append(app.StateDataReporter(
+    'energies.csv',
+    preport_interval,
+    step=True,
+    potentialEnergy=True,
+    kineticEnergy=True,
+    temperature=True,
+    volume=True,
+    density=True,
+    elapsedTime=True,
+))
 simulation.reporters.append(app.DCDReporter('output.dcd', preport_interval))
 print (f'Running Production NPT Simulation - {production_nsteps * 0.002} ps ....', flush=True)
+
+# Capture a production reference to report meaningful structural drift.
+production_reference_state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
+production_reference_positions = production_reference_state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
+production_dof = compute_degrees_of_freedom(system)
+
+print(
+    "Production metrics (step, pe_kj_per_mol, ke_kj_per_mol, temp_k, volume_nm3, density_g_per_ml, pressure_bar, rmsd_nm, rg_nm, wall_time_s):",
+    flush=True,
+)
 start_time = time.time()
-simulation.step(production_nsteps)
+steps_remaining = production_nsteps
+with open("production_metrics.csv", "w", newline="") as metrics_csv:
+    writer = csv.writer(metrics_csv)
+    writer.writerow([
+        "step",
+        "potential_energy_kj_per_mol",
+        "kinetic_energy_kj_per_mol",
+        "temperature_k",
+        "volume_nm3",
+        "density_g_per_ml",
+        "pressure_bar",
+        "rmsd_nm",
+        "rg_nm",
+        "wall_time_s",
+    ])
+
+    while steps_remaining > 0:
+        try:
+            chunk = min(preport_interval, steps_remaining)
+            simulation.step(chunk)
+            steps_remaining -= chunk
+
+            report_state = simulation.context.getState(getEnergy=True, enforcePeriodicBox=True)
+            pe_kj_per_mol = report_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+            ke_quantity = report_state.getKineticEnergy()
+            ke_kj_per_mol = ke_quantity.value_in_unit(unit.kilojoule_per_mole)
+            temp_k = compute_temperature_k(ke_quantity, production_dof)
+            volume_nm3 = report_state.getPeriodicBoxVolume().value_in_unit(unit.nanometer**3)
+            density_g_per_ml = compute_density_g_per_ml(simulation, report_state)
+            pressure_bar = compute_pressure_bar(simulation, barostat=barostat)
+            rmsd_nm, rg_nm = compute_structural_metrics(
+                simulation,
+                production_reference_positions,
+                equilibration_atom_indices,
+            )
+            wall_time_s = time.time() - start_time
+
+            writer.writerow([
+                simulation.currentStep,
+                pe_kj_per_mol,
+                ke_kj_per_mol,
+                temp_k,
+                volume_nm3,
+                density_g_per_ml,
+                pressure_bar,
+                rmsd_nm,
+                rg_nm,
+                wall_time_s,
+            ])
+
+            print(
+                f"  {simulation.currentStep}, {pe_kj_per_mol:.6f}, {ke_kj_per_mol:.6f}, {temp_k:.3f}, {volume_nm3:.6f}, {density_g_per_ml:.6f}, {pressure_bar:.6f}, {rmsd_nm:.6f}, {rg_nm:.6f}, {wall_time_s:.3f}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"ERROR during production metrics at step {simulation.currentStep}: {exc}",
+                flush=True,
+            )
+            raise
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
@@ -598,7 +761,13 @@ summary_values = {
     "step": simulation.currentStep,
     "potential_energy_kj_per_mol": summary_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole),
     "kinetic_energy_kj_per_mol": summary_state.getKineticEnergy().value_in_unit(unit.kilojoule_per_mole),
-    "temperature_k": simulation.integrator.getTemperature().value_in_unit(unit.kelvin),
+    "temperature_k": compute_temperature_k(summary_state.getKineticEnergy(), production_dof),
+    "volume_nm3": summary_state.getPeriodicBoxVolume().value_in_unit(unit.nanometer**3),
+    "density_g_per_ml": compute_density_g_per_ml(simulation, summary_state),
+    "pressure_bar": compute_pressure_bar(simulation, barostat=barostat),
+    "rmsd_nm": compute_structural_metrics(simulation, production_reference_positions, equilibration_atom_indices)[0],
+    "rg_nm": compute_structural_metrics(simulation, production_reference_positions, equilibration_atom_indices)[1],
+    "wall_time_s": elapsed_time,
 }
 
 print("Simulation summary:")
