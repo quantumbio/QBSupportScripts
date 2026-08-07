@@ -238,7 +238,24 @@ def seq_and_ca(traj: md.Trajectory)->Tuple[str,List[int]]:
     return "".join(seq), ca
 
 def compute_rmsf(traj: md.Trajectory, idx: np.ndarray)->np.ndarray:
-    return md.rmsf(traj, reference=traj, atom_indices=idx)*CONFIG["rmsf_scale"]  # nm→Å
+    # md.rmsf() centers the target trajectory in place.  Always operate on a
+    # private copy so one analysis cannot silently alter coordinates used by
+    # later analyses (PCA, DCCM, clustering, etc.).
+    work = traj[:]  # Trajectory slicing copies coordinate arrays by default
+    return md.rmsf(work, reference=work, atom_indices=idx)*CONFIG["rmsf_scale"]  # nm→Å
+
+def aligned_trajectory_copy(target: md.Trajectory, reference: md.Trajectory,
+                            target_indices: np.ndarray, ref_indices: np.ndarray,
+                            frame: int = 0) -> md.Trajectory:
+    """Return a copy of *target* rigid-body aligned to one common reference frame."""
+    aligned = target[:]  # never mutate the caller's trajectory
+    aligned.superpose(
+        reference,
+        frame=frame,
+        atom_indices=np.asarray(target_indices, dtype=int),
+        ref_atom_indices=np.asarray(ref_indices, dtype=int)
+    )
+    return aligned
 
 def paired_profile_stats(values1: np.ndarray, values2: np.ndarray) -> dict:
     """Return paired similarity metrics for two equally sized structural profiles."""
@@ -495,8 +512,21 @@ def main()->None:
             if a!="-" and b!="-": m1.append(caL1[i1]); m2.append(caL2[i2])
             if a!="-": i1+=1
             if b!="-": i2+=1
-        prot2.superpose(prot1, atom_indices=np.array(m2), ref_atom_indices=np.array(m1))
-        rmsf1_aln=compute_rmsf(prot1,np.array(m1)); rmsf2_aln=compute_rmsf(prot2,np.array(m2))
+
+        m1_arr = np.asarray(m1, dtype=int)
+        m2_arr = np.asarray(m2, dtype=int)
+
+        # Alignment-dependent analyses must be symmetric.  Previously prot2 was
+        # superposed in place while prot1 was left in its original orientation,
+        # which contaminated RMSF, PCA and DCCM comparisons.  Build independent
+        # copies and align BOTH trajectories to the same reference: trajectory 1,
+        # frame 0, using the sequence-matched Cα atoms.  The raw prot1/prot2
+        # trajectories remain untouched for all pre-existing non-aligned analyses.
+        aligned_prot1 = aligned_trajectory_copy(prot1, prot1, m1_arr, m1_arr, frame=0)
+        aligned_prot2 = aligned_trajectory_copy(prot2, prot1, m2_arr, m1_arr, frame=0)
+
+        rmsf1_aln=compute_rmsf(aligned_prot1,m1_arr)
+        rmsf2_aln=compute_rmsf(aligned_prot2,m2_arr)
         ks_aln=ks_2samp(rmsf1_aln,rmsf2_aln)
         logging.info("ALIGNED RMSF | %s %.3f±%.3f | %s %.3f±%.3f | KS‑p %.3e",
                      args.label1,rmsf1_aln.mean(),rmsf1_aln.std(),
@@ -665,8 +695,6 @@ def main()->None:
         # The existing RMSD intentionally remains unchanged.  This additional RMSD
         # uses the common aligned-Cα set and frame 0 of trajectory 1 as the same
         # structural reference for BOTH trajectories.
-        m1_arr = np.asarray(m1, dtype=int)
-        m2_arr = np.asarray(m2, dtype=int)
         rmsd_common1 = md.rmsd(
             prot1, prot1, 0, atom_indices=m1_arr, ref_atom_indices=m1_arr
         ) * 10.0
@@ -861,9 +889,12 @@ def main()->None:
         }
 
         # ───────── PCA (aligned Cα only) ─────────
+        # Use the same symmetrically common-reference-aligned copies as the
+        # aligned RMSF analysis.  This removes rigid-body translation/rotation
+        # from BOTH trajectories without modifying the original trajectories.
         n_ca_common = len(m1)
-        coords1 = prot1.atom_slice(np.array(m1)).xyz.reshape(prot1.n_frames, n_ca_common * 3)
-        coords2 = prot2.atom_slice(np.array(m2)).xyz.reshape(prot2.n_frames, n_ca_common * 3)
+        coords1 = aligned_prot1.xyz[:, m1_arr, :].reshape(aligned_prot1.n_frames, n_ca_common * 3)
+        coords2 = aligned_prot2.xyz[:, m2_arr, :].reshape(aligned_prot2.n_frames, n_ca_common * 3)
         
         X_pca = np.vstack([coords1, coords2])  # (n_frames1 + n_frames2) × (n_ca_common*3)
         pca = PCA(n_components=2, random_state=0).fit(X_pca)
@@ -916,10 +947,13 @@ def main()->None:
         
         def occupancy_by_label(hb_frame_list, topology):
             """
-            Compute per-bond occupancy using residue labels instead of raw atom indices.
-        
-            Returns:
-                dict: (donor_label, acceptor_label) → occupancy fraction
+            Compute residue-pair H-bond occupancy as the fraction of frames in
+            which at least one atom-level H-bond connects the two residues.
+
+            Multiple atom-level H-bonds between the same residue pair in a single
+            frame count only once, so every returned occupancy is in [0, 1].
+            Residue labels are sorted deliberately: this is an undirected residue
+            interaction rather than an atom-level donor→acceptor identity.
             """
             if not hb_frame_list:
                 return {}
@@ -928,12 +962,15 @@ def main()->None:
             n_frames = len(hb_frame_list)
         
             for frame_array in hb_frame_list:
+                frame_pairs = set()
                 for bond in frame_array:
                     donor = int(bond[0])
                     acceptor = int(bond[-1])
                     d_lbl = res_label(topology.atom(donor))
                     a_lbl = res_label(topology.atom(acceptor))
-                    key = tuple(sorted((d_lbl, a_lbl)))
+                    frame_pairs.add(tuple(sorted((d_lbl, a_lbl))))
+
+                for key in frame_pairs:
                     counts[key] = counts.get(key, 0) + 1
         
             return {k: v / n_frames for k, v in counts.items()}
@@ -965,11 +1002,11 @@ def main()->None:
         sorted_persistent = sorted(persistent.items(), key=lambda x: -max(x[1]))
         
         print(f"\nTop persistent hydrogen bonds (≥{hb_threshold_pct}% occupancy in either trajectory):")
-        print(f"{'Donor':<18} → {'Acceptor':<18} | {args.label1:^18} | {args.label2:^18}")
+        print(f"{'Residue 1':<18} ↔ {'Residue 2':<18} | {args.label1:^18} | {args.label2:^18}")
         print("-" * 70)
         
         for (don, acc), (f1, f2) in sorted_persistent[:top_n]:
-            print(f"{don:<18} → {acc:<18} | {f1:>8.2f}         | {f2:>8.2f}")
+            print(f"{don:<18} ↔ {acc:<18} | {f1:>8.2f}         | {f2:>8.2f}")
         
         # Summary stats
         n1 = sum(1 for v in persistent.values() if v[0] >= CONFIG["hbond_threshold"])
@@ -989,11 +1026,17 @@ def main()->None:
             "n2": n2,
             "shared": shared,
             "exclusive1": only1,
-            "exclusive2": only2
+            "exclusive2": only2,
+            "occupancy_definition": "fraction of frames with >=1 atom-level H-bond for the residue pair"
         }
         
         summary["top_hbonds"] = [
             {
+                # residue1/residue2 are the scientifically correct labels for this
+                # order-independent residue-pair occupancy.  donor/acceptor are
+                # retained for backwards compatibility with existing JSON consumers.
+                "residue1": don,
+                "residue2": acc,
                 "donor": don,
                 "acceptor": acc,
                 args.label1: float(f1),
@@ -1093,9 +1136,10 @@ def main()->None:
                 results.append((label1, label2, corr_val))
             return results
         
-        # Compute DCCMs using aligned Cα atoms
-        dccm1 = compute_dccm(prot1, np.array(m1))
-        dccm2 = compute_dccm(prot2, np.array(m2))
+        # Compute DCCMs using the same symmetrically common-reference-aligned
+        # trajectory copies used for aligned RMSF and PCA.
+        dccm1 = compute_dccm(aligned_prot1, m1_arr)
+        dccm2 = compute_dccm(aligned_prot2, m2_arr)
         
         # Plot DCCM matrices
         for mat, label in zip([dccm1, dccm2], [args.label1, args.label2]):
@@ -1369,15 +1413,19 @@ def main()->None:
             
             def collect_lig_hbonds(traj, ligand_atom_ids_in_slice):
                 """
-                Count H‑bonds where exactly one atom is in `ligand_atom_ids_in_slice`
-                (indices refer to *traj*).  Returns { (don_label, acc_label) : fraction }.
-                The donor/acceptor labels are sorted so direction does not create duplicates.
+                Return ligand↔protein residue-pair H-bond occupancy fractions.
+
+                A residue pair is counted at most once per frame even when several
+                atom-level H-bonds connect the same ligand/protein residue pair.
+                This keeps persistence values in the physically meaningful [0, 1]
+                range and matches the global residue-pair H-bond analysis.
                 """
                 lig_set   = set(ligand_atom_ids_in_slice)
                 n_frames  = len(traj)
                 counts    = {}
             
                 for frame_hb in md.wernet_nilsson(traj):
+                    frame_pairs = set()
                     for hbond in frame_hb:
                         don, acc = map(int, hbond[[0, -1]])
                         in_lig = (don in lig_set, acc in lig_set)
@@ -1385,8 +1433,10 @@ def main()->None:
                         if in_lig.count(True) == 1:          # XOR → one ligand, one protein
                             don_lbl = res_label(traj.topology.atom(don))
                             acc_lbl = res_label(traj.topology.atom(acc))
-                            key     = tuple(sorted((don_lbl, acc_lbl)))  # order‑independent
-                            counts[key] = counts.get(key, 0) + 1
+                            frame_pairs.add(tuple(sorted((don_lbl, acc_lbl))))
+
+                    for key in frame_pairs:
+                        counts[key] = counts.get(key, 0) + 1
             
                 return {k: v / n_frames for k, v in counts.items()}
             # ----------------------------------------------------------------------
@@ -1421,6 +1471,10 @@ def main()->None:
                 # Store in JSON summary -------------------------------------------
                 summary["ligand"]["hbond_persistence"] = [
                     {
+                        "residue1": resA,
+                        "residue2": resB,
+                        # Retain the legacy keys so existing JSON consumers do not
+                        # break; these residue-level pairs are intentionally undirected.
                         "donor": resA,
                         "acceptor": resB,
                         args.label1: float(f1),
