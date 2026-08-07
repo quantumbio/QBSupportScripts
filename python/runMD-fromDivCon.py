@@ -65,23 +65,36 @@ parser = argparse.ArgumentParser(description="Run OpenMM MD simulation with opti
 parser.add_argument("prmtop", help="Path to AMBER prmtop file")
 parser.add_argument("inpcrd", help="Path to AMBER inpcrd file")
 parser.add_argument("--test-run", action="store_true", help="Run a short test simulation")
+parser.add_argument("--medium-run", action="store_true", help="Run a medium simulation")
+parser.add_argument("--skip-waterbox", action="store_true", help="Skip adding the water box")
 
 args = parser.parse_args()
 prmtopFile = args.prmtop
 inpcrdFile = args.inpcrd
 test_run = args.test_run
+medium_run = args.medium_run
+skip_waterbox = args.skip_waterbox
 
 if test_run:
     minimize_nsteps   = 500  # ~quick minimization
     nvt_equil_nsteps  = 1000
     ntp_equil_nsteps  = 1000
     production_nsteps = 5000  # 10 ps at 0.002 ps timestep
+    preport_interval  = 100
     print("Test run mode enabled: using reduced step counts for quick validation.")
+elif medium_run:
+    minimize_nsteps   = 50000
+    nvt_equil_nsteps  = 50000
+    ntp_equil_nsteps  = 50000
+    production_nsteps = 200000
+    preport_interval  = 10000
+    print("Medium run mode enabled: using intermediate step counts.")
 else:
     minimize_nsteps   = round(5000 / 10)
     nvt_equil_nsteps  = round(100000 / 10)
     ntp_equil_nsteps  = round(100000 / 10)
     production_nsteps = 25000000  # 50 ns for 0.002 ps timestep
+    preport_interval  = 25000
 
 # Load the Amber topology and coordinate files
 prmtop = pmd.load_file(prmtopFile, inpcrdFile)
@@ -101,7 +114,10 @@ for residue in prmtop.residues:
                 h2.bonds.remove(bond)
                 break  # Exit loop after removing the bond
 
-prmtop.save('initial.pdb')
+#prmtop.save('initial.pdb')
+from openmm.app import PDBFile
+with open('initial.pdb', 'w') as f:
+    PDBFile.writeFile(prmtop.topology, prmtop.positions, f)
 
 # Initialize for unique residue names
 alphabet = string.ascii_uppercase  # 'A', 'B', 'C', ..., 'Z'
@@ -344,8 +360,9 @@ box_size_z = (max_z - min_z) + 2 * padding.value_in_unit(unit.nanometers)
 # Create box vector for solvent addition
 box_vector = mm.Vec3(box_size_x, box_size_y, box_size_z)
 
-# Add a water box and neutralize the system with counterions
-modeller.addSolvent(forcefield, model='tip3p', boxSize=box_vector, ionicStrength=0.15*unit.molar)
+if not skip_waterbox:
+    # Add a water box and neutralize the system with counterions
+    modeller.addSolvent(forcefield, model='tip3p', boxSize=box_vector, ionicStrength=0.15*unit.molar)
 
 # Now create the system again after modifying the topology
 system = forcefield.createSystem(
@@ -357,7 +374,7 @@ system = forcefield.createSystem(
 
 # Set up the integrator
 integrator = mm.LangevinIntegrator(
-    300*unit.kelvin,
+    298*unit.kelvin,
     1.0/unit.picoseconds,
     0.002*unit.picoseconds
 )
@@ -418,6 +435,7 @@ for i in range(0, minimize_nsteps, 500):
     simulation.minimizeEnergy(maxIterations=500)
     state = simulation.context.getState(getEnergy=True)
     energy = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+    print(f"Step {i} Current Potential Energy: {energy:.2f} kJ/mol")
     if abs(prev_energy - energy) < tolerance:
         print(f'Converged (tolerance: {tolerance:.2f} kJ/mol) at step: {i}')
         break
@@ -466,26 +484,52 @@ save_imaged_pdb(simulation,"minimized_with_unique_residues.pdb")
 with open("initial_state.xml", "w") as f:
     f.write(mm.XmlSerializer.serialize(simulation.context.getState(getPositions=True, getVelocities=True, enforcePeriodicBox=True)))
 
-def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_steps=100000, report_interval=1000):
-    """Monitor RMSD to determine equilibration convergence."""
+def get_equilibration_atom_indices(simulation):
+    """Select atoms for equilibration RMSD (prefer solute heavy atoms)."""
+    md_topology = md.Topology.from_openmm(simulation.topology)
+
+    # Prefer protein heavy atoms for biomolecular systems.
+    atom_indices = md_topology.select("protein and not element H")
+    if len(atom_indices) > 0:
+        return atom_indices
+
+    # Fallback to non-water heavy atoms (covers ligand-only and mixed systems).
+    atom_indices = md_topology.select("not water and not element H")
+    if len(atom_indices) > 0:
+        return atom_indices
+
+    # Final fallback if the system has no heavy-atom selection.
+    atom_indices = md_topology.select("not element H")
+    if len(atom_indices) > 0:
+        return atom_indices
+
+    return np.arange(md_topology.n_atoms)
+
+
+def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_steps=100000, report_interval=1000, atom_indices=None):
+    """Monitor aligned RMSD on a meaningful atom subset to determine equilibration convergence."""
     rmsd_values = []
     converged = False
+
+    md_topology = md.Topology.from_openmm(simulation.topology)
+    if atom_indices is None:
+        atom_indices = get_equilibration_atom_indices(simulation)
+
+    with open(reference_xml, "r") as f:
+        reference_state = mm.XmlSerializer.deserialize(f.read())
+
+    ref_positions = reference_state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
+    ref_traj = md.Trajectory(np.array(ref_positions)[np.newaxis, :, :], md_topology)
 
     for step in range(0, max_steps, report_interval):
         simulation.step(report_interval)
 
-        # Extract positions and save temporary XML
+        # Extract current positions and compute aligned RMSD against the fixed reference.
         state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
-        with open("tmp_state.xml", "w") as f:
-            f.write(mm.XmlSerializer.serialize(state))
-
-        # Load reference state
-        with open(reference_xml, "r") as f:
-            reference_state = mm.XmlSerializer.deserialize(f.read())
-
-        ref_positions = np.array(reference_state.getPositions(asNumpy=True))
-        cur_positions = np.array(state.getPositions(asNumpy=True))
-        rmsd = np.sqrt(np.mean((cur_positions - ref_positions) ** 2))
+        cur_positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
+        cur_traj = md.Trajectory(np.array(cur_positions)[np.newaxis, :, :], md_topology)
+        cur_traj.superpose(ref_traj, atom_indices=atom_indices)
+        rmsd = md.rmsd(cur_traj, ref_traj, atom_indices=atom_indices)[0]
         rmsd_values.append(rmsd)
 
         print(f"Step {step + report_interval}: RMSD = {rmsd:.3f} nm", flush=True)
@@ -495,14 +539,15 @@ def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_st
             converged = True
             break
 
-    os.remove("tmp_state.xml")
     if not converged:
         print(f"Maximum equilibration steps {max_steps} reached without full convergence.")
 
 # NVT Equilibration with RMSD monitoring
 print('Equilibrating (NVT) with RMSD monitoring...', flush=True)
 start_time = time.time()
-monitor_rmsd_equilibration(simulation, "initial_state.xml", 0.05, nvt_equil_nsteps)
+equilibration_atom_indices = get_equilibration_atom_indices(simulation)
+print(f"Tracking RMSD over {len(equilibration_atom_indices)} selected atoms.", flush=True)
+monitor_rmsd_equilibration(simulation, "initial_state.xml", 0.05, nvt_equil_nsteps, atom_indices=equilibration_atom_indices)
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
@@ -512,22 +557,23 @@ with open("nvt_equilibrated.xml", "w") as f:
     
 # NPT Equilibration with RMSD monitoring
 print('Equilibrating (NPT) with RMSD monitoring...', flush=True)
-system.addForce(mm.MonteCarloBarostat(1 * unit.atmospheres, 300 * unit.kelvin, 25))
+system.addForce(mm.MonteCarloBarostat(1 * unit.bar, 298 * unit.kelvin, 25))
 simulation.context.reinitialize(preserveState=True)
 start_time = time.time()
-monitor_rmsd_equilibration(simulation, "nvt_equilibrated.xml", 0.05, ntp_equil_nsteps)
+monitor_rmsd_equilibration(simulation, "nvt_equilibrated.xml", 0.05, ntp_equil_nsteps, atom_indices=equilibration_atom_indices)
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
 # Save final equilibrated positions
 save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
-report_interval = min(production_nsteps,25000)
-simulation.context.setVelocitiesToTemperature(300*unit.kelvin)
-#simulation.reporters.append(app.PDBReporter('output.pdb', report_interval))
-simulation.reporters.append(app.StateDataReporter(sys.stdout, report_interval, step=True, potentialEnergy=True, temperature=True))
-simulation.reporters.append(app.StateDataReporter('energies.csv', report_interval, step=True, potentialEnergy=True, temperature=True))
-simulation.reporters.append(app.DCDReporter('output.dcd', report_interval))
+simulation.context.setVelocitiesToTemperature(298*unit.kelvin)
+# Reset step count so production logs/reporters are production-relative.
+simulation.currentStep = 0
+#simulation.reporters.append(app.PDBReporter('output.pdb', preport_interval))
+simulation.reporters.append(app.StateDataReporter(sys.stdout, preport_interval, step=True, potentialEnergy=True, temperature=True))
+simulation.reporters.append(app.StateDataReporter('energies.csv', preport_interval, step=True, potentialEnergy=True, temperature=True))
+simulation.reporters.append(app.DCDReporter('output.dcd', preport_interval))
 print (f'Running Production NPT Simulation - {production_nsteps * 0.002} ps ....', flush=True)
 start_time = time.time()
 simulation.step(production_nsteps)
@@ -546,6 +592,18 @@ positions = simulation.context.getState(getPositions=True).getPositions()   # up
 structure = pmd.openmm.topsystem.load_topology(simulation.topology, system=tmpSystem, xyz=positions)
 structure.save("output.prmtop", format="amber") 
 structure.save("output.inpcrd", format="rst7") 
+
+summary_state = simulation.context.getState(getEnergy=True, enforcePeriodicBox=True)
+summary_values = {
+    "step": simulation.currentStep,
+    "potential_energy_kj_per_mol": summary_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole),
+    "kinetic_energy_kj_per_mol": summary_state.getKineticEnergy().value_in_unit(unit.kilojoule_per_mole),
+    "temperature_k": simulation.integrator.getTemperature().value_in_unit(unit.kelvin),
+}
+
+print("Simulation summary:")
+for label, value in summary_values.items():
+    print(f"  {label}: {value}")
 
 sys.exit()
 
