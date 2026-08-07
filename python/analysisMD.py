@@ -930,7 +930,7 @@ def main()->None:
         
         # Distance between PCA centroids
         centroid_dist = np.linalg.norm([mu1_pc1 - mu2_pc1, mu1_pc2 - mu2_pc2])
-        print(f"\nCentroid distance (Complete vs Published): {centroid_dist:.2f}\n")
+        print(f"\nCentroid distance ({args.label1} vs {args.label2}): {centroid_dist:.2f}\n")
 
         summary["pca"] = {
             "explained_variance": [float(v) for v in var_exp],
@@ -1075,7 +1075,7 @@ def main()->None:
             sns.heatmap(dssp_diff.T, cmap="Reds", cbar_kws={"label": "Mismatch (1 = different)"})
             plt.xlabel("Frame")
             plt.ylabel("Aligned residue index")
-            plt.title("DSSP secondary structure difference (Complete vs Published)")
+            plt.title(f"DSSP secondary structure difference ({args.label1} vs {args.label2})")
             plt.tight_layout()
             plt.savefig(f"{args.out_prefix}_dssp_difference.pdf", dpi=CONFIG["plot"]["dpi"])
             plt.close()
@@ -1151,12 +1151,12 @@ def main()->None:
             plt.close()
 
         # ───────── Differential DCCM (ΔDCCM) Heatmap ─────────
-        delta_dccm = dccm1 - dccm2  # ΔDCCM = Complete - Published
+        delta_dccm = dccm1 - dccm2  # ΔDCCM = label1 - label2
 
         plt.figure(figsize=CONFIG["plot"]["figsize"]["dccm"])
         sns.heatmap(delta_dccm, cmap="bwr", center=0, vmin=-1, vmax=1,
-                    square=True, cbar_kws={"label": "ΔDCCM (Complete - Published)"})
-        plt.title("Differential DCCM (Aligned Cα Atoms)")
+                    square=True, cbar_kws={"label": f"ΔDCCM ({args.label1} - {args.label2})"})
+        plt.title(f"Differential DCCM ({args.label1} - {args.label2}; Aligned Cα Atoms)")
         plt.tight_layout()
         plt.savefig(f"{args.out_prefix}_dccm_delta.pdf", dpi=CONFIG["plot"]["dpi"])
         plt.close()
@@ -1272,8 +1272,8 @@ def main()->None:
                 print(f"  Ligand candidates in t2: {[res.name for res in t2.topology.residues if res.name[:3].upper() == ligand_resname.upper()]}")
             else:
                 print(f"\nLigand '{ligand_resname}' found in both structures.")
-                print(f"  Complete Structure: {len(ligand1)} atoms")
-                print(f"  Published Structure: {len(ligand2)} atoms")
+                print(f"  {args.label1}: {len(ligand1)} atoms")
+                print(f"  {args.label2}: {len(ligand2)} atoms")
                 # Optional: Add analysis code here (RMSD, SASA, etc.)
         else:
             # No ligand specified — report all non-standard residues
@@ -1528,7 +1528,7 @@ def main()->None:
             
             # ---- Pretty print ---------------------------------------------------------
             print(f"\nLigand–Residue Contact Fingerprint (aligned residues; contact ≥{int(CONFIG['contact_fingerprint']['distance_cutoff_nm']*10):.1f} Å)")
-            print(f"{'Residue (Complete)':<22} | {args.label1:^6} | {args.label2:^6}")
+            print(f"{f'Residue ({args.label1})':<22} | {args.label1:^6} | {args.label2:^6}")
             print("-"*44)
             for i, (r1, r2) in enumerate(zip(aligned_res1, aligned_res2)):
                 if max(fp1[i], fp2[i]) >= CONFIG["contact_fingerprint"]["min_occupancy"]:           # show only “interesting” residues
@@ -1570,7 +1570,7 @@ def main()->None:
                                if res.name == ligand_resname), None)
 
             if not loop_residues:
-                print("  Skipped: no unique loop residues in Complete Structure.")
+                print(f"  Skipped: no unique loop residues in {args.label1}.")
             elif ligand_res is None:
                 print("  Skipped: ligand residue not found.")
             else:
