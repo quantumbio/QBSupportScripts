@@ -374,7 +374,7 @@ system = forcefield.createSystem(
 
 # Set up the integrator
 integrator = mm.LangevinIntegrator(
-    300*unit.kelvin,
+    298*unit.kelvin,
     1.0/unit.picoseconds,
     0.002*unit.picoseconds
 )
