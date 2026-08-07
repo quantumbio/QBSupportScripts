@@ -541,6 +541,8 @@ print(f"Elapsed time: {elapsed_time:.6f} seconds")
 save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
 simulation.context.setVelocitiesToTemperature(298*unit.kelvin)
+# Reset step count so production logs/reporters are production-relative.
+simulation.currentStep = 0
 #simulation.reporters.append(app.PDBReporter('output.pdb', preport_interval))
 simulation.reporters.append(app.StateDataReporter(sys.stdout, preport_interval, step=True, potentialEnergy=True, temperature=True))
 simulation.reporters.append(app.StateDataReporter('energies.csv', preport_interval, step=True, potentialEnergy=True, temperature=True))
