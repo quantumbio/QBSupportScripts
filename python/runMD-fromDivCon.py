@@ -530,7 +530,7 @@ with open("nvt_equilibrated.xml", "w") as f:
     
 # NPT Equilibration with RMSD monitoring
 print('Equilibrating (NPT) with RMSD monitoring...', flush=True)
-system.addForce(mm.MonteCarloBarostat(1 * unit.atmospheres, 300 * unit.kelvin, 25))
+system.addForce(mm.MonteCarloBarostat(1 * unit.atmospheres, 298 * unit.kelvin, 25))
 simulation.context.reinitialize(preserveState=True)
 start_time = time.time()
 monitor_rmsd_equilibration(simulation, "nvt_equilibrated.xml", 0.05, ntp_equil_nsteps)
@@ -540,7 +540,7 @@ print(f"Elapsed time: {elapsed_time:.6f} seconds")
 # Save final equilibrated positions
 save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
-simulation.context.setVelocitiesToTemperature(300*unit.kelvin)
+simulation.context.setVelocitiesToTemperature(298*unit.kelvin)
 #simulation.reporters.append(app.PDBReporter('output.pdb', preport_interval))
 simulation.reporters.append(app.StateDataReporter(sys.stdout, preport_interval, step=True, potentialEnergy=True, temperature=True))
 simulation.reporters.append(app.StateDataReporter('energies.csv', preport_interval, step=True, potentialEnergy=True, temperature=True))
