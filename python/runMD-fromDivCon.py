@@ -484,26 +484,52 @@ save_imaged_pdb(simulation,"minimized_with_unique_residues.pdb")
 with open("initial_state.xml", "w") as f:
     f.write(mm.XmlSerializer.serialize(simulation.context.getState(getPositions=True, getVelocities=True, enforcePeriodicBox=True)))
 
-def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_steps=100000, report_interval=1000):
-    """Monitor RMSD to determine equilibration convergence."""
+def get_equilibration_atom_indices(simulation):
+    """Select atoms for equilibration RMSD (prefer solute heavy atoms)."""
+    md_topology = md.Topology.from_openmm(simulation.topology)
+
+    # Prefer protein heavy atoms for biomolecular systems.
+    atom_indices = md_topology.select("protein and not element H")
+    if len(atom_indices) > 0:
+        return atom_indices
+
+    # Fallback to non-water heavy atoms (covers ligand-only and mixed systems).
+    atom_indices = md_topology.select("not water and not element H")
+    if len(atom_indices) > 0:
+        return atom_indices
+
+    # Final fallback if the system has no heavy-atom selection.
+    atom_indices = md_topology.select("not element H")
+    if len(atom_indices) > 0:
+        return atom_indices
+
+    return np.arange(md_topology.n_atoms)
+
+
+def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_steps=100000, report_interval=1000, atom_indices=None):
+    """Monitor aligned RMSD on a meaningful atom subset to determine equilibration convergence."""
     rmsd_values = []
     converged = False
+
+    md_topology = md.Topology.from_openmm(simulation.topology)
+    if atom_indices is None:
+        atom_indices = get_equilibration_atom_indices(simulation)
+
+    with open(reference_xml, "r") as f:
+        reference_state = mm.XmlSerializer.deserialize(f.read())
+
+    ref_positions = reference_state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
+    ref_traj = md.Trajectory(np.array(ref_positions)[np.newaxis, :, :], md_topology)
 
     for step in range(0, max_steps, report_interval):
         simulation.step(report_interval)
 
-        # Extract positions and save temporary XML
+        # Extract current positions and compute aligned RMSD against the fixed reference.
         state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
-        with open("tmp_state.xml", "w") as f:
-            f.write(mm.XmlSerializer.serialize(state))
-
-        # Load reference state
-        with open(reference_xml, "r") as f:
-            reference_state = mm.XmlSerializer.deserialize(f.read())
-
-        ref_positions = np.array(reference_state.getPositions(asNumpy=True))
-        cur_positions = np.array(state.getPositions(asNumpy=True))
-        rmsd = np.sqrt(np.mean((cur_positions - ref_positions) ** 2))
+        cur_positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
+        cur_traj = md.Trajectory(np.array(cur_positions)[np.newaxis, :, :], md_topology)
+        cur_traj.superpose(ref_traj, atom_indices=atom_indices)
+        rmsd = md.rmsd(cur_traj, ref_traj, atom_indices=atom_indices)[0]
         rmsd_values.append(rmsd)
 
         print(f"Step {step + report_interval}: RMSD = {rmsd:.3f} nm", flush=True)
@@ -513,14 +539,15 @@ def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_st
             converged = True
             break
 
-    os.remove("tmp_state.xml")
     if not converged:
         print(f"Maximum equilibration steps {max_steps} reached without full convergence.")
 
 # NVT Equilibration with RMSD monitoring
 print('Equilibrating (NVT) with RMSD monitoring...', flush=True)
 start_time = time.time()
-monitor_rmsd_equilibration(simulation, "initial_state.xml", 0.05, nvt_equil_nsteps)
+equilibration_atom_indices = get_equilibration_atom_indices(simulation)
+print(f"Tracking RMSD over {len(equilibration_atom_indices)} selected atoms.", flush=True)
+monitor_rmsd_equilibration(simulation, "initial_state.xml", 0.05, nvt_equil_nsteps, atom_indices=equilibration_atom_indices)
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
@@ -533,7 +560,7 @@ print('Equilibrating (NPT) with RMSD monitoring...', flush=True)
 system.addForce(mm.MonteCarloBarostat(1 * unit.bar, 298 * unit.kelvin, 25))
 simulation.context.reinitialize(preserveState=True)
 start_time = time.time()
-monitor_rmsd_equilibration(simulation, "nvt_equilibrated.xml", 0.05, ntp_equil_nsteps)
+monitor_rmsd_equilibration(simulation, "nvt_equilibrated.xml", 0.05, ntp_equil_nsteps, atom_indices=equilibration_atom_indices)
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
