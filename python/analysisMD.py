@@ -34,6 +34,11 @@ Analyses Performed
     e. Ligand-pocket contact fingerprint matrix           → printed to screen
     f. Ligand–loop DCCM statistics                        → printed to screen
 16. Summary JSON file containing all key metrics          → *_summary.json
+17. Trajectory-validation additions (non-destructive):
+    a. Aligned RMSF profile similarity + ΔRMSF              → *_rmsf_delta.pdf
+    b. Common-reference aligned-Cα RMSD                     → *_rmsd_common_reference.pdf
+    c. Rg/RMSD first-vs-last-window drift statistics        → printed to screen / JSON
+    d. Mean aligned-Cα internal-distance comparison         → *_ca_distance_delta.pdf
 
 JSON Output: *_summary.json
 ---------------------------
@@ -50,6 +55,8 @@ Top-level fields include:
   - rmsf: RMSF statistics (full and aligned)
   - rg: radius of gyration statistics + KS p-value
   - rmsd_backbone: RMSD (mean, std, max) vs time
+  - trajectory_validation: paired trajectory-comparison metrics (RMSF profile similarity,
+    common-reference RMSD, drift/stability, and aligned-Cα internal distances)
   - clustering: number of clusters + frame counts
   - pca: PC1/PC2 explained variance, stddev, centroid distance
   - hbonds: shared and exclusive persistent hydrogen bonds
@@ -126,7 +133,7 @@ import mdtraj as md
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.stats import ks_2samp
+from scipy.stats import ks_2samp, pearsonr, spearmanr
 from Bio.Align import PairwiseAligner
 from Bio.Data import IUPACData
 from sklearn.cluster import KMeans
@@ -162,6 +169,17 @@ CONFIG = {
     "contact_fingerprint": {
         "distance_cutoff_nm": 0.35,  # 3.5 Å cutoff for defining contact
         "min_occupancy": 0.30        # minimum contact occupancy to report
+    },
+
+    # Additional trajectory-only validation.  These metrics compare structural
+    # behavior derived from the trajectories themselves; they do not depend on
+    # OUT.gz/screen output and therefore remain useful when the two simulations
+    # were run with different hardware, random seeds, or solvent realizations.
+    "trajectory_validation": {
+        "stability_fraction": 0.25,        # compare first/last 25% of each trajectory
+        "top_n_rmsf_differences": 10,
+        "top_n_distance_differences": 10,
+        "distance_pair_chunk_size": 5000   # bound temporary memory for large proteins
     },
 
     "plot": {
@@ -221,6 +239,81 @@ def seq_and_ca(traj: md.Trajectory)->Tuple[str,List[int]]:
 
 def compute_rmsf(traj: md.Trajectory, idx: np.ndarray)->np.ndarray:
     return md.rmsf(traj, reference=traj, atom_indices=idx)*CONFIG["rmsf_scale"]  # nm→Å
+
+def paired_profile_stats(values1: np.ndarray, values2: np.ndarray) -> dict:
+    """Return paired similarity metrics for two equally sized structural profiles."""
+    a = np.asarray(values1, dtype=float)
+    b = np.asarray(values2, dtype=float)
+    if a.shape != b.shape:
+        raise ValueError(f"Paired profiles have different shapes: {a.shape} vs {b.shape}")
+
+    finite = np.isfinite(a) & np.isfinite(b)
+    a = a[finite]
+    b = b[finite]
+    if a.size == 0:
+        return {
+            "n": 0, "pearson_r": None, "spearman_rho": None,
+            "rmse": None, "mae": None, "max_abs_difference": None
+        }
+
+    diff = a - b
+
+    # Pearson/Spearman are undefined for constant profiles.  Preserve the other
+    # distance metrics and represent undefined correlations as None in JSON.
+    pearson = None
+    spearman = None
+    if a.size > 1 and np.std(a) > 0.0 and np.std(b) > 0.0:
+        pearson = float(pearsonr(a, b)[0])
+        spearman = float(spearmanr(a, b)[0])
+
+    return {
+        "n": int(a.size),
+        "pearson_r": pearson,
+        "spearman_rho": spearman,
+        "rmse": float(np.sqrt(np.mean(diff * diff))),
+        "mae": float(np.mean(np.abs(diff))),
+        "max_abs_difference": float(np.max(np.abs(diff)))
+    }
+
+def trajectory_stability_stats(values: np.ndarray, fraction: float = 0.25) -> dict:
+    """Summarize slow drift without imposing a pass/fail convergence criterion."""
+    y = np.asarray(values, dtype=float)
+    y = y[np.isfinite(y)]
+    if y.size == 0:
+        return {
+            "n": 0, "window_fraction": float(fraction),
+            "first_window_mean": None, "last_window_mean": None,
+            "last_minus_first": None, "slope_per_frame": None,
+            "projected_change_over_trajectory": None
+        }
+
+    fraction = min(max(float(fraction), 0.0), 0.5)
+    n_window = max(1, int(np.ceil(y.size * fraction)))
+    x = np.arange(y.size, dtype=float)
+    slope = float(np.polyfit(x, y, 1)[0]) if y.size > 1 else 0.0
+    first_mean = float(np.mean(y[:n_window]))
+    last_mean = float(np.mean(y[-n_window:]))
+
+    return {
+        "n": int(y.size),
+        "window_fraction": float(fraction),
+        "first_window_mean": first_mean,
+        "last_window_mean": last_mean,
+        "last_minus_first": float(last_mean - first_mean),
+        "slope_per_frame": slope,
+        "projected_change_over_trajectory": float(slope * max(y.size - 1, 0))
+    }
+
+def mean_pair_distances(traj: md.Trajectory, atom_pairs: np.ndarray, chunk_size: int = 5000) -> np.ndarray:
+    """Compute mean pair distances in Å while bounding temporary memory usage."""
+    pairs = np.asarray(atom_pairs, dtype=int)
+    means = np.empty(len(pairs), dtype=float)
+    chunk_size = max(1, int(chunk_size))
+    for start in range(0, len(pairs), chunk_size):
+        stop = min(start + chunk_size, len(pairs))
+        distances_nm = md.compute_distances(traj, pairs[start:stop], periodic=False)
+        means[start:stop] = distances_nm.mean(axis=0) * 10.0
+    return means
 
 def safe(label:str)->str:  # filename‑safe
     return re.sub(r"[^A-Za-z0-9]+","_",label.strip()).lower()
@@ -329,6 +422,7 @@ def main()->None:
             "label2": args.label2,
             "out_prefix": args.out_prefix
         }
+        summary["trajectory_validation"] = {}
         summary["generated_on"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         summary["units"] = {}
         summary["units"]["temp"] = "K"
@@ -418,6 +512,54 @@ def main()->None:
         aligned_res1 = [t1.topology.atom(ca).residue for ca in m1]
         aligned_res2 = [t2.topology.atom(ca).residue for ca in m2]
         n_aligned    = len(aligned_res1)
+
+        # ───────── TRAJECTORY VALIDATION: RMSF PROFILE SIMILARITY ─────────
+        # KS remains above for backwards compatibility.  For a residue-by-residue
+        # comparison, however, paired metrics answer the more useful question:
+        # do the same aligned residues show the same relative flexibility?
+        rmsf_profile_stats = paired_profile_stats(rmsf1_aln, rmsf2_aln)
+        delta_rmsf = rmsf1_aln - rmsf2_aln
+        top_n_rmsf = min(CONFIG["trajectory_validation"]["top_n_rmsf_differences"], n_aligned)
+        top_rmsf_idx = np.argsort(np.abs(delta_rmsf))[::-1][:top_n_rmsf]
+
+        print("\nTrajectory Validation — Aligned RMSF Profile")
+        print("=" * 48)
+        if rmsf_profile_stats["pearson_r"] is not None:
+            print(f"  Pearson r                    : {rmsf_profile_stats['pearson_r']:.4f}")
+            print(f"  Spearman rho                 : {rmsf_profile_stats['spearman_rho']:.4f}")
+        else:
+            print("  Pearson/Spearman             : undefined (constant profile)")
+        print(f"  RMSF RMSE                    : {rmsf_profile_stats['rmse']:.3f} Å")
+        print(f"  Mean |ΔRMSF|                 : {rmsf_profile_stats['mae']:.3f} Å")
+        print(f"  Maximum |ΔRMSF|              : {rmsf_profile_stats['max_abs_difference']:.3f} Å")
+        print(f"  Top {top_n_rmsf} residue differences:")
+        for i in top_rmsf_idx:
+            print(f"    {res_label(aligned_res1[i]):<12} / {res_label(aligned_res2[i]):<12} "
+                  f"ΔRMSF={delta_rmsf[i]:+.3f} Å")
+
+        plt.figure()
+        plt.axhline(0.0, linewidth=0.8)
+        plt.plot(delta_rmsf)
+        plt.xlabel("Aligned residue index"); plt.ylabel(f"ΔRMSF (Å)  [{args.label1} - {args.label2}]")
+        plt.title("Aligned-residue RMSF difference")
+        plt.tight_layout()
+        plt.savefig(f"{args.out_prefix}_rmsf_delta.pdf", dpi=CONFIG["plot"]["dpi"]); plt.close()
+
+        summary["trajectory_validation"]["rmsf_profile"] = {
+            **rmsf_profile_stats,
+            "delta_definition": f"{args.label1} - {args.label2}",
+            "top_absolute_differences": [
+                {
+                    "aligned_index": int(i),
+                    "residue1": res_label(aligned_res1[i]),
+                    "residue2": res_label(aligned_res2[i]),
+                    "rmsf1": float(rmsf1_aln[i]),
+                    "rmsf2": float(rmsf2_aln[i]),
+                    "delta": float(delta_rmsf[i])
+                }
+                for i in top_rmsf_idx
+            ]
+        }
         
         summary["rmsf"] = {
             "full": {
@@ -459,6 +601,31 @@ def main()->None:
 
         summary["units"]["rg"] = "Å"
 
+        # ───────── TRAJECTORY VALIDATION: GLOBAL-SIZE STABILITY ─────────
+        stability_fraction = CONFIG["trajectory_validation"]["stability_fraction"]
+        rg_stability1 = trajectory_stability_stats(rg1, stability_fraction)
+        rg_stability2 = trajectory_stability_stats(rg2, stability_fraction)
+        rg_mean_delta = float(rg1.mean() - rg2.mean())
+        rg_relative_delta_pct = (
+            100.0 * rg_mean_delta / rg2.mean() if abs(rg2.mean()) > 1.0e-12 else None
+        )
+
+        print("\nTrajectory Validation — Radius of Gyration Stability")
+        print("=" * 52)
+        print(f"  Mean ΔRg ({args.label1} - {args.label2}) : {rg_mean_delta:+.3f} Å")
+        if rg_relative_delta_pct is not None:
+            print(f"  Relative mean difference       : {rg_relative_delta_pct:+.3f}%")
+        for label, stats in ((args.label1, rg_stability1), (args.label2, rg_stability2)):
+            print(f"  {label:<20} first→last window Δ : {stats['last_minus_first']:+.3f} Å "
+                  f"(linear projected Δ {stats['projected_change_over_trajectory']:+.3f} Å)")
+
+        summary["trajectory_validation"]["rg_stability"] = {
+            "mean_difference": rg_mean_delta,
+            "relative_mean_difference_percent": rg_relative_delta_pct,
+            args.label1: rg_stability1,
+            args.label2: rg_stability2
+        }
+
         # ───────── BACKBONE RMSD vs TIME ─────────
         bb_idx1 = prot1.topology.select("backbone")
         bb_idx2 = prot2.topology.select("backbone")
@@ -485,6 +652,140 @@ def main()->None:
         }
 
         summary["units"]["rmsd_backbone"] = "Å"
+
+        # ───────── TRAJECTORY VALIDATION: RMSD STABILITY + COMMON REFERENCE ─────────
+        rmsd_stability1 = trajectory_stability_stats(rmsd1, stability_fraction)
+        rmsd_stability2 = trajectory_stability_stats(rmsd2, stability_fraction)
+        summary["trajectory_validation"]["backbone_rmsd_stability"] = {
+            "reference": "each trajectory's own frame 0 (existing RMSD definition)",
+            args.label1: rmsd_stability1,
+            args.label2: rmsd_stability2
+        }
+
+        # The existing RMSD intentionally remains unchanged.  This additional RMSD
+        # uses the common aligned-Cα set and frame 0 of trajectory 1 as the same
+        # structural reference for BOTH trajectories.
+        m1_arr = np.asarray(m1, dtype=int)
+        m2_arr = np.asarray(m2, dtype=int)
+        rmsd_common1 = md.rmsd(
+            prot1, prot1, 0, atom_indices=m1_arr, ref_atom_indices=m1_arr
+        ) * 10.0
+        rmsd_common2 = md.rmsd(
+            prot2, prot1, 0, atom_indices=m2_arr, ref_atom_indices=m1_arr
+        ) * 10.0
+
+        plt.figure()
+        plt.plot(rmsd_common1, label=args.label1)
+        plt.plot(rmsd_common2, label=args.label2)
+        plt.xlabel("Frame"); plt.ylabel("Aligned Cα RMSD to common reference (Å)")
+        plt.title(f"Common-reference RMSD ({args.label1} frame 0)")
+        plt.legend(); plt.tight_layout()
+        plt.savefig(f"{args.out_prefix}_rmsd_common_reference.pdf", dpi=CONFIG["plot"]["dpi"]); plt.close()
+
+        common_rmsd_stability1 = trajectory_stability_stats(rmsd_common1, stability_fraction)
+        common_rmsd_stability2 = trajectory_stability_stats(rmsd_common2, stability_fraction)
+        print("\nTrajectory Validation — Common-reference Cα RMSD")
+        print("=" * 52)
+        print(f"  Common reference              : {args.label1}, frame 0")
+        print(f"  {args.label1:<20} mean±std     : {rmsd_common1.mean():.3f} ± {rmsd_common1.std():.3f} Å")
+        print(f"  {args.label2:<20} mean±std     : {rmsd_common2.mean():.3f} ± {rmsd_common2.std():.3f} Å")
+        print(f"  {args.label1:<20} first→last Δ : {common_rmsd_stability1['last_minus_first']:+.3f} Å")
+        print(f"  {args.label2:<20} first→last Δ : {common_rmsd_stability2['last_minus_first']:+.3f} Å")
+
+        summary["trajectory_validation"]["common_reference_rmsd"] = {
+            "reference": {"trajectory": args.label1, "frame": 0, "selection": "aligned Cα"},
+            args.label1: {
+                "mean": float(rmsd_common1.mean()),
+                "std": float(rmsd_common1.std()),
+                "max": float(rmsd_common1.max()),
+                "stability": common_rmsd_stability1
+            },
+            args.label2: {
+                "mean": float(rmsd_common2.mean()),
+                "std": float(rmsd_common2.std()),
+                "max": float(rmsd_common2.max()),
+                "stability": common_rmsd_stability2
+            }
+        }
+        summary["units"]["common_reference_rmsd"] = "Å"
+
+        # ───────── TRAJECTORY VALIDATION: INTERNAL Cα DISTANCE MAP ─────────
+        # Internal distances are invariant to overall translation/rotation and are
+        # therefore a useful direct comparison of the sampled protein architecture.
+        if n_aligned >= 2:
+            local_pairs = np.array(
+                [(i, j) for i in range(n_aligned) for j in range(i + 1, n_aligned)],
+                dtype=int
+            )
+            atom_pairs1 = np.column_stack((m1_arr[local_pairs[:, 0]], m1_arr[local_pairs[:, 1]]))
+            atom_pairs2 = np.column_stack((m2_arr[local_pairs[:, 0]], m2_arr[local_pairs[:, 1]]))
+
+            # periodic=False deliberately compares intramolecular geometry without
+            # applying a minimum-image shortcut to long intraprotein distances.
+            # Compute in pair chunks so this addition does not allocate a potentially
+            # enormous (n_frames × n_pairs) matrix for larger proteins.
+            pair_chunk = CONFIG["trajectory_validation"]["distance_pair_chunk_size"]
+            mean_dist1 = mean_pair_distances(prot1, atom_pairs1, pair_chunk)
+            mean_dist2 = mean_pair_distances(prot2, atom_pairs2, pair_chunk)
+            delta_dist = mean_dist1 - mean_dist2
+            distance_stats = paired_profile_stats(mean_dist1, mean_dist2)
+
+            delta_matrix = np.zeros((n_aligned, n_aligned), dtype=float)
+            delta_matrix[local_pairs[:, 0], local_pairs[:, 1]] = delta_dist
+            delta_matrix[local_pairs[:, 1], local_pairs[:, 0]] = delta_dist
+            vmax = max(float(np.max(np.abs(delta_matrix))), 1.0e-6)
+
+            plt.figure(figsize=CONFIG["plot"]["figsize"]["dccm"])
+            sns.heatmap(delta_matrix, cmap="bwr", center=0.0, vmin=-vmax, vmax=vmax, square=True,
+                        cbar_kws={"label": f"Δ mean Cα distance (Å): {args.label1} - {args.label2}"})
+            plt.xlabel("Aligned residue index"); plt.ylabel("Aligned residue index")
+            plt.title("Difference in mean aligned-Cα internal distances")
+            plt.tight_layout()
+            plt.savefig(f"{args.out_prefix}_ca_distance_delta.pdf", dpi=CONFIG["plot"]["dpi"]); plt.close()
+
+            top_n_dist = min(
+                CONFIG["trajectory_validation"]["top_n_distance_differences"], len(delta_dist)
+            )
+            top_dist_idx = np.argsort(np.abs(delta_dist))[::-1][:top_n_dist]
+
+            print("\nTrajectory Validation — Mean Internal Cα Distances")
+            print("=" * 52)
+            if distance_stats["pearson_r"] is not None:
+                print(f"  Pearson r                    : {distance_stats['pearson_r']:.5f}")
+                print(f"  Spearman rho                 : {distance_stats['spearman_rho']:.5f}")
+            print(f"  Distance RMSE                : {distance_stats['rmse']:.3f} Å")
+            print(f"  Mean |Δdistance|             : {distance_stats['mae']:.3f} Å")
+            print(f"  Maximum |Δdistance|          : {distance_stats['max_abs_difference']:.3f} Å")
+            print(f"  Top {top_n_dist} pair differences:")
+            for k in top_dist_idx:
+                i, j = local_pairs[k]
+                print(f"    {res_label(aligned_res1[i])}–{res_label(aligned_res1[j])} / "
+                      f"{res_label(aligned_res2[i])}–{res_label(aligned_res2[j])} "
+                      f"Δ={delta_dist[k]:+.3f} Å")
+
+            summary["trajectory_validation"]["ca_internal_distances"] = {
+                **distance_stats,
+                "n_aligned_ca": int(n_aligned),
+                "n_pairs": int(len(local_pairs)),
+                "delta_definition": f"{args.label1} - {args.label2}",
+                "top_absolute_differences": [
+                    {
+                        "residue1_system1": res_label(aligned_res1[i]),
+                        "residue2_system1": res_label(aligned_res1[j]),
+                        "residue1_system2": res_label(aligned_res2[i]),
+                        "residue2_system2": res_label(aligned_res2[j]),
+                        "mean_distance1": float(mean_dist1[k]),
+                        "mean_distance2": float(mean_dist2[k]),
+                        "delta": float(delta_dist[k])
+                    }
+                    for k in top_dist_idx
+                    for i, j in [local_pairs[k]]
+                ]
+            }
+            summary["units"]["ca_internal_distances"] = "Å"
+        else:
+            logging.warning("Internal Cα distance comparison skipped: fewer than two aligned Cα atoms.")
+            summary["trajectory_validation"]["ca_internal_distances"] = None
 
         # ───────── CLUSTERING (k‑means, CA‑RMSD feature matrix) ─────────
         min_frames = CONFIG["min_frames_for_clustering"]
