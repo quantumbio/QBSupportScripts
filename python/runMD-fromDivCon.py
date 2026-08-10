@@ -364,7 +364,8 @@ box_vector = mm.Vec3(box_size_x, box_size_y, box_size_z)
 if not skip_waterbox:
     # Add a water box and neutralize the system with counterions
     modeller.addSolvent(forcefield, model='tip3p', boxSize=box_vector, ionicStrength=0.15*unit.molar)
-
+else:
+    print("Skipping water box addition.")
 # Now create the system again after modifying the topology
 system = forcefield.createSystem(
     modeller.topology,
