@@ -67,6 +67,18 @@ parser.add_argument("prmtop", help="Path to AMBER prmtop file")
 parser.add_argument("inpcrd", help="Path to AMBER inpcrd file")
 parser.add_argument("--test-run", action="store_true", help="Run a short test simulation")
 parser.add_argument("--medium-run", action="store_true", help="Run a medium simulation")
+parser.add_argument(
+    "--equilibration-steps",
+    type=int,
+    metavar="N",
+    help="Override the number of steps used for each NVT and NPT equilibration stage",
+)
+parser.add_argument(
+    "--production-steps",
+    type=int,
+    metavar="N",
+    help="Override the number of production MD steps",
+)
 parser.add_argument("--skip-waterbox", action="store_true", help="Skip adding the water box")
 
 args = parser.parse_args()
@@ -96,6 +108,22 @@ else:
     ntp_equil_nsteps  = round(100000 / 10)
     production_nsteps = 25000000  # 50 ns for 0.002 ps timestep
     preport_interval  = 25000
+
+# Explicit step counts override the preset selected above.  A single
+# equilibration value is intentionally applied to both NVT and NPT so this
+# interface mirrors qmechanic's --moleculardynamics EQUIL,PRODUCTION settings.
+if args.equilibration_steps is not None:
+    if args.equilibration_steps <= 0:
+        parser.error("--equilibration-steps must be greater than zero")
+    nvt_equil_nsteps = args.equilibration_steps
+    ntp_equil_nsteps = args.equilibration_steps
+    print(f"Equilibration step override: {args.equilibration_steps} steps for both NVT and NPT.")
+
+if args.production_steps is not None:
+    if args.production_steps <= 0:
+        parser.error("--production-steps must be greater than zero")
+    production_nsteps = args.production_steps
+    print(f"Production step override: {args.production_steps} steps.")
 
 # Load the Amber topology and coordinate files
 prmtop = pmd.load_file(prmtopFile, inpcrdFile)
