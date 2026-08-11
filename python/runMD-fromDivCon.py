@@ -395,13 +395,26 @@ forcefield = app.ForceField('amber14/tip3pfb.xml','complete_forcefield_with_uniq
 modeller = app.Modeller(prmtop.topology, inpcrd.positions)
 
 if skip_waterbox:
-    # Preserve the periodic cell from the prepared input system instead of
-    # constructing a synthetic padded box.
+    # Preserve an explicit periodic cell when the AMBER inputs carry one.
+    # Some DivCon-generated parm7/inpcrd pairs do not currently serialize box
+    # metadata.  In that case, mirror MDDriver's fallback: build an
+    # orthorhombic box from the coordinate extrema with 1.0 A padding on each
+    # side.  This replaces the old (and erroneous) 10 nm padding.
     if input_box_vectors is None:
-        raise RuntimeError(
-            "--skip-waterbox requires periodic box vectors in the supplied "
-            "inpcrd or prepared prmtop"
+        fallback_padding_angstrom = 1.0
+        fallback_padding_nm = fallback_padding_angstrom * 0.1
+        box_size_x = (max_x - min_x) + 2.0 * fallback_padding_nm
+        box_size_y = (max_y - min_y) + 2.0 * fallback_padding_nm
+        box_size_z = (max_z - min_z) + 2.0 * fallback_padding_nm
+        input_box_vectors = (
+            mm.Vec3(box_size_x, 0.0, 0.0) * unit.nanometer,
+            mm.Vec3(0.0, box_size_y, 0.0) * unit.nanometer,
+            mm.Vec3(0.0, 0.0, box_size_z) * unit.nanometer,
         )
+        input_box_source = (
+            f"coordinate bounds + {fallback_padding_angstrom:.1f} A padding/side"
+        )
+
     modeller.topology.setPeriodicBoxVectors(input_box_vectors)
     box_dimensions = [
         input_box_vectors[0][0].value_in_unit(unit.nanometers),
