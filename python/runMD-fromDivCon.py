@@ -355,9 +355,21 @@ indent(root)
 # Write the modified and indented XML to a file
 tree.write('complete_forcefield_with_unique_residues.xml', xml_declaration=True, encoding='utf-8', method="xml")
 
-# Load the modified prmtop and forcefield XML for simulation
+# Load the modified topology, but retain coordinates/box information from the
+# original supplied inpcrd.  The residue-renaming/topology preparation above
+# does not change atom count/order or coordinates, and rewriting an inpcrd via
+# ParmEd may omit optional periodic box records.
 prmtop = app.AmberPrmtopFile('modified_with_unique_residues.prmtop')
-inpcrd = app.AmberInpcrdFile('modified_with_unique_residues.inpcrd')
+inpcrd = app.AmberInpcrdFile(inpcrdFile)
+
+# Prefer the box carried by the authoritative input coordinate file.  If that
+# file does not carry box vectors, fall back to the box retained in the
+# prepared prmtop topology (AMBER prmtop files can also contain box data).
+input_box_vectors = inpcrd.boxVectors
+input_box_source = "input inpcrd"
+if input_box_vectors is None:
+    input_box_vectors = prmtop.topology.getPeriodicBoxVectors()
+    input_box_source = "prepared prmtop"
 
 # Extract positions from inpcrd
 positions = inpcrd.getPositions()
@@ -383,12 +395,12 @@ forcefield = app.ForceField('amber14/tip3pfb.xml','complete_forcefield_with_uniq
 modeller = app.Modeller(prmtop.topology, inpcrd.positions)
 
 if skip_waterbox:
-    # The supplied inpcrd is the authoritative prepared MD system.  Preserve its
-    # periodic cell exactly instead of constructing a synthetic padded box.
-    input_box_vectors = inpcrd.getBoxVectors()
+    # Preserve the periodic cell from the prepared input system instead of
+    # constructing a synthetic padded box.
     if input_box_vectors is None:
         raise RuntimeError(
-            "--skip-waterbox requires periodic box vectors in the supplied inpcrd"
+            "--skip-waterbox requires periodic box vectors in the supplied "
+            "inpcrd or prepared prmtop"
         )
     modeller.topology.setPeriodicBoxVectors(input_box_vectors)
     box_dimensions = [
@@ -396,7 +408,10 @@ if skip_waterbox:
         input_box_vectors[1][1].value_in_unit(unit.nanometers),
         input_box_vectors[2][2].value_in_unit(unit.nanometers),
     ]
-    print("Skipping water box addition; using input periodic box (nm):", box_dimensions)
+    print(
+        f"Skipping water box addition; using {input_box_source} periodic box (nm):",
+        box_dimensions,
+    )
 else:
     # When Python creates the solvent box, retain the established 1 nm padding
     # behavior.  Modeller.addSolvent() sets the resulting periodic box.
