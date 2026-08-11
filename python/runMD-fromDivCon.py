@@ -460,6 +460,51 @@ system = forcefield.createSystem(
     ewaldErrorTolerance=1.0e-4,
 )
 
+# Match the C++ MDDriver force-group layout so that OpenMM energies can be
+# compared component-by-component without changing the Hamiltonian.  Any force
+# type outside these four expected AMBER/OpenMM terms is isolated in group 4
+# and reported separately as a diagnostic.
+for force_index in range(system.getNumForces()):
+    force = system.getForce(force_index)
+    if isinstance(force, mm.HarmonicBondForce):
+        force.setForceGroup(0)
+    elif isinstance(force, mm.HarmonicAngleForce):
+        force.setForceGroup(1)
+    elif isinstance(force, mm.PeriodicTorsionForce):
+        force.setForceGroup(2)
+    elif isinstance(force, mm.NonbondedForce):
+        force.setForceGroup(3)
+    else:
+        force.setForceGroup(4)
+
+def report_openmm_energy_components(simulation, label):
+    """Report OpenMM potential-energy components using the C++ force groups."""
+    component_groups = (
+        ("Bond", 0),
+        ("Angle", 1),
+        ("Torsion", 2),
+        ("Nonbonded", 3),
+    )
+
+    print(f"OpenMM energy decomposition - {label} (kJ/mol):")
+    component_sum = 0.0
+    for component_name, group in component_groups:
+        state = simulation.context.getState(getEnergy=True, groups=(1 << group))
+        energy = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        component_sum += energy
+        print(f"  {component_name:<12}: {energy:.6f}")
+
+    other_state = simulation.context.getState(getEnergy=True, groups=(1 << 4))
+    other_energy = other_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+    total_state = simulation.context.getState(getEnergy=True)
+    total_energy = total_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+
+    if abs(other_energy) > 1.0e-8:
+        print(f"  {'Other':<12}: {other_energy:.6f}")
+    print(f"  {'4-part sum':<12}: {component_sum:.6f}")
+    print(f"  {'Total':<12}: {total_energy:.6f}")
+    print(f"  {'Residual':<12}: {(total_energy - component_sum - other_energy):.6e}")
+
 # Set up the integrator
 integrator = mm.LangevinIntegrator(
     298*unit.kelvin,
@@ -490,6 +535,7 @@ print(
     "OpenMM initial potential energy (kJ/mol):",
     initial_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole),
 )
+report_openmm_energy_components(simulation, "initial")
 
 # Double check system
 # Extract the system from the simulation
@@ -547,6 +593,7 @@ print(
     "Post-minimization Potential Energy: "
     f"{minimized_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole):.2f} kJ/mol"
 )
+report_openmm_energy_components(simulation, "post-minimization")
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
