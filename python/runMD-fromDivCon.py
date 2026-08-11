@@ -243,9 +243,23 @@ for residue in prmtop.residues:
         # This bonding pattern has been seen before for this residue type, assign the same name
         new_residue_names[residue] = unique_bond_fingerprints[(residue_type, bond_fingerprint)]
 
-# Extract defined residues from the forcefield using XML parsing
+# Use the same TIP3P water family as the DivCon waterbox builder.  Keep the
+# filename in one place so residue-template discovery and final ForceField
+# construction can not silently drift to different water models.
+WATER_MODEL_XML = 'amber14/tip3p.xml'
+GENERATED_FORCEFIELD_XML = 'complete_forcefield_with_unique_residues.xml'
+WATER_RESIDUE_NAMES = {"HOH", "WAT"}
+
+# Preserve the atom-indexed DivCon/AMBER parameters before residue renaming and
+# OpenMM template assignment.  Atom ordering is unchanged by the preparation
+# performed below, so these provide an independent congruence reference.
+divcon_input_atom_charges = [float(atom.charge) for atom in prmtop.atoms]
+divcon_input_atom_types = [str(atom.type) for atom in prmtop.atoms]
+
+# Extract defined residues from the selected OpenMM water/ion force field.
 defined_residues = set()
-forcefield_xml_file = importlib.resources.files('openmm.app.data') / 'amber14/tip3pfb.xml'
+forcefield_xml_file = importlib.resources.files('openmm.app.data') / WATER_MODEL_XML
+print(f"OpenMM water/ion template force field: {WATER_MODEL_XML}")
 
 # Parse the XML to find all residue names
 tree = ET.parse(forcefield_xml_file)
@@ -278,10 +292,10 @@ prmtop.save('modified_with_unique_residues.inpcrd')
 
 # Now create the XML force field with the unique residues
 param_set = pmd.openmm.OpenMMParameterSet.from_structure(prmtop)
-param_set.write('complete_forcefield_with_unique_residues.xml')
+param_set.write(GENERATED_FORCEFIELD_XML)
 
 # Load the force field XML file
-tree = ET.parse('complete_forcefield_with_unique_residues.xml')
+tree = ET.parse(GENERATED_FORCEFIELD_XML)
 root = tree.getroot()
 
 # Create a set to track unique residue names already added to XML
@@ -353,7 +367,7 @@ def indent(elem, level=0):
 indent(root)
 
 # Write the modified and indented XML to a file
-tree.write('complete_forcefield_with_unique_residues.xml', xml_declaration=True, encoding='utf-8', method="xml")
+tree.write(GENERATED_FORCEFIELD_XML, xml_declaration=True, encoding='utf-8', method="xml")
 
 # Load the modified topology, but retain coordinates/box information from the
 # original supplied inpcrd.  The residue-renaming/topology preparation above
@@ -389,7 +403,10 @@ min_x, max_x = min(x_coords), max(x_coords)
 min_y, max_y = min(y_coords), max(y_coords)
 min_z, max_z = min(z_coords), max(z_coords)
 
-forcefield = app.ForceField('amber14/tip3pfb.xml','complete_forcefield_with_unique_residues.xml')
+# The generated XML carries the DivCon-transferred AMBER atom classes and
+# nonbonded parameters (including OW/HW), while the stock TIP3P file supplies
+# the standard HOH/WAT and ion residue templates.
+forcefield = app.ForceField(WATER_MODEL_XML, GENERATED_FORCEFIELD_XML)
 
 # Use Modeller for the final topology/positions passed to OpenMM.
 modeller = app.Modeller(prmtop.topology, inpcrd.positions)
@@ -459,6 +476,189 @@ system = forcefield.createSystem(
     removeCMMotion=True,
     ewaldErrorTolerance=1.0e-4,
 )
+
+def _find_nonbonded_force(openmm_system):
+    forces = [
+        openmm_system.getForce(i)
+        for i in range(openmm_system.getNumForces())
+        if isinstance(openmm_system.getForce(i), mm.NonbondedForce)
+    ]
+    if len(forces) != 1:
+        raise RuntimeError(
+            f"Expected exactly one OpenMM NonbondedForce, found {len(forces)}"
+        )
+    return forces[0]
+
+def _generated_nonbonded_class_parameters(xml_filename, wanted_classes):
+    """Read sigma/epsilon (OpenMM XML units) for selected transferred classes."""
+    xml_root = ET.parse(xml_filename).getroot()
+    nb_element = xml_root.find("NonbondedForce")
+    if nb_element is None:
+        raise RuntimeError(f"No NonbondedForce found in {xml_filename}")
+
+    parameters = {}
+    for atom_element in nb_element.findall("Atom"):
+        atom_class = atom_element.get("class")
+        if atom_class in wanted_classes:
+            parameters[atom_class] = (
+                float(atom_element.get("sigma")),
+                float(atom_element.get("epsilon")),
+            )
+    missing = set(wanted_classes) - set(parameters)
+    if missing:
+        raise RuntimeError(
+            f"Missing transferred nonbonded classes in {xml_filename}: "
+            + ", ".join(sorted(missing))
+        )
+    return parameters
+
+def align_and_report_nonbonded_parameters(openmm_system, topology):
+    """
+    Align existing DivCon water particles to the DivCon-transferred OW/HW
+    nonbonded parameters, then report the effective OpenMM nonbonded setup.
+
+    The stock amber14/tip3p.xml file supplies the HOH residue template and the
+    rigid TIP3P geometry.  The generated force-field XML contains the exact
+    OW/HW Lennard-Jones values transferred from the DivCon input.  Applying
+    those values here makes the Python validation Hamiltonian use the same
+    per-particle water charge/LJ parameters as MDDriver while retaining the
+    standard TIP3P topology/constraint geometry.
+    """
+    nonbonded = _find_nonbonded_force(openmm_system)
+    transferred_water_lj = _generated_nonbonded_class_parameters(
+        GENERATED_FORCEFIELD_XML, {"OW", "HW"}
+    )
+
+    topology_atoms = list(topology.atoms())
+    can_map_to_input = (
+        len(topology_atoms) == len(divcon_input_atom_charges)
+        and openmm_system.getNumParticles() == len(divcon_input_atom_charges)
+    )
+
+    water_particle_count = 0
+    if skip_waterbox and not can_map_to_input:
+        raise RuntimeError(
+            "Prepared topology atom count/order no longer matches the supplied "
+            "DivCon topology; can not safely transfer water parameters by index."
+        )
+
+    # For the validation path (--skip-waterbox), transfer the authoritative
+    # DivCon charge plus OW/HW LJ values to every existing water particle.
+    # For Python-generated solvent, retain the selected stock TIP3P particles.
+    if skip_waterbox:
+        for atom in topology_atoms:
+            if atom.residue.name not in WATER_RESIDUE_NAMES:
+                continue
+
+            if atom.element is not None and atom.element.symbol == "O":
+                atom_class = "OW"
+            elif atom.element is not None and atom.element.symbol == "H":
+                atom_class = "HW"
+            else:
+                raise RuntimeError(
+                    f"Unexpected atom {atom.name} in water residue {atom.residue.name}"
+                )
+
+            sigma_nm, epsilon_kj = transferred_water_lj[atom_class]
+            charge_e = divcon_input_atom_charges[atom.index]
+            nonbonded.setParticleParameters(
+                atom.index,
+                charge_e * unit.elementary_charge,
+                sigma_nm * unit.nanometer,
+                epsilon_kj * unit.kilojoule_per_mole,
+            )
+            water_particle_count += 1
+
+    method_names = {
+        mm.NonbondedForce.NoCutoff: "NoCutoff",
+        mm.NonbondedForce.CutoffNonPeriodic: "CutoffNonPeriodic",
+        mm.NonbondedForce.CutoffPeriodic: "CutoffPeriodic",
+        mm.NonbondedForce.Ewald: "Ewald",
+        mm.NonbondedForce.PME: "PME",
+        mm.NonbondedForce.LJPME: "LJPME",
+    }
+    print("OpenMM nonbonded configuration:")
+    print(f"  water template XML       : {WATER_MODEL_XML}")
+    print(f"  transferred parameter XML: {GENERATED_FORCEFIELD_XML}")
+    print(f"  method                   : {method_names.get(nonbonded.getNonbondedMethod(), nonbonded.getNonbondedMethod())}")
+    print(f"  cutoff (nm)              : {nonbonded.getCutoffDistance().value_in_unit(unit.nanometer):.8f}")
+    print(f"  Ewald error tolerance    : {nonbonded.getEwaldErrorTolerance():.8g}")
+    print(f"  dispersion correction    : {nonbonded.getUseDispersionCorrection()}")
+    print(f"  switching function       : {nonbonded.getUseSwitchingFunction()}")
+    if nonbonded.getUseSwitchingFunction():
+        print(f"  switching distance (nm)  : {nonbonded.getSwitchingDistance().value_in_unit(unit.nanometer):.8f}")
+    print(f"  nonbonded particles      : {nonbonded.getNumParticles()}")
+    print(f"  nonbonded exceptions     : {nonbonded.getNumExceptions()}")
+    if skip_waterbox:
+        print(f"  DivCon water particles aligned: {water_particle_count}")
+
+    total_charge_e = 0.0
+    for particle_index in range(nonbonded.getNumParticles()):
+        charge, _, _ = nonbonded.getParticleParameters(particle_index)
+        total_charge_e += charge.value_in_unit(unit.elementary_charge)
+    print(f"  total particle charge (e): {total_charge_e:.10f}")
+
+    print("DivCon-transferred OW/HW LJ parameters:")
+    for atom_class in ("OW", "HW"):
+        sigma_nm, epsilon_kj = transferred_water_lj[atom_class]
+        print(
+            f"  {atom_class}: sigma={sigma_nm:.12f} nm  "
+            f"epsilon={epsilon_kj:.12f} kJ/mol"
+        )
+
+    # Report actual parameters on one representative water and the first Na/Cl
+    # ions, if present.  This reports the final values OpenMM will actually use.
+    representative_atoms = []
+    first_water_residue = next(
+        (r for r in topology.residues() if r.name in WATER_RESIDUE_NAMES), None
+    )
+    if first_water_residue is not None:
+        representative_atoms.extend(list(first_water_residue.atoms()))
+
+    seen_ion_residues = set()
+    for atom in topology_atoms:
+        residue_name = atom.residue.name.upper()
+        if residue_name in {"NA", "CL"} and residue_name not in seen_ion_residues:
+            representative_atoms.append(atom)
+            seen_ion_residues.add(residue_name)
+        if len(seen_ion_residues) == 2:
+            break
+
+    if representative_atoms:
+        print("Representative effective OpenMM particle parameters:")
+        for atom in representative_atoms:
+            charge, sigma, epsilon = nonbonded.getParticleParameters(atom.index)
+            input_type = (
+                divcon_input_atom_types[atom.index] if atom.index < len(divcon_input_atom_types)
+                else "<generated>"
+            )
+            input_charge = (
+                divcon_input_atom_charges[atom.index] if atom.index < len(divcon_input_atom_charges)
+                else float("nan")
+            )
+            print(
+                f"  index={atom.index:5d} {atom.residue.name}:{atom.name:<4s} "
+                f"DivConType={input_type:<8s} "
+                f"DivConQ={input_charge:+.8f} "
+                f"OpenMMQ={charge.value_in_unit(unit.elementary_charge):+.8f} "
+                f"sigma={sigma.value_in_unit(unit.nanometer):.12f} nm "
+                f"epsilon={epsilon.value_in_unit(unit.kilojoule_per_mole):.12f} kJ/mol"
+            )
+
+    if first_water_residue is not None:
+        water_indices = {atom.index for atom in first_water_residue.atoms()}
+        print("Representative water constraints:")
+        for constraint_index in range(openmm_system.getNumConstraints()):
+            atom1, atom2, distance = openmm_system.getConstraintParameters(constraint_index)
+            if atom1 in water_indices and atom2 in water_indices:
+                print(
+                    f"  {atom1}-{atom2}: "
+                    f"{distance.value_in_unit(unit.nanometer):.12f} nm"
+                )
+
+    return nonbonded
+
+nonbonded_force = align_and_report_nonbonded_parameters(system, modeller.topology)
 
 # Match the C++ MDDriver force-group layout so that OpenMM energies can be
 # compared component-by-component without changing the Hamiltonian.  Any force
