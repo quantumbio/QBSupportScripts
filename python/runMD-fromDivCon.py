@@ -68,6 +68,12 @@ parser.add_argument("inpcrd", help="Path to AMBER inpcrd file")
 parser.add_argument("--test-run", action="store_true", help="Run a short test simulation")
 parser.add_argument("--medium-run", action="store_true", help="Run a medium simulation")
 parser.add_argument(
+    "--minimization-steps",
+    type=int,
+    metavar="N",
+    help="Override the maximum number of OpenMM minimization iterations",
+)
+parser.add_argument(
     "--equilibration-steps",
     type=int,
     metavar="N",
@@ -78,6 +84,12 @@ parser.add_argument(
     type=int,
     metavar="N",
     help="Override the number of production MD steps",
+)
+parser.add_argument(
+    "--report-interval",
+    type=int,
+    metavar="N",
+    help="Override the production trajectory/metrics reporting interval in MD steps",
 )
 parser.add_argument("--skip-waterbox", action="store_true", help="Skip adding the water box")
 
@@ -112,6 +124,12 @@ else:
 # Explicit step counts override the preset selected above.  A single
 # equilibration value is intentionally applied to both NVT and NPT so this
 # interface mirrors qmechanic's --moleculardynamics EQUIL,PRODUCTION settings.
+if args.minimization_steps is not None:
+    if args.minimization_steps <= 0:
+        parser.error("--minimization-steps must be greater than zero")
+    minimize_nsteps = args.minimization_steps
+    print(f"Minimization step override: {args.minimization_steps} maximum iterations.")
+
 if args.equilibration_steps is not None:
     if args.equilibration_steps <= 0:
         parser.error("--equilibration-steps must be greater than zero")
@@ -124,6 +142,21 @@ if args.production_steps is not None:
         parser.error("--production-steps must be greater than zero")
     production_nsteps = args.production_steps
     print(f"Production step override: {args.production_steps} steps.")
+
+if args.report_interval is not None:
+    if args.report_interval <= 0:
+        parser.error("--report-interval must be greater than zero")
+    preport_interval = args.report_interval
+    print(f"Production report interval override: {args.report_interval} steps.")
+
+# Never configure a reporter interval beyond the whole production run.
+# This guarantees at least one trajectory/report frame for short validation runs.
+if preport_interval > production_nsteps:
+    print(
+        f"Production report interval {preport_interval} exceeds production length "
+        f"{production_nsteps}; using {production_nsteps} steps."
+    )
+    preport_interval = production_nsteps
 
 # Load the Amber topology and coordinate files
 prmtop = pmd.load_file(prmtopFile, inpcrdFile)
@@ -334,7 +367,8 @@ positions_array = np.array([[pos[0].value_in_unit(unit.nanometers),
                               pos[1].value_in_unit(unit.nanometers),
                               pos[2].value_in_unit(unit.nanometers)] for pos in positions])
 
-# Calculate bounding box dimensions based on XYZ coordinates
+# Calculate coordinate bounds.  These are only needed when this script is
+# responsible for creating a new solvent box.
 x_coords = positions_array[:, 0]
 y_coords = positions_array[:, 1]
 z_coords = positions_array[:, 2]
@@ -343,63 +377,59 @@ min_x, max_x = min(x_coords), max(x_coords)
 min_y, max_y = min(y_coords), max(y_coords)
 min_z, max_z = min(z_coords), max(z_coords)
 
-# Create box dimensions with padding
-padding = 10.0 * unit.nanometers  # Example padding
-box_size_x = (max_x - min_x) + 2 * padding.value_in_unit(unit.nanometers)
-box_size_y = (max_y - min_y) + 2 * padding.value_in_unit(unit.nanometers)
-box_size_z = (max_z - min_z) + 2 * padding.value_in_unit(unit.nanometers)
-
-# Create box vectors
-box_vectors = [
-    mm.Vec3(box_size_x, 0.0, 0.0),
-    mm.Vec3(0.0, box_size_y, 0.0),
-    mm.Vec3(0.0, 0.0, box_size_z),
-]
-
-# Set periodic box vectors for the topology
-prmtop.topology.setPeriodicBoxVectors(box_vectors)
-
-# Get the periodic box vectors
-box_vectors = prmtop.topology.getPeriodicBoxVectors()
-
-# Check if the box vectors are defined
-if box_vectors is not None:
-    # Calculate the box dimensions
-    box_dimensions = [
-        box_vectors[0][0].value_in_unit(unit.nanometers),
-        box_vectors[1][1].value_in_unit(unit.nanometers),
-        box_vectors[2][2].value_in_unit(unit.nanometers)
-    ]
-
-    print("Box Dimensions (nm):", box_dimensions)
-else:
-    print("No periodic box dimensions are defined in the topology.")
-
 forcefield = app.ForceField('amber14/tip3pfb.xml','complete_forcefield_with_unique_residues.xml')
 
-# Use Modeller to create a waterbox
+# Use Modeller for the final topology/positions passed to OpenMM.
 modeller = app.Modeller(prmtop.topology, inpcrd.positions)
 
-# Create box dimensions with padding
-padding = 1.0 * unit.nanometers  # Example padding
-box_size_x = (max_x - min_x) + 2 * padding.value_in_unit(unit.nanometers)
-box_size_y = (max_y - min_y) + 2 * padding.value_in_unit(unit.nanometers)
-box_size_z = (max_z - min_z) + 2 * padding.value_in_unit(unit.nanometers)
-
-# Create box vector for solvent addition
-box_vector = mm.Vec3(box_size_x, box_size_y, box_size_z)
-
-if not skip_waterbox:
-    # Add a water box and neutralize the system with counterions
-    modeller.addSolvent(forcefield, model='tip3p', boxSize=box_vector, ionicStrength=0.15*unit.molar)
+if skip_waterbox:
+    # The supplied inpcrd is the authoritative prepared MD system.  Preserve its
+    # periodic cell exactly instead of constructing a synthetic padded box.
+    input_box_vectors = inpcrd.getBoxVectors()
+    if input_box_vectors is None:
+        raise RuntimeError(
+            "--skip-waterbox requires periodic box vectors in the supplied inpcrd"
+        )
+    modeller.topology.setPeriodicBoxVectors(input_box_vectors)
+    box_dimensions = [
+        input_box_vectors[0][0].value_in_unit(unit.nanometers),
+        input_box_vectors[1][1].value_in_unit(unit.nanometers),
+        input_box_vectors[2][2].value_in_unit(unit.nanometers),
+    ]
+    print("Skipping water box addition; using input periodic box (nm):", box_dimensions)
 else:
-    print("Skipping water box addition.")
+    # When Python creates the solvent box, retain the established 1 nm padding
+    # behavior.  Modeller.addSolvent() sets the resulting periodic box.
+    padding = 1.0 * unit.nanometers
+    box_size_x = (max_x - min_x) + 2 * padding.value_in_unit(unit.nanometers)
+    box_size_y = (max_y - min_y) + 2 * padding.value_in_unit(unit.nanometers)
+    box_size_z = (max_z - min_z) + 2 * padding.value_in_unit(unit.nanometers)
+    box_vector = mm.Vec3(box_size_x, box_size_y, box_size_z)
+    modeller.addSolvent(
+        forcefield,
+        model='tip3p',
+        boxSize=box_vector,
+        ionicStrength=0.15*unit.molar,
+    )
+    final_box_vectors = modeller.topology.getPeriodicBoxVectors()
+    if final_box_vectors is not None:
+        print(
+            "Generated periodic box (nm):",
+            [
+                final_box_vectors[0][0].value_in_unit(unit.nanometers),
+                final_box_vectors[1][1].value_in_unit(unit.nanometers),
+                final_box_vectors[2][2].value_in_unit(unit.nanometers),
+            ],
+        )
 # Now create the system again after modifying the topology
 system = forcefield.createSystem(
     modeller.topology,
     nonbondedMethod=app.PME,
     nonbondedCutoff=1.0 * unit.nanometers,
-    constraints=app.HBonds
+    constraints=app.HBonds,
+    rigidWater=True,
+    removeCMMotion=True,
+    ewaldErrorTolerance=1.0e-4,
 )
 
 # Set up the integrator
@@ -416,6 +446,22 @@ simulation = app.Simulation(modeller.topology, system, integrator)
 # Set initial positions from Amber coordinates
 simulation.context.setPositions(modeller.positions)
 
+# Record the actual OpenMM execution platform and the authoritative starting
+# periodic box used by this Context.  These are high-value congruence checks.
+platform = simulation.context.getPlatform()
+print(f"OpenMM execution platform: {platform.getName()}")
+print(f"OpenMM particles: {system.getNumParticles()}")
+print(f"OpenMM constraints: {system.getNumConstraints()}")
+initial_state = simulation.context.getState(getEnergy=True, getPositions=True)
+initial_box = initial_state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(unit.nanometers)
+print(
+    "OpenMM initial box (nm):",
+    [float(initial_box[0][0]), float(initial_box[1][1]), float(initial_box[2][2])],
+)
+print(
+    "OpenMM initial potential energy (kJ/mol):",
+    initial_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole),
+)
 
 # Double check system
 # Extract the system from the simulation
@@ -454,24 +500,31 @@ else:
 
 
 
-# Minimize energy
-print(f'Minimizing {minimize_nsteps} steps ...', flush=True)
+# Minimize energy using the same OpenMM LocalEnergyMinimizer semantics as the
+# C++ driver: 10 kJ/mol/nm RMS-force tolerance and a maximum iteration count.
+minimization_tolerance = 10.0
+print(
+    f'Minimizing with OpenMM: tolerance={minimization_tolerance:.2f} kJ/mol/nm, '
+    f'maxIterations={minimize_nsteps} ...',
+    flush=True,
+)
 start_time = time.time()
-
-# Minimize until energy convergence
-prev_energy = float('inf')
-tolerance = 10.0  # kJ/mol threshold for convergence
-for i in range(0, minimize_nsteps, 500):
-    simulation.minimizeEnergy(maxIterations=500)
-    state = simulation.context.getState(getEnergy=True)
-    energy = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
-    print(f"Step {i} Current Potential Energy: {energy:.2f} kJ/mol")
-    if abs(prev_energy - energy) < tolerance:
-        print(f'Converged (tolerance: {tolerance:.2f} kJ/mol) at step: {i}')
-        break
-    prev_energy = energy
+mm.LocalEnergyMinimizer.minimize(
+    simulation.context,
+    minimization_tolerance,
+    minimize_nsteps,
+)
+minimized_state = simulation.context.getState(getEnergy=True)
+print(
+    "Post-minimization Potential Energy: "
+    f"{minimized_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole):.2f} kJ/mol"
+)
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
+
+# Match the C++ protocol: initialize velocities once after minimization and
+# carry them continuously through NVT, NPT, and production.
+simulation.context.setVelocitiesToTemperature(298*unit.kelvin)
 
 def save_imaged_pdb(simulation, filename):
     """
@@ -537,9 +590,9 @@ def get_equilibration_atom_indices(simulation):
 
 
 def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_steps=100000, report_interval=1000, atom_indices=None):
-    """Monitor aligned RMSD on a meaningful atom subset to determine equilibration convergence."""
+    """Run exactly max_steps while monitoring aligned RMSD on a meaningful atom subset."""
     rmsd_values = []
-    converged = False
+    convergence_reported = False
 
     md_topology = md.Topology.from_openmm(simulation.topology)
     if atom_indices is None:
@@ -551,8 +604,11 @@ def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_st
     ref_positions = reference_state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
     ref_traj = md.Trajectory(np.array(ref_positions)[np.newaxis, :, :], md_topology)
 
-    for step in range(0, max_steps, report_interval):
-        simulation.step(report_interval)
+    completed_steps = 0
+    while completed_steps < max_steps:
+        chunk = min(report_interval, max_steps - completed_steps)
+        simulation.step(chunk)
+        completed_steps += chunk
 
         # Extract current positions and compute aligned RMSD against the fixed reference.
         state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
@@ -562,15 +618,24 @@ def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_st
         rmsd = md.rmsd(cur_traj, ref_traj, atom_indices=atom_indices)[0]
         rmsd_values.append(rmsd)
 
-        print(f"Step {step + report_interval}: RMSD = {rmsd:.3f} nm", flush=True)
+        print(f"Step {completed_steps}: RMSD = {rmsd:.3f} nm", flush=True)
 
-        if len(rmsd_values) > 5 and all(r < threshold for r in rmsd_values[-5:]):
-            print(f'Equilibration converged at step {step + report_interval} with RMSD {rmsd:.3f} nm')
-            converged = True
-            break
+        if (
+            not convergence_reported
+            and len(rmsd_values) > 5
+            and all(r < threshold for r in rmsd_values[-5:])
+        ):
+            print(
+                f'RMSD convergence criterion satisfied at step {completed_steps} '
+                f'with RMSD {rmsd:.3f} nm; continuing to requested equilibration length.'
+            )
+            convergence_reported = True
 
-    if not converged:
-        print(f"Maximum equilibration steps {max_steps} reached without full convergence.")
+    if not convergence_reported:
+        print(
+            f"Completed requested equilibration length of {max_steps} steps; "
+            "RMSD convergence criterion was not reached."
+        )
 
 
 def compute_target_pressure_bar(barostat=None):
@@ -681,7 +746,7 @@ print(f"Elapsed time: {elapsed_time:.6f} seconds")
 # Save final equilibrated positions
 save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
-simulation.context.setVelocitiesToTemperature(298*unit.kelvin)
+# Continue directly from the equilibrated NPT velocities into production.
 # Reset step count so production logs/reporters are production-relative.
 simulation.currentStep = 0
 #simulation.reporters.append(app.PDBReporter('output.pdb', preport_interval))
