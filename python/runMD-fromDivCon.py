@@ -1036,12 +1036,20 @@ simulation.reporters.append(app.StateDataReporter(
     density=True,
     elapsedTime=True,
 ))
-simulation.reporters.append(app.DCDReporter('output.dcd', preport_interval))
+# Keep a handle to the DCD reporter so the equilibrated production starting
+# structure can be written explicitly as frame 0.  Subsequent frames are still
+# written automatically at preport_interval (for example 0, 500, 1000, ...).
+dcd_reporter = app.DCDReporter('output.dcd', preport_interval)
+simulation.reporters.append(dcd_reporter)
 print (f'Running Production NPT Simulation - {production_nsteps * 0.002} ps ....', flush=True)
 
-# Capture a production reference to report meaningful structural drift.
+# Capture the production reference before taking any production MD steps.  Use
+# this exact same State both as the structural RMSD reference and as DCD frame 0
+# so the first trajectory frame is the authoritative production starting point.
 production_reference_state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
 production_reference_positions = production_reference_state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
+dcd_reporter.report(simulation, production_reference_state)
+print("Saved production step 0 frame to output.dcd", flush=True)
 production_dof = compute_degrees_of_freedom(system)
 instantaneous_pressure_supported = hasattr(mm.MonteCarloBarostat, "computeCurrentPressure")
 
