@@ -31,14 +31,13 @@ PYTHON=python
 #
 # EQUILIBRATION_STEPS is used for BOTH NVT and NPT equilibration.
 # PRODUCTION_STEPS is the production MD length.
-EQUILIBRATION_STEPS=50000
-PRODUCTION_STEPS=200000
-
-# Testing:
-MINIMIZATION_STEPS=5000
-EQUILIBRATION_STEPS=500
-PRODUCTION_STEPS=2000
-REPORT_INTERVAL=500
+#
+# Use defaults only when the variables have not already been supplied
+# by the calling environment.
+: "${MINIMIZATION_STEPS:=5000}"
+: "${EQUILIBRATION_STEPS:=500}"
+: "${PRODUCTION_STEPS:=2000}"
+: "${REPORT_INTERVAL:=500}"
 
 export MINIMIZATION_STEPS
 export EQUILIBRATION_STEPS
