@@ -6,7 +6,18 @@ set -euo pipefail
 # DivCon/OpenMM C++ vs Python validation
 # =============================================================================
 
-PDBID=${1}
+usage() {
+    echo "Usage: $0 PDBID" >&2
+    echo "       $0 PDBID_LIST [percent]" >&2
+}
+
+if (( $# < 1 || $# > 2 )); then
+    usage
+    exit 2
+fi
+
+INPUT=$1
+PCT=${2:-100}
 
 : "${DIVCON:?DIVCON must be set before running this script}"
 : "${QBSUPPORT:?QBSUPPORT must be set before running this script}"
@@ -44,6 +55,77 @@ export EQUILIBRATION_STEPS
 export PRODUCTION_STEPS
 export REPORT_INTERVAL
 
+# =============================================================================
+# Input mode
+# =============================================================================
+
+# If the first argument names a regular file, treat it as a PDBID list.  The
+# optional percentage selects a random subset, rounded up as in run-prepareALL.sh.
+# Each selected PDBID is then processed by a separate invocation of this script,
+# preserving the existing single-PDB workflow unchanged.
+if [[ -f "${INPUT}" && -z "${MD_COMPARISON_SINGLE:-}" ]]; then
+    [[ ${PCT} =~ ^[0-9]+$ ]] || {
+        echo "ERROR: percent must be an integer from 0 through 100." >&2
+        exit 2
+    }
+    (( PCT >= 0 && PCT <= 100 )) || {
+        echo "ERROR: percent must be from 0 through 100." >&2
+        exit 2
+    }
+
+    TOTAL=$(awk 'NF && $0 !~ /^[[:space:]]*#/ { n++ } END { print n + 0 }' "${INPUT}")
+    TAKE=$(( (TOTAL * PCT + 99) / 100 ))
+
+    # Match run-prepareALL.sh by honoring PBS_NUM_PPN when supplied.  The
+    # MD-specific override is useful when each comparison itself uses many CPU
+    # threads and a lower outer concurrency is desired.
+    N=${MD_PARALLEL_JOBS:-${PBS_NUM_PPN:-4}}
+    [[ ${N} =~ ^[1-9][0-9]*$ ]] || {
+        echo "ERROR: MD_PARALLEL_JOBS/PBS_NUM_PPN must be a positive integer." >&2
+        exit 2
+    }
+
+    SCRIPT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/$(basename -- "${BASH_SOURCE[0]}")"
+
+    echo "======================================================================"
+    echo "DivCon/OpenMM validation list mode"
+    echo "Input list          : ${INPUT}"
+    echo "Structures available: ${TOTAL}"
+    echo "Percent requested   : ${PCT}%"
+    echo "Structures selected : ${TAKE}"
+    echo "Parallel jobs       : ${N}"
+    echo "======================================================================"
+
+    if (( TAKE == 0 )); then
+        exit 0
+    fi
+
+    export MD_COMPARISON_SINGLE=1
+
+    if command -v shuf >/dev/null 2>&1; then
+        awk 'NF && $0 !~ /^[[:space:]]*#/ { print }' "${INPUT}" \
+            | shuf -n "${TAKE}" \
+            | xargs -P "${N}" -n1 bash "${SCRIPT_PATH}"
+    else
+        # Portable fallback when GNU shuf is unavailable.
+        awk 'BEGIN { srand() }
+             NF && $0 !~ /^[[:space:]]*#/ { printf "%.12f\t%s\n", rand(), $0 }' "${INPUT}" \
+            | sort -k1,1 \
+            | cut -f2- \
+            | sed -n "1,${TAKE}p" \
+            | xargs -P "${N}" -n1 bash "${SCRIPT_PATH}"
+    fi
+
+    exit $?
+fi
+
+if (( $# == 2 )); then
+    echo "ERROR: an optional percentage is only valid when the first argument is a PDBID list file." >&2
+    usage
+    exit 2
+fi
+
+PDBID=${INPUT}
 
 echo "======================================================================"
 echo "DivCon/OpenMM validation: ${PDBID}"
