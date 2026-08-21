@@ -251,6 +251,8 @@ echo "======================================================================"
     python/output.prmtop \
     --label1 "C++" \
     --label2 "Python" \
+    --out1 cpp/md.screenout \
+    --out2 python/md.screenout \
     -o "${PDBID}" \
     > analysis.screenout 2>&1
 
