@@ -2628,7 +2628,7 @@ def main()->None:
         json_file = f"{args.out_prefix}_summary.json"
         with open(json_file, "w") as jfh:
             json.dump(summary, jfh, indent=2, ensure_ascii=False)
-            logging.info("Wrote summary JSON to %s", json_file)
+            print(f"INFO: Wrote summary JSON to {json_file}", flush=True)
 
     finally:
         for f in tmp_files:
