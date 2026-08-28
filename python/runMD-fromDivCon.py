@@ -165,8 +165,8 @@ prmtop = pmd.load_file(prmtopFile, inpcrdFile)
 for residue in prmtop.residues:
     if residue.name == "HOH":
         # Identify H1 and H2
-        h1 = residue.atoms[0]  # Adjust index if necessary
-        h2 = residue.atoms[1]  # Adjust index if necessary
+        h1 = residue.atoms[1]  # Adjust index if necessary
+        h2 = residue.atoms[2]  # Adjust index if necessary
         
         # Find and remove the bond between H1 and H2
         for bond in h1.bonds:
