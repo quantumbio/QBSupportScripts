@@ -161,20 +161,45 @@ if preport_interval > production_nsteps:
 # Load the Amber topology and coordinate files
 prmtop = pmd.load_file(prmtopFile, inpcrdFile)
 
-# Identify and modify HOH residues
+WATER_RESIDUE_NAMES = {"HOH", "WAT"}
+
+# Identify water residues and remove the artificial H-H connectivity used by
+# the DivCon/AMBER topology representation.  Identify the two hydrogens by
+# atomic number rather than assuming any particular atom ordering.
 for residue in prmtop.residues:
-    if residue.name == "HOH":
-        # Identify H1 and H2
-        h1 = residue.atoms[1]  # Adjust index if necessary
-        h2 = residue.atoms[2]  # Adjust index if necessary
-        
-        # Find and remove the bond between H1 and H2
-        for bond in h1.bonds:
-            if bond.atom2 == h2 or bond.atom1 == h2:
-                # Remove the bond from both atoms
-                h1.bonds.remove(bond)
-                h2.bonds.remove(bond)
-                break  # Exit loop after removing the bond
+    if residue.name not in WATER_RESIDUE_NAMES:
+        continue
+
+    hydrogens = [atom for atom in residue.atoms if atom.atomic_number == 1]
+
+    if len(hydrogens) != 2:
+        raise RuntimeError(
+            f"Water residue {residue.name} index {residue.idx} contains "
+            f"{len(hydrogens)} hydrogen atoms; expected exactly 2."
+        )
+
+    h1, h2 = hydrogens
+
+    # Locate the H-H bond explicitly rather than relying on atom ordering.
+    hh_bond = next(
+        (
+            bond
+            for bond in h1.bonds
+            if (bond.atom1 is h1 and bond.atom2 is h2)
+            or (bond.atom1 is h2 and bond.atom2 is h1)
+        ),
+        None,
+    )
+
+    if hh_bond is not None:
+        # Keep the ParmEd topology internally consistent by removing the same
+        # Bond object from the per-atom bond lists and the Structure bond list.
+        if hh_bond in h1.bonds:
+            h1.bonds.remove(hh_bond)
+        if hh_bond in h2.bonds:
+            h2.bonds.remove(hh_bond)
+        if hh_bond in prmtop.bonds:
+            prmtop.bonds.remove(hh_bond)
 
 #prmtop.save('initial.pdb')
 from openmm.app import PDBFile
@@ -248,7 +273,6 @@ for residue in prmtop.residues:
 # construction can not silently drift to different water models.
 WATER_MODEL_XML = 'amber14/tip3p.xml'
 GENERATED_FORCEFIELD_XML = 'complete_forcefield_with_unique_residues.xml'
-WATER_RESIDUE_NAMES = {"HOH", "WAT"}
 
 # Preserve the atom-indexed DivCon/AMBER parameters before residue renaming and
 # OpenMM template assignment.  Atom ordering is unchanged by the preparation
