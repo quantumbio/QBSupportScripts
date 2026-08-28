@@ -24,8 +24,9 @@ Analyses Performed
 11. DCCM heatmaps (Cα-only) for each structure            → *_dccm_ca_LABEL.pdf
 12. Differential DCCM (Δ-correlation matrix)              → *_dccm_delta.pdf
 13. Ligand–loop DCCM correlation summary                  → *_dccm_ligand_loop_residue.pdf
-14. OUT.gz trajectory summaries (if provided)             → printed to screen
-    - Includes: number of steps, simulated ps, average energy & temperature, drift
+14. MD output/screenout validation (if provided)            → printed / PDFs / JSON
+    - Auto-detects Python/OpenMM, DivCon/C++/OpenMM, or legacy three-column output
+    - Compares system construction, energy decomposition, protocol, and thermodynamics
 15. Ligand Analyses (if `--ligand` is specified):
     a. Ligand RMSD vs. time                               → *_ligand_rmsd.pdf
     b. Ligand SASA vs. time                               → *_ligand_sasa.pdf
@@ -64,16 +65,17 @@ Top-level fields include:
   - dssp_diff: residue-wise secondary structure disagreements (>50% occupancy)
   - dccm_overall: DCCM correlations and Δ-correlation highlights
   - ligand: (if applicable) ligand RMSD, RMSF, SASA, H-bonds, contact fingerprint, and DCCM
-  - out1_summary / out2_summary: thermodynamic summaries parsed from OUT.gz logs
+  - out1_summary / out2_summary: backwards-compatible thermodynamic summaries
+  - openmm_validation: normalized MD-log data plus system, energy, protocol, and production comparisons
 
 Usage Examples
 --------------
 Basic:
     python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz
 
-With OUT.gz simulation logs:
+With MD screenout/log files (plain text or gzip-compressed):
     python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz \
-        --out1 OUT1.gz --out2 OUT2.gz
+        --out1 run1/md.screenout.gz --out2 run2/md.screenout
 
 With ligand analysis (resname e.g. CBN):
     python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz \
@@ -173,7 +175,7 @@ CONFIG = {
 
     # Additional trajectory-only validation.  These metrics compare structural
     # behavior derived from the trajectories themselves; they do not depend on
-    # OUT.gz/screen output and therefore remain useful when the two simulations
+    # MD output/screen output and therefore remain useful when the two simulations
     # were run with different hardware, random seeds, or solvent realizations.
     "trajectory_validation": {
         "stability_fraction": 0.25,        # compare first/last 25% of each trajectory
@@ -341,63 +343,987 @@ def res_label(res_or_atom):
     chain = chr(65 + res.chain.index)
     return f"{chain}:{res.name}{res.resSeq}"
     
-def parse_out_file(out_gz_path: Path):
-    """
-    Parse OUT.gz file for energy and temperature summary.
-    """
-    steps, energies, temps = [], [], []
+_FLOAT_RE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 
+
+def open_text_auto(path: Path):
+    """Open a plain-text or gzip-compressed log by inspecting its file signature."""
+    path = Path(path)
+    with open(path, "rb") as probe:
+        is_gzip = probe.read(2) == b"\x1f\x8b"
+    if is_gzip:
+        return gzip.open(path, "rt", errors="replace")
+    return open(path, "rt", errors="replace")
+
+
+def _finite_float(value):
+    """Convert a numeric token to float, representing NaN/Inf as None for valid JSON."""
     try:
-        with gzip.open(out_gz_path, 'rt') as fh:
-            for line in fh:
-                if line.strip().startswith('#') or not line.strip():
-                    continue
-                parts = line.strip().split(',')
-                if len(parts) == 3 and parts[0].strip().isdigit():
-                    try:
-                        steps.append(int(parts[0]))
-                        energies.append(float(parts[1]))
-                        temps.append(float(parts[2]))
-                    except ValueError:
-                        continue
-    except Exception as e:
-        logging.warning("Failed to parse OUT.gz: %s", e)
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if np.isfinite(parsed) else None
+
+
+def _parse_bool(value: str):
+    value = value.strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
+def _first_match(text: str, pattern: str, cast=float, flags=0):
+    match = re.search(pattern, text, flags)
+    if not match:
+        return None
+    try:
+        return cast(match.group(1))
+    except (TypeError, ValueError):
         return None
 
-    if not steps:
+
+def _first_box(text: str, pattern: str):
+    match = re.search(pattern, text)
+    if not match:
         return None
+    values = re.findall(_FLOAT_RE, match.group(1))
+    if len(values) < 3:
+        return None
+    return [float(v) for v in values[:3]]
 
-    interval = steps[1] - steps[0] if len(steps) > 1 else 1000
-    total_ps = steps[-1] * (interval / 1000)
 
-    return {
-        "n_steps": len(steps),
-        "total_ps": total_ps,
-        "avg_energy": np.mean(energies),
-        "std_energy": np.std(energies),
-        "avg_temp": np.mean(temps),
-        "std_temp": np.std(temps)
+def _parse_energy_decompositions(lines: list[str]) -> dict:
+    sections = {}
+    key_map = {
+        "Bond": "bond",
+        "Angle": "angle",
+        "Torsion": "torsion",
+        "Nonbonded": "nonbonded",
+        "4-part sum": "four_part_sum",
+        "Total": "total",
+        "Residual": "residual"
     }
 
-def print_sim_summary(label: str, data: dict):
+    for i, line in enumerate(lines):
+        header = re.search(
+            r"OpenMM energy decomposition - (initial|post-minimization) \(kJ/mol\):",
+            line,
+            re.IGNORECASE
+        )
+        if not header:
+            continue
+
+        section_name = header.group(1).lower().replace("-", "_")
+        values = {}
+        for candidate in lines[i + 1:i + 10]:
+            cleaned = re.sub(r"^\s*\[DEBUG\]\s*", "", candidate).strip()
+            match = re.match(
+                rf"(Bond|Angle|Torsion|Nonbonded|4-part sum|Total|Residual)\s*:\s*({_FLOAT_RE})",
+                cleaned
+            )
+            if match:
+                values[key_map[match.group(1)]] = float(match.group(2))
+        if values:
+            sections[section_name] = values
+
+    return sections
+
+
+def _parse_representative_particles(text: str) -> dict:
+    particles = {}
+    pattern = re.compile(
+        rf"index=\s*(\d+)\s+(\S+)\s+DivConType=(\S+)\s+"
+        rf"DivConQ=({_FLOAT_RE})\s+OpenMMQ=({_FLOAT_RE})\s+"
+        rf"sigma=({_FLOAT_RE})\s+nm\s+epsilon=({_FLOAT_RE})\s+kJ/mol"
+    )
+
+    for match in pattern.finditer(text):
+        index, identity, divcon_type, divcon_q, openmm_q, sigma, epsilon = match.groups()
+        identity_upper = identity.upper()
+        type_upper = divcon_type.upper()
+
+        if identity_upper in {"HOH:O", "WAT:O"}:
+            role = "water_o"
+        elif identity_upper in {"HOH:H1", "WAT:H1"}:
+            role = "water_h1"
+        elif identity_upper in {"HOH:H2", "WAT:H2"}:
+            role = "water_h2"
+        elif identity_upper.startswith("NA:") or type_upper == "NA+":
+            role = "sodium"
+        elif identity_upper.startswith("CL:") or type_upper == "CL-":
+            role = "chloride"
+        else:
+            continue
+
+        particles[role] = {
+            "index": int(index),
+            "identity": identity,
+            "divcon_type": divcon_type,
+            "divcon_charge_e": float(divcon_q),
+            "openmm_charge_e": float(openmm_q),
+            "sigma_nm": float(sigma),
+            "epsilon_kj_per_mol": float(epsilon)
+        }
+
+    return particles
+
+
+def _parse_water_constraints(lines: list[str]) -> list[dict]:
+    constraints = []
+    in_section = False
+    for line in lines:
+        if "Representative water constraints:" in line:
+            in_section = True
+            continue
+        if not in_section:
+            continue
+
+        cleaned = re.sub(r"^\s*\[DEBUG\]\s*", "", line).strip()
+        match = re.match(rf"(\d+)-(\d+)\s*:\s*({_FLOAT_RE})\s+nm$", cleaned)
+        if match:
+            constraints.append({
+                "particle1": int(match.group(1)),
+                "particle2": int(match.group(2)),
+                "distance_nm": float(match.group(3))
+            })
+            continue
+
+        if constraints:
+            break
+
+    return constraints
+
+
+def _parse_python_production(lines: list[str]) -> list[dict]:
+    rows = []
+    in_table = False
+
+    for line in lines:
+        if line.startswith("Production metrics (step,"):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if rows and (line.startswith("Elapsed time:") or line.startswith("Simulation summary:")):
+            break
+
+        parts = [part.strip() for part in line.strip().split(",")]
+        if len(parts) != 11 or not parts[0].isdigit():
+            continue
+
+        rows.append({
+            "step": int(parts[0]),
+            "time_ps": None,
+            "potential_energy_kj_per_mol": _finite_float(parts[1]),
+            "kinetic_energy_kj_per_mol": _finite_float(parts[2]),
+            "temperature_k": _finite_float(parts[3]),
+            "volume_nm3": _finite_float(parts[4]),
+            "density_g_per_ml": _finite_float(parts[5]),
+            "target_pressure_bar": _finite_float(parts[6]),
+            "instantaneous_pressure_bar": _finite_float(parts[7]),
+            "wall_time_s": _finite_float(parts[10])
+        })
+
+    return rows
+
+
+def _parse_cpp_production(lines: list[str]) -> list[dict]:
+    rows = []
+    in_table = False
+
+    for line in lines:
+        if "Steps" in line and "PE(kcal/mol)" in line and "Vol(A^3)" in line:
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if "OpenMM Molecular Dynamics Summary" in line:
+            break
+
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) < 9 or not parts[0].isdigit():
+            continue
+
+        pe_kcal = _finite_float(parts[2])
+        ke_kcal = _finite_float(parts[3])
+        volume_a3 = _finite_float(parts[5])
+        rows.append({
+            "step": int(parts[0]),
+            "time_ps": _finite_float(parts[1]),
+            "potential_energy_kj_per_mol": pe_kcal * 4.184 if pe_kcal is not None else None,
+            "kinetic_energy_kj_per_mol": ke_kcal * 4.184 if ke_kcal is not None else None,
+            "temperature_k": _finite_float(parts[4]),
+            "volume_nm3": volume_a3 / 1000.0 if volume_a3 is not None else None,
+            "density_g_per_ml": _finite_float(parts[6]),
+            "target_pressure_bar": None,
+            "instantaneous_pressure_bar": None,
+            "wall_time_s": None
+        })
+
+    return rows
+
+
+def _parse_legacy_production(lines: list[str]) -> list[dict]:
+    """Retain support for the older three-column step,energy,temp OUT format."""
+    rows = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = [part.strip() for part in stripped.split(",")]
+        if len(parts) != 3 or not parts[0].isdigit():
+            continue
+
+        energy = _finite_float(parts[1])
+        temperature = _finite_float(parts[2])
+        if energy is None or temperature is None:
+            continue
+        rows.append({
+            "step": int(parts[0]),
+            "time_ps": None,
+            "potential_energy_kj_per_mol": energy,
+            "kinetic_energy_kj_per_mol": None,
+            "temperature_k": temperature,
+            "volume_nm3": None,
+            "density_g_per_ml": None,
+            "target_pressure_bar": None,
+            "instantaneous_pressure_bar": None,
+            "wall_time_s": None
+        })
+    return rows
+
+
+def _infer_production_timing(protocol: dict, production: list[dict]) -> None:
+    steps = sorted({row["step"] for row in production})
+    positive_diffs = [b - a for a, b in zip(steps, steps[1:]) if b > a]
+    if positive_diffs and len(set(positive_diffs)) == 1 and "production_report_interval_steps" not in protocol:
+        protocol["production_report_interval_steps"] = positive_diffs[0]
+        protocol["production_report_interval_source"] = "inferred_from_production_rows"
+
+    duration = protocol.get("production_duration_ps")
+    nsteps = protocol.get("production_steps")
+    if duration is not None and nsteps:
+        protocol["timestep_ps"] = float(duration) / float(nsteps)
+        protocol["timestep_source"] = "inferred_from_reported_production_duration"
+        for row in production:
+            if row.get("time_ps") is None:
+                row["time_ps"] = float(row["step"]) * protocol["timestep_ps"]
+
+
+def parse_out_file(out_path: Path):
+    """
+    Parse a Python/OpenMM, DivCon/C++/OpenMM, or legacy MD output file.
+
+    Input may be plain text or gzip-compressed. Returned values use a normalized
+    representation so output 1 and output 2 can be compared independent of which
+    implementation produced them.
+    """
+    try:
+        with open_text_auto(out_path) as fh:
+            text = fh.read()
+    except Exception as exc:
+        logging.warning("Failed to read MD output %s: %s", out_path, exc)
+        return None
+
+    lines = text.splitlines()
+    if "Production metrics (step," in text or "OpenMM execution platform:" in text:
+        implementation = "python_openmm"
+    elif "[DEBUG] OpenMM force/nonbonded configuration:" in text or "OpenMM Molecular Dynamics Summary" in text:
+        implementation = "cpp_openmm"
+    else:
+        implementation = "legacy_or_unknown"
+
+    data = {
+        "source": str(out_path),
+        "implementation": implementation,
+        "system": {},
+        "protocol": {},
+        "representative_particles": _parse_representative_particles(text),
+        "representative_water_constraints": _parse_water_constraints(lines),
+        "energy_decomposition_kj_per_mol": _parse_energy_decompositions(lines),
+        "equilibration": {},
+        "production": []
+    }
+    system = data["system"]
+    protocol = data["protocol"]
+
+    if implementation == "python_openmm":
+        system["platform"] = _first_match(text, r"OpenMM execution platform:\s*(\S+)", str)
+        system["particles"] = _first_match(text, r"OpenMM particles:\s*(\d+)", int)
+        system["constraints"] = _first_match(text, r"OpenMM constraints:\s*(\d+)", int)
+        system["nonbonded_particles"] = _first_match(text, r"nonbonded particles\s*:\s*(\d+)", int)
+        system["nonbonded_exceptions"] = _first_match(text, r"nonbonded exceptions\s*:\s*(\d+)", int)
+        system["water_particles"] = _first_match(text, r"DivCon water particles aligned:\s*(\d+)", int)
+        system["total_particle_charge_e"] = _first_match(
+            text, rf"total particle charge \(e\):\s*({_FLOAT_RE})"
+        )
+        system["nonbonded_method"] = _first_match(text, r"^\s*method\s*:\s*(\S+)", str, re.MULTILINE)
+        system["cutoff_nm"] = _first_match(text, rf"cutoff \(nm\)\s*:\s*({_FLOAT_RE})")
+        system["ewald_error_tolerance"] = _first_match(
+            text, rf"Ewald error tolerance\s*:\s*({_FLOAT_RE})"
+        )
+        dispersion = _first_match(text, r"dispersion correction\s*:\s*(True|False)", str, re.IGNORECASE)
+        switching = _first_match(text, r"switching function\s*:\s*(True|False)", str, re.IGNORECASE)
+        system["dispersion_correction"] = _parse_bool(dispersion) if dispersion is not None else None
+        system["switching_function"] = _parse_bool(switching) if switching is not None else None
+        system["initial_box_nm"] = _first_box(text, r"OpenMM initial box \(nm\):\s*\[([^\]]+)\]")
+
+        protocol["minimization_limit"] = _first_match(
+            text, r"Minimization step override:\s*(\d+)\s+maximum iterations", int
+        )
+        if protocol["minimization_limit"] is not None:
+            protocol["minimization_limit_kind"] = "max_iterations"
+        equil_steps = _first_match(
+            text, r"Equilibration step override:\s*(\d+)\s+steps for both NVT and NPT", int
+        )
+        if equil_steps is not None:
+            protocol["nvt_steps"] = equil_steps
+            protocol["npt_steps"] = equil_steps
+        protocol["production_steps"] = _first_match(
+            text, r"Production step override:\s*(\d+)\s+steps", int
+        )
+        protocol["production_report_interval_steps"] = _first_match(
+            text, r"Production report interval override:\s*(\d+)\s+steps", int
+        )
+        if protocol["production_report_interval_steps"] is not None:
+            protocol["production_report_interval_source"] = "reported"
+        protocol["production_duration_ps"] = _first_match(
+            text, rf"Running Production NPT Simulation -\s*({_FLOAT_RE})\s+ps"
+        )
+
+        data["production"] = _parse_python_production(lines)
+        pressures = {
+            row["target_pressure_bar"] for row in data["production"]
+            if row["target_pressure_bar"] is not None
+        }
+        if len(pressures) == 1:
+            protocol["target_pressure_bar"] = next(iter(pressures))
+
+    elif implementation == "cpp_openmm":
+        system["particles"] = _first_match(
+            text, r"^\[DEBUG\]\s+particles\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["constraints"] = _first_match(
+            text, r"^\[DEBUG\]\s+constraints\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["harmonic_bonds"] = _first_match(
+            text, r"^\[DEBUG\]\s+harmonic bonds\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["harmonic_angles"] = _first_match(
+            text, r"^\[DEBUG\]\s+harmonic angles\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["periodic_torsions"] = _first_match(
+            text, r"^\[DEBUG\]\s+periodic torsions\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["nonbonded_particles"] = _first_match(
+            text, r"^\[DEBUG\]\s+nonbonded particles\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["nonbonded_exceptions"] = _first_match(
+            text, r"^\[DEBUG\]\s+nonbonded exceptions\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["zero_energy_exceptions"] = _first_match(
+            text, r"^\[DEBUG\]\s+zero-energy\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["nonzero_energy_exceptions"] = _first_match(
+            text, r"^\[DEBUG\]\s+nonzero-energy\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["water_molecules"] = _first_match(
+            text, r"^\[DEBUG\]\s+water molecules\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["water_particles"] = _first_match(
+            text, r"^\[DEBUG\]\s+water particles\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["total_particle_charge_e"] = _first_match(
+            text, rf"^\[DEBUG\]\s+total particle charge\s*:\s*({_FLOAT_RE})\s+e", float, re.MULTILINE
+        )
+        system["nonbonded_method"] = _first_match(
+            text, r"^\[DEBUG\]\s+nonbonded method\s*:\s*([^\s(]+)", str, re.MULTILINE
+        )
+        system["cutoff_nm"] = _first_match(
+            text, rf"^\[DEBUG\]\s+cutoff \(nm\)\s*:\s*({_FLOAT_RE})", float, re.MULTILINE
+        )
+        system["ewald_error_tolerance"] = _first_match(
+            text, rf"^\[DEBUG\]\s+Ewald error tolerance\s*:\s*({_FLOAT_RE})", float, re.MULTILINE
+        )
+        dispersion = _first_match(
+            text, r"^\[DEBUG\]\s+dispersion correction\s*:\s*(true|false)", str,
+            re.MULTILINE | re.IGNORECASE
+        )
+        switching = _first_match(
+            text, r"^\[DEBUG\]\s+switching function\s*:\s*(true|false)", str,
+            re.MULTILINE | re.IGNORECASE
+        )
+        system["dispersion_correction"] = _parse_bool(dispersion) if dispersion is not None else None
+        system["switching_function"] = _parse_bool(switching) if switching is not None else None
+        system["initial_box_nm"] = _first_box(text, r"mdSwitches\.periodicBox:\s*([^\n]+)")
+
+        protocol["minimization_limit"] = _first_match(
+            text, r"\[MD\] Minimizing before equilibration for\s*(\d+)\s+steps", int
+        )
+        if protocol["minimization_limit"] is not None:
+            protocol["minimization_limit_kind"] = "reported_steps"
+        nvt_match = re.search(
+            rf"\[MD\] Starting NVT equilibration for\s*(\d+)\s+steps at\s*({_FLOAT_RE})\s+K",
+            text
+        )
+        if nvt_match:
+            protocol["nvt_steps"] = int(nvt_match.group(1))
+            protocol["target_temperature_k"] = float(nvt_match.group(2))
+        npt_match = re.search(
+            rf"\[MD\] Starting NPT equilibration for\s*(\d+)\s+steps at\s*({_FLOAT_RE})\s+K "
+            rf"and\s*({_FLOAT_RE})\s+bar",
+            text
+        )
+        if npt_match:
+            protocol["npt_steps"] = int(npt_match.group(1))
+            protocol["target_temperature_k"] = float(npt_match.group(2))
+            protocol["target_pressure_bar"] = float(npt_match.group(3))
+        production_match = re.search(
+            rf"\[MD\] Starting production MD for\s*(\d+)\s+steps\s*\(({_FLOAT_RE})\s+ps\)",
+            text
+        )
+        if production_match:
+            protocol["production_steps"] = int(production_match.group(1))
+            protocol["production_duration_ps"] = float(production_match.group(2))
+
+        nvt_energy = _first_match(
+            text, rf"\[MD\] NVT equilibration done\. Potential Energy:\s*({_FLOAT_RE})"
+        )
+        if nvt_energy is not None:
+            data["equilibration"]["nvt"] = {"potential_energy_kj_per_mol": nvt_energy}
+        npt_done = re.search(
+            rf"\[MD\] NPT equilibration done\. Potential Energy:\s*({_FLOAT_RE}).*?"
+            rf"\[MD\] Final box after NPT equilibration \(nm\):\s*"
+            rf"({_FLOAT_RE})\s+({_FLOAT_RE})\s+({_FLOAT_RE})\s+"
+            rf"Volume\(nm\^3\):\s*({_FLOAT_RE})\s+density \(g/ml\):\s*({_FLOAT_RE})\s+T:\s*({_FLOAT_RE})",
+            text,
+            re.DOTALL
+        )
+        if npt_done:
+            data["equilibration"]["npt"] = {
+                "potential_energy_kj_per_mol": float(npt_done.group(1)),
+                "box_nm": [float(npt_done.group(i)) for i in (2, 3, 4)],
+                "volume_nm3": float(npt_done.group(5)),
+                "density_g_per_ml": float(npt_done.group(6)),
+                "temperature_k": float(npt_done.group(7))
+            }
+
+        data["production"] = _parse_cpp_production(lines)
+
+    else:
+        data["production"] = _parse_legacy_production(lines)
+        if data["production"]:
+            data["implementation"] = "legacy_three_column"
+        else:
+            logging.warning("No recognized MD data found in %s", out_path)
+            return None
+
+    initial_pe = _first_match(
+        text, rf"(?:OpenMM initial potential energy \(kJ/mol\):|\[DEBUG\] Initial Potential Energy:)\s*({_FLOAT_RE})",
+        float,
+        re.IGNORECASE
+    )
+    if initial_pe is not None:
+        data["initial_potential_energy_kj_per_mol"] = initial_pe
+
+    post_min_pe = _first_match(
+        text, rf"(?:Post-minimization Potential Energy:|\[MD\] Post-minimization Potential Energy:)\s*({_FLOAT_RE})",
+        float
+    )
+    if post_min_pe is not None:
+        data["post_minimization_potential_energy_kj_per_mol"] = post_min_pe
+
+    _infer_production_timing(protocol, data["production"])
+    return data
+
+
+def _symmetric_relative_difference_percent(value1, value2, signed=False):
+    """Symmetric percentage difference; unlike percent-vs-input2 it is invariant to input order."""
+    if value1 is None or value2 is None:
+        return None
+    denominator = abs(value1) + abs(value2)
+    if denominator <= 1.0e-15:
+        return 0.0 if value1 == value2 else None
+    numerator = 2.0 * (value1 - value2)
+    result = 100.0 * numerator / denominator
+    return result if signed else abs(result)
+
+
+def _numeric_comparison(value1, value2) -> dict:
+    delta = float(value1 - value2)
+    return {
+        "input1": float(value1),
+        "input2": float(value2),
+        "delta_input1_minus_input2": delta,
+        "absolute_difference": abs(delta),
+        "symmetric_relative_difference_percent": _symmetric_relative_difference_percent(value1, value2)
+    }
+
+
+def _compare_mapping(mapping1: dict, mapping2: dict, fields: list[str]) -> dict:
+    comparison = {}
+    for field in fields:
+        value1 = mapping1.get(field)
+        value2 = mapping2.get(field)
+        if value1 is None or value2 is None:
+            continue
+
+        if isinstance(value1, bool) or isinstance(value1, str) or isinstance(value1, int):
+            comparison[field] = {
+                "input1": value1,
+                "input2": value2,
+                "match": value1 == value2
+            }
+        elif isinstance(value1, (float, np.floating)) and isinstance(value2, (float, np.floating)):
+            comparison[field] = _numeric_comparison(value1, value2)
+        elif isinstance(value1, list) and isinstance(value2, list) and len(value1) == len(value2):
+            array1 = np.asarray(value1, dtype=float)
+            array2 = np.asarray(value2, dtype=float)
+            delta = array1 - array2
+            comparison[field] = {
+                "input1": [float(v) for v in array1],
+                "input2": [float(v) for v in array2],
+                "delta_input1_minus_input2": [float(v) for v in delta],
+                "max_absolute_difference": float(np.max(np.abs(delta))),
+                "rmse_difference": float(np.sqrt(np.mean(delta * delta)))
+            }
+
+    return comparison
+
+
+def _compare_energy_sections(data1: dict, data2: dict) -> dict:
+    result = {}
+    sections1 = data1.get("energy_decomposition_kj_per_mol", {})
+    sections2 = data2.get("energy_decomposition_kj_per_mol", {})
+
+    for section_name in ("initial", "post_minimization"):
+        values1 = sections1.get(section_name)
+        values2 = sections2.get(section_name)
+        if not values1 or not values2:
+            continue
+
+        section = {}
+        for component in ("bond", "angle", "torsion", "nonbonded", "four_part_sum", "total", "residual"):
+            if component in values1 and component in values2:
+                section[component] = _numeric_comparison(values1[component], values2[component])
+        result[section_name] = section
+
+    return result
+
+
+def _compare_representative_particles(data1: dict, data2: dict) -> dict:
+    result = {}
+    particles1 = data1.get("representative_particles", {})
+    particles2 = data2.get("representative_particles", {})
+
+    for role in ("water_o", "water_h1", "water_h2", "sodium", "chloride"):
+        p1 = particles1.get(role)
+        p2 = particles2.get(role)
+        if not p1 or not p2:
+            continue
+
+        result[role] = {
+            "index": {"input1": p1["index"], "input2": p2["index"], "match": p1["index"] == p2["index"]},
+            "divcon_type": {
+                "input1": p1["divcon_type"],
+                "input2": p2["divcon_type"],
+                "match": p1["divcon_type"] == p2["divcon_type"]
+            },
+            "openmm_charge_e": _numeric_comparison(p1["openmm_charge_e"], p2["openmm_charge_e"]),
+            "sigma_nm": _numeric_comparison(p1["sigma_nm"], p2["sigma_nm"]),
+            "epsilon_kj_per_mol": _numeric_comparison(
+                p1["epsilon_kj_per_mol"], p2["epsilon_kj_per_mol"]
+            )
+        }
+
+    return result
+
+
+def _compare_water_constraints(data1: dict, data2: dict) -> dict:
+    distances1 = sorted(
+        item["distance_nm"] for item in data1.get("representative_water_constraints", [])
+    )
+    distances2 = sorted(
+        item["distance_nm"] for item in data2.get("representative_water_constraints", [])
+    )
+    if not distances1 or len(distances1) != len(distances2):
+        return {}
+
+    return {
+        "n_constraints": len(distances1),
+        "sorted_distance_comparisons_nm": [
+            _numeric_comparison(value1, value2)
+            for value1, value2 in zip(distances1, distances2)
+        ],
+        "max_absolute_distance_difference_nm": float(
+            np.max(np.abs(np.asarray(distances1) - np.asarray(distances2)))
+        )
+    }
+
+
+def _production_rows_by_step(data: dict) -> dict[int, dict]:
+    return {int(row["step"]): row for row in data.get("production", [])}
+
+
+def _production_observable_stats(values1: np.ndarray, values2: np.ndarray) -> dict:
+    delta = values1 - values2
+    relative = np.array([
+        _symmetric_relative_difference_percent(a, b) for a, b in zip(values1, values2)
+    ], dtype=float)
+    return {
+        "n": int(len(delta)),
+        "mean_input1": float(np.mean(values1)),
+        "mean_input2": float(np.mean(values2)),
+        "mean_signed_difference": float(np.mean(delta)),
+        "mean_absolute_difference": float(np.mean(np.abs(delta))),
+        "rmse_difference": float(np.sqrt(np.mean(delta * delta))),
+        "max_absolute_difference": float(np.max(np.abs(delta))),
+        "mean_absolute_symmetric_relative_difference_percent": float(np.mean(relative)),
+        "max_absolute_symmetric_relative_difference_percent": float(np.max(relative))
+    }
+
+
+def compare_production(data1: dict, data2: dict) -> dict:
+    rows1 = _production_rows_by_step(data1)
+    rows2 = _production_rows_by_step(data2)
+    common_steps = sorted(set(rows1) & set(rows2))
+    observables = (
+        "potential_energy_kj_per_mol",
+        "kinetic_energy_kj_per_mol",
+        "temperature_k",
+        "volume_nm3",
+        "density_g_per_ml"
+    )
+
+    result = {
+        "matched_steps": common_steps,
+        "n_matched_steps": len(common_steps),
+        "observables": {},
+        "matched_rows": []
+    }
+
+    for observable in observables:
+        paired = [
+            (rows1[step].get(observable), rows2[step].get(observable))
+            for step in common_steps
+        ]
+        paired = [(a, b) for a, b in paired if a is not None and b is not None]
+        if not paired:
+            continue
+        values1 = np.asarray([a for a, _ in paired], dtype=float)
+        values2 = np.asarray([b for _, b in paired], dtype=float)
+        result["observables"][observable] = _production_observable_stats(values1, values2)
+
+    for step in common_steps:
+        row = {"step": step}
+        for observable in observables:
+            value1 = rows1[step].get(observable)
+            value2 = rows2[step].get(observable)
+            if value1 is not None and value2 is not None:
+                row[observable] = _numeric_comparison(value1, value2)
+        result["matched_rows"].append(row)
+
+    return result
+
+
+def compare_openmm_outputs(data1: dict, data2: dict) -> dict:
+    system_fields = [
+        "particles", "constraints", "nonbonded_particles", "nonbonded_exceptions",
+        "water_particles", "total_particle_charge_e", "nonbonded_method", "cutoff_nm",
+        "ewald_error_tolerance", "dispersion_correction", "switching_function", "initial_box_nm"
+    ]
+    protocol_fields = [
+        "minimization_limit", "nvt_steps", "npt_steps", "production_steps",
+        "production_report_interval_steps", "target_temperature_k", "target_pressure_bar",
+        "production_duration_ps", "timestep_ps"
+    ]
+
+    return {
+        "system": _compare_mapping(data1.get("system", {}), data2.get("system", {}), system_fields),
+        "protocol": _compare_mapping(data1.get("protocol", {}), data2.get("protocol", {}), protocol_fields),
+        "representative_particles": _compare_representative_particles(data1, data2),
+        "representative_water_constraints": _compare_water_constraints(data1, data2),
+        "energy_decomposition_kj_per_mol": _compare_energy_sections(data1, data2),
+        "production": compare_production(data1, data2)
+    }
+
+
+def compatibility_out_summary(data: dict):
+    """Return the historical OUT-summary fields for existing JSON consumers."""
+    if not data or not data.get("production"):
+        return None
+
+    rows = data["production"]
+    energies = [
+        row["potential_energy_kj_per_mol"]
+        for row in rows
+        if row["potential_energy_kj_per_mol"] is not None
+    ]
+    temps = [row["temperature_k"] for row in rows if row["temperature_k"] is not None]
+    if not energies or not temps:
+        return None
+
+    times = [row["time_ps"] for row in rows if row.get("time_ps") is not None]
+    total_ps = max(times) if times else data.get("protocol", {}).get("production_duration_ps")
+    if total_ps is None and len(rows) > 1:
+        steps = [row["step"] for row in rows]
+        interval = steps[1] - steps[0]
+        total_ps = steps[-1] * (interval / 1000.0)
+
+    return {
+        "n_steps": int(len(rows)),
+        "total_ps": float(total_ps) if total_ps is not None else 0.0,
+        "avg_energy": float(np.mean(energies)),
+        "std_energy": float(np.std(energies)),
+        "avg_temp": float(np.mean(temps)),
+        "std_temp": float(np.std(temps))
+    }
+
+
+def _format_implementation(value: str) -> str:
+    return {
+        "python_openmm": "Python/OpenMM",
+        "cpp_openmm": "DivCon/C++/OpenMM",
+        "legacy_three_column": "Legacy three-column OUT"
+    }.get(value, value)
+
+
+def print_single_output_summary(label: str, data: dict) -> None:
+    print(f"\nMD output summary: {label}")
     if not data:
-        print(f"\nSimulation Summary: {label}")
-        print("  No valid OUT.gz data found.")
+        print("  No recognized MD output data found.")
         return
 
-    print(f"\nSimulation Summary: {label}")
-    print(f"  Total simulated time     : {data['total_ps']:.1f} ps ({data['total_ps'] / 1000:.2f} ns)")
-    print(f"  Number of steps reported : {data['n_steps']}")
-    print(f"  Avg. potential energy    : {data['avg_energy']:.1f} ± {data['std_energy']:.1f} kJ/mol")
-    print(f"  Avg. temperature         : {data['avg_temp']:.1f} ± {data['std_temp']:.1f} K")
+    print(f"  Detected format            : {_format_implementation(data['implementation'])}")
+    system = data.get("system", {})
+    protocol = data.get("protocol", {})
+    for field, title in (
+        ("platform", "OpenMM platform"),
+        ("particles", "Particles"),
+        ("constraints", "Constraints"),
+        ("nonbonded_exceptions", "Nonbonded exceptions"),
+        ("water_particles", "Water particles")
+    ):
+        if system.get(field) is not None:
+            print(f"  {title:<27}: {system[field]}")
 
-    drift_ratio = data['std_energy'] / abs(data['avg_energy'])
-    if drift_ratio < 0.01:
-        print("  Energy drift             : Stable (std dev < 1%)")
-    elif drift_ratio < 0.03:
-        print("  Energy drift             : Mild instability (std dev ~2%)")
-    else:
-        print("  Energy drift             : Significant (std dev > 3%)")
+    if protocol.get("production_steps") is not None:
+        print(f"  {'Production steps':<27}: {protocol['production_steps']}")
+    if protocol.get("production_duration_ps") is not None:
+        print(f"  {'Production duration':<27}: {protocol['production_duration_ps']:.3f} ps")
+    print(f"  {'Production rows':<27}: {len(data.get('production', []))}")
+
+
+def print_system_comparison(label1: str, label2: str, comparison: dict) -> None:
+    print("\nOpenMM System / Hamiltonian Validation")
+    print("=" * 72)
+    system = comparison.get("system", {})
+    if not system:
+        print("  No common system-configuration fields were available for comparison.")
+        return
+
+    for field, values in system.items():
+        name = field.replace("_", " ")
+        if "match" in values:
+            status = "MATCH" if values["match"] else "DIFFER"
+            print(f"  {name:<30}: {status:<6}  {values['input1']}  vs  {values['input2']}")
+        elif "max_absolute_difference" in values:
+            print(f"  {name:<30}: max |Δ|={values['max_absolute_difference']:.6g}")
+        else:
+            print(
+                f"  {name:<30}: Δ({label1}-{label2})="
+                f"{values['delta_input1_minus_input2']:+.6g}"
+            )
+
+
+def print_representative_parameter_comparison(comparison: dict) -> None:
+    particles = comparison.get("representative_particles", {})
+    constraints = comparison.get("representative_water_constraints", {})
+    if not particles and not constraints:
+        return
+
+    print("\nRepresentative Effective Parameter Validation")
+    print("=" * 72)
+    for role, values in particles.items():
+        charge = values["openmm_charge_e"]
+        sigma = values["sigma_nm"]
+        epsilon = values["epsilon_kj_per_mol"]
+        index_status = "MATCH" if values["index"]["match"] else "DIFFER"
+        type_status = "MATCH" if values["divcon_type"]["match"] else "DIFFER"
+        print(
+            f"  {role:<10} index={index_status:<6} type={type_status:<6} "
+            f"Δq={charge['delta_input1_minus_input2']:+.3e} e  "
+            f"Δsigma={sigma['delta_input1_minus_input2']:+.3e} nm  "
+            f"Δepsilon={epsilon['delta_input1_minus_input2']:+.3e} kJ/mol"
+        )
+
+    if constraints:
+        print(
+            f"  water constraints: n={constraints['n_constraints']}  "
+            f"max |Δdistance|={constraints['max_absolute_distance_difference_nm']:.3e} nm"
+        )
+
+
+def print_energy_comparison(label1: str, label2: str, comparison: dict) -> None:
+    energy = comparison.get("energy_decomposition_kj_per_mol", {})
+    component_labels = {
+        "bond": "Bond",
+        "angle": "Angle",
+        "torsion": "Torsion",
+        "nonbonded": "Nonbonded",
+        "four_part_sum": "4-part sum",
+        "total": "Total",
+        "residual": "Residual"
+    }
+
+    for section_name, title in (
+        ("initial", "OpenMM Energy Validation — Initial (diagnostic)"),
+        ("post_minimization", "OpenMM Energy Validation — Post-minimization")
+    ):
+        section = energy.get(section_name)
+        if not section:
+            continue
+
+        print(f"\n{title}")
+        print("=" * len(title))
+        print(
+            f"  {'Component':<14} {label1[:18]:>18} {label2[:18]:>18} "
+            f"{'Δ (1-2)':>14} {'sym |Δ| %':>11}"
+        )
+        print("  " + "-" * 79)
+        for component, display_name in component_labels.items():
+            if component not in section:
+                continue
+            values = section[component]
+            relative = values["symmetric_relative_difference_percent"]
+            relative_text = f"{relative:.4f}" if relative is not None else "n/a"
+            print(
+                f"  {display_name:<14} {values['input1']:>18.4f} {values['input2']:>18.4f} "
+                f"{values['delta_input1_minus_input2']:>+14.4f} {relative_text:>11}"
+            )
+
+
+def print_protocol_comparison(label1: str, label2: str, comparison: dict) -> None:
+    protocol = comparison.get("protocol", {})
+    if not protocol:
+        return
+
+    print("\nMD Protocol Validation")
+    print("=" * 72)
+    for field, values in protocol.items():
+        name = field.replace("_", " ")
+        if "match" in values:
+            status = "MATCH" if values["match"] else "DIFFER"
+            print(f"  {name:<34}: {status:<6}  {values['input1']}  vs  {values['input2']}")
+        else:
+            print(
+                f"  {name:<34}: {values['input1']:.6g} vs {values['input2']:.6g} "
+                f"(Δ {values['delta_input1_minus_input2']:+.6g})"
+            )
+
+
+def print_production_comparison(label1: str, label2: str, comparison: dict) -> None:
+    production = comparison.get("production", {})
+    print("\nProduction Thermodynamic Validation")
+    print("=" * 72)
+    if not production or not production.get("matched_steps"):
+        print("  No common production steps with thermodynamic data were found.")
+        return
+
+    steps = production["matched_steps"]
+    print(f"  Matched production checkpoints: {len(steps)} ({steps[0]} through {steps[-1]})")
+    print(f"  Differences are defined as {label1} - {label2}.")
+    print("  Relative values use symmetric percent difference: 200*|x1-x2|/(|x1|+|x2|).")
+    print()
+    print(f"  {'Observable':<22} {'mean |Δ|':>14} {'RMSE Δ':>14} {'mean sym %':>12} {'max sym %':>12}")
+    print("  " + "-" * 78)
+
+    names = {
+        "potential_energy_kj_per_mol": "Potential energy",
+        "kinetic_energy_kj_per_mol": "Kinetic energy",
+        "temperature_k": "Temperature",
+        "volume_nm3": "Volume",
+        "density_g_per_ml": "Density"
+    }
+    for key, title in names.items():
+        stats = production.get("observables", {}).get(key)
+        if not stats:
+            continue
+        print(
+            f"  {title:<22} {stats['mean_absolute_difference']:>14.6g} "
+            f"{stats['rmse_difference']:>14.6g} "
+            f"{stats['mean_absolute_symmetric_relative_difference_percent']:>12.4f} "
+            f"{stats['max_absolute_symmetric_relative_difference_percent']:>12.4f}"
+        )
+
+
+def plot_production_validation(
+    data1: dict, data2: dict, comparison: dict, label1: str, label2: str, out_prefix: str
+) -> None:
+    production = comparison.get("production", {})
+    common_steps = production.get("matched_steps", [])
+    if not common_steps:
+        return
+
+    rows1 = _production_rows_by_step(data1)
+    rows2 = _production_rows_by_step(data2)
+    plot_specs = (
+        ("potential_energy_kj_per_mol", "Potential energy (kJ/mol)", "potential_energy_validation"),
+        ("temperature_k", "Temperature (K)", "temperature_validation"),
+        ("volume_nm3", "Volume (nm³)", "volume_validation"),
+        ("density_g_per_ml", "Density (g/mL)", "density_validation")
+    )
+
+    for key, ylabel, suffix in plot_specs:
+        points = [
+            (step, rows1[step].get(key), rows2[step].get(key))
+            for step in common_steps
+            if rows1[step].get(key) is not None and rows2[step].get(key) is not None
+        ]
+        if not points:
+            continue
+
+        x = np.asarray([point[0] for point in points], dtype=int)
+        values1 = np.asarray([point[1] for point in points], dtype=float)
+        values2 = np.asarray([point[2] for point in points], dtype=float)
+        plt.figure()
+        plt.plot(x, values1, marker="o", label=label1)
+        plt.plot(x, values2, marker="o", label=label2)
+        plt.xlabel("Production step")
+        plt.ylabel(ylabel)
+        plt.title(ylabel.split(" (")[0] + " validation")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{out_prefix}_{suffix}.pdf", dpi=CONFIG["plot"]["dpi"])
+        plt.close()
+
+    pe_points = [
+        (
+            step,
+            rows1[step].get("potential_energy_kj_per_mol"),
+            rows2[step].get("potential_energy_kj_per_mol")
+        )
+        for step in common_steps
+        if rows1[step].get("potential_energy_kj_per_mol") is not None
+        and rows2[step].get("potential_energy_kj_per_mol") is not None
+    ]
+    if pe_points:
+        x = np.asarray([point[0] for point in pe_points], dtype=int)
+        signed_relative = np.asarray([
+            _symmetric_relative_difference_percent(point[1], point[2], signed=True)
+            for point in pe_points
+        ])
+        plt.figure()
+        plt.axhline(0.0, linewidth=0.8)
+        plt.plot(x, signed_relative, marker="o")
+        plt.xlabel("Production step")
+        plt.ylabel(f"Signed symmetric ΔPE (%) [{label1} - {label2}]")
+        plt.title("Potential-energy difference")
+        plt.tight_layout()
+        plt.savefig(f"{out_prefix}_potential_energy_delta.pdf", dpi=CONFIG["plot"]["dpi"])
+        plt.close()
 
 
 # ──────────────────────────  MAIN  ───────────────────────────────────────────
@@ -408,8 +1334,8 @@ def main()->None:
     ap.add_argument("-o","--out-prefix", default="comparison", help="Use as a basename for the comparison (e.g. PDBid)")
     ap.add_argument("--label1", default="Complete Structure")
     ap.add_argument("--label2", default="Published Structure")
-    ap.add_argument("--out1", type=Path, help="OUT.gz file for trajectory 1 (optional)")
-    ap.add_argument("--out2", type=Path, help="OUT.gz file for trajectory 2 (optional)")
+    ap.add_argument("--out1", type=Path, help="MD output/screenout for trajectory 1; plain text or gzip (optional)")
+    ap.add_argument("--out2", type=Path, help="MD output/screenout for trajectory 2; plain text or gzip (optional)")
     ap.add_argument("--ligand", type=str, help="3-letter ligand residue name (e.g., CBN or LIG)")
     ap.add_argument("-q","--quiet",action="store_true")
     args=ap.parse_args()
@@ -1651,28 +2577,58 @@ def main()->None:
             }
             summary["ligand"]["loop_dccm"] = lig_loop_stats
         
-        # ───────── Simulation summary from OUT.gz (optional) ─────────
+        # ───────── MD output / OpenMM system + energy validation (optional) ─────────
+        out1_data = parse_out_file(args.out1) if args.out1 else None
+        out2_data = parse_out_file(args.out2) if args.out2 else None
+
         if args.out1 or args.out2:
-            print("\n" + "=" * 60)
-            print("Production Energy & Temperature Summary")
-            print("=" * 60)
-        
-        if args.out1:
-            out1_data = parse_out_file(args.out1)
+            print("\n" + "=" * 72)
+            print("MD Output / OpenMM Validation")
+            print("=" * 72)
+            if args.out1:
+                print_single_output_summary(args.label1, out1_data)
+            if args.out2:
+                print_single_output_summary(args.label2, out2_data)
+
+            openmm_validation = {
+                "delta_definition": f"{args.label1} - {args.label2}",
+                "relative_difference_definition": (
+                    "symmetric percent difference = 200*|x1-x2|/(|x1|+|x2|)"
+                ),
+                "input1": out1_data,
+                "input2": out2_data,
+                "comparison": None
+            }
+
             if out1_data:
-                summary["out1_summary"] = {k: float(v) for k, v in out1_data.items()}
-            print_sim_summary(args.label1, out1_data)
-        
-        if args.out2:
-            out2_data = parse_out_file(args.out2)
+                compat1 = compatibility_out_summary(out1_data)
+                if compat1:
+                    summary["out1_summary"] = compat1
             if out2_data:
-                summary["out2_summary"] = {k: float(v) for k, v in out2_data.items()}
-            print_sim_summary(args.label2, out2_data)
+                compat2 = compatibility_out_summary(out2_data)
+                if compat2:
+                    summary["out2_summary"] = compat2
+
+            if out1_data and out2_data:
+                output_comparison = compare_openmm_outputs(out1_data, out2_data)
+                openmm_validation["comparison"] = output_comparison
+
+                print_system_comparison(args.label1, args.label2, output_comparison)
+                print_representative_parameter_comparison(output_comparison)
+                print_protocol_comparison(args.label1, args.label2, output_comparison)
+                print_energy_comparison(args.label1, args.label2, output_comparison)
+                print_production_comparison(args.label1, args.label2, output_comparison)
+                plot_production_validation(
+                    out1_data, out2_data, output_comparison,
+                    args.label1, args.label2, args.out_prefix
+                )
+
+            summary["openmm_validation"] = openmm_validation
 
         json_file = f"{args.out_prefix}_summary.json"
         with open(json_file, "w") as jfh:
             json.dump(summary, jfh, indent=2, ensure_ascii=False)
-            logging.info("Wrote summary JSON to %s", json_file)
+            print(f"INFO: Wrote summary JSON to {json_file}", flush=True)
 
     finally:
         for f in tmp_files:

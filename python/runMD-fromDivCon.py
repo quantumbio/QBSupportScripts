@@ -57,6 +57,7 @@ import string
 import importlib.resources
 import mdtraj as md
 import time
+import csv
 
 import argparse
 
@@ -66,6 +67,30 @@ parser.add_argument("prmtop", help="Path to AMBER prmtop file")
 parser.add_argument("inpcrd", help="Path to AMBER inpcrd file")
 parser.add_argument("--test-run", action="store_true", help="Run a short test simulation")
 parser.add_argument("--medium-run", action="store_true", help="Run a medium simulation")
+parser.add_argument(
+    "--minimization-steps",
+    type=int,
+    metavar="N",
+    help="Override the maximum number of OpenMM minimization iterations",
+)
+parser.add_argument(
+    "--equilibration-steps",
+    type=int,
+    metavar="N",
+    help="Override the number of steps used for each NVT and NPT equilibration stage",
+)
+parser.add_argument(
+    "--production-steps",
+    type=int,
+    metavar="N",
+    help="Override the number of production MD steps",
+)
+parser.add_argument(
+    "--report-interval",
+    type=int,
+    metavar="N",
+    help="Override the production trajectory/metrics reporting interval in MD steps",
+)
 parser.add_argument("--skip-waterbox", action="store_true", help="Skip adding the water box")
 
 args = parser.parse_args()
@@ -95,6 +120,43 @@ else:
     ntp_equil_nsteps  = round(100000 / 10)
     production_nsteps = 25000000  # 50 ns for 0.002 ps timestep
     preport_interval  = 25000
+
+# Explicit step counts override the preset selected above.  A single
+# equilibration value is intentionally applied to both NVT and NPT so this
+# interface mirrors qmechanic's --moleculardynamics EQUIL,PRODUCTION settings.
+if args.minimization_steps is not None:
+    if args.minimization_steps <= 0:
+        parser.error("--minimization-steps must be greater than zero")
+    minimize_nsteps = args.minimization_steps
+    print(f"Minimization step override: {args.minimization_steps} maximum iterations.")
+
+if args.equilibration_steps is not None:
+    if args.equilibration_steps <= 0:
+        parser.error("--equilibration-steps must be greater than zero")
+    nvt_equil_nsteps = args.equilibration_steps
+    ntp_equil_nsteps = args.equilibration_steps
+    print(f"Equilibration step override: {args.equilibration_steps} steps for both NVT and NPT.")
+
+if args.production_steps is not None:
+    if args.production_steps <= 0:
+        parser.error("--production-steps must be greater than zero")
+    production_nsteps = args.production_steps
+    print(f"Production step override: {args.production_steps} steps.")
+
+if args.report_interval is not None:
+    if args.report_interval <= 0:
+        parser.error("--report-interval must be greater than zero")
+    preport_interval = args.report_interval
+    print(f"Production report interval override: {args.report_interval} steps.")
+
+# Never configure a reporter interval beyond the whole production run.
+# This guarantees at least one trajectory/report frame for short validation runs.
+if preport_interval > production_nsteps:
+    print(
+        f"Production report interval {preport_interval} exceeds production length "
+        f"{production_nsteps}; using {production_nsteps} steps."
+    )
+    preport_interval = production_nsteps
 
 # Load the Amber topology and coordinate files
 prmtop = pmd.load_file(prmtopFile, inpcrdFile)
@@ -181,9 +243,23 @@ for residue in prmtop.residues:
         # This bonding pattern has been seen before for this residue type, assign the same name
         new_residue_names[residue] = unique_bond_fingerprints[(residue_type, bond_fingerprint)]
 
-# Extract defined residues from the forcefield using XML parsing
+# Use the same TIP3P water family as the DivCon waterbox builder.  Keep the
+# filename in one place so residue-template discovery and final ForceField
+# construction can not silently drift to different water models.
+WATER_MODEL_XML = 'amber14/tip3p.xml'
+GENERATED_FORCEFIELD_XML = 'complete_forcefield_with_unique_residues.xml'
+WATER_RESIDUE_NAMES = {"HOH", "WAT"}
+
+# Preserve the atom-indexed DivCon/AMBER parameters before residue renaming and
+# OpenMM template assignment.  Atom ordering is unchanged by the preparation
+# performed below, so these provide an independent congruence reference.
+divcon_input_atom_charges = [float(atom.charge) for atom in prmtop.atoms]
+divcon_input_atom_types = [str(atom.type) for atom in prmtop.atoms]
+
+# Extract defined residues from the selected OpenMM water/ion force field.
 defined_residues = set()
-forcefield_xml_file = importlib.resources.files('openmm.app.data') / 'amber14/tip3pfb.xml'
+forcefield_xml_file = importlib.resources.files('openmm.app.data') / WATER_MODEL_XML
+print(f"OpenMM water/ion template force field: {WATER_MODEL_XML}")
 
 # Parse the XML to find all residue names
 tree = ET.parse(forcefield_xml_file)
@@ -216,10 +292,10 @@ prmtop.save('modified_with_unique_residues.inpcrd')
 
 # Now create the XML force field with the unique residues
 param_set = pmd.openmm.OpenMMParameterSet.from_structure(prmtop)
-param_set.write('complete_forcefield_with_unique_residues.xml')
+param_set.write(GENERATED_FORCEFIELD_XML)
 
 # Load the force field XML file
-tree = ET.parse('complete_forcefield_with_unique_residues.xml')
+tree = ET.parse(GENERATED_FORCEFIELD_XML)
 root = tree.getroot()
 
 # Create a set to track unique residue names already added to XML
@@ -291,11 +367,23 @@ def indent(elem, level=0):
 indent(root)
 
 # Write the modified and indented XML to a file
-tree.write('complete_forcefield_with_unique_residues.xml', xml_declaration=True, encoding='utf-8', method="xml")
+tree.write(GENERATED_FORCEFIELD_XML, xml_declaration=True, encoding='utf-8', method="xml")
 
-# Load the modified prmtop and forcefield XML for simulation
+# Load the modified topology, but retain coordinates/box information from the
+# original supplied inpcrd.  The residue-renaming/topology preparation above
+# does not change atom count/order or coordinates, and rewriting an inpcrd via
+# ParmEd may omit optional periodic box records.
 prmtop = app.AmberPrmtopFile('modified_with_unique_residues.prmtop')
-inpcrd = app.AmberInpcrdFile('modified_with_unique_residues.inpcrd')
+inpcrd = app.AmberInpcrdFile(inpcrdFile)
+
+# Prefer the box carried by the authoritative input coordinate file.  If that
+# file does not carry box vectors, fall back to the box retained in the
+# prepared prmtop topology (AMBER prmtop files can also contain box data).
+input_box_vectors = inpcrd.boxVectors
+input_box_source = "input inpcrd"
+if input_box_vectors is None:
+    input_box_vectors = prmtop.topology.getPeriodicBoxVectors()
+    input_box_source = "prepared prmtop"
 
 # Extract positions from inpcrd
 positions = inpcrd.getPositions()
@@ -305,7 +393,8 @@ positions_array = np.array([[pos[0].value_in_unit(unit.nanometers),
                               pos[1].value_in_unit(unit.nanometers),
                               pos[2].value_in_unit(unit.nanometers)] for pos in positions])
 
-# Calculate bounding box dimensions based on XYZ coordinates
+# Calculate coordinate bounds.  These are only needed when this script is
+# responsible for creating a new solvent box.
 x_coords = positions_array[:, 0]
 y_coords = positions_array[:, 1]
 z_coords = positions_array[:, 2]
@@ -314,63 +403,307 @@ min_x, max_x = min(x_coords), max(x_coords)
 min_y, max_y = min(y_coords), max(y_coords)
 min_z, max_z = min(z_coords), max(z_coords)
 
-# Create box dimensions with padding
-padding = 10.0 * unit.nanometers  # Example padding
-box_size_x = (max_x - min_x) + 2 * padding.value_in_unit(unit.nanometers)
-box_size_y = (max_y - min_y) + 2 * padding.value_in_unit(unit.nanometers)
-box_size_z = (max_z - min_z) + 2 * padding.value_in_unit(unit.nanometers)
+# The generated XML carries the DivCon-transferred AMBER atom classes and
+# nonbonded parameters (including OW/HW), while the stock TIP3P file supplies
+# the standard HOH/WAT and ion residue templates.
+forcefield = app.ForceField(WATER_MODEL_XML, GENERATED_FORCEFIELD_XML)
 
-# Create box vectors
-box_vectors = [
-    mm.Vec3(box_size_x, 0.0, 0.0),
-    mm.Vec3(0.0, box_size_y, 0.0),
-    mm.Vec3(0.0, 0.0, box_size_z),
-]
-
-# Set periodic box vectors for the topology
-prmtop.topology.setPeriodicBoxVectors(box_vectors)
-
-# Get the periodic box vectors
-box_vectors = prmtop.topology.getPeriodicBoxVectors()
-
-# Check if the box vectors are defined
-if box_vectors is not None:
-    # Calculate the box dimensions
-    box_dimensions = [
-        box_vectors[0][0].value_in_unit(unit.nanometers),
-        box_vectors[1][1].value_in_unit(unit.nanometers),
-        box_vectors[2][2].value_in_unit(unit.nanometers)
-    ]
-
-    print("Box Dimensions (nm):", box_dimensions)
-else:
-    print("No periodic box dimensions are defined in the topology.")
-
-forcefield = app.ForceField('amber14/tip3pfb.xml','complete_forcefield_with_unique_residues.xml')
-
-# Use Modeller to create a waterbox
+# Use Modeller for the final topology/positions passed to OpenMM.
 modeller = app.Modeller(prmtop.topology, inpcrd.positions)
 
-# Create box dimensions with padding
-padding = 1.0 * unit.nanometers  # Example padding
-box_size_x = (max_x - min_x) + 2 * padding.value_in_unit(unit.nanometers)
-box_size_y = (max_y - min_y) + 2 * padding.value_in_unit(unit.nanometers)
-box_size_z = (max_z - min_z) + 2 * padding.value_in_unit(unit.nanometers)
+if skip_waterbox:
+    # Preserve an explicit periodic cell when the AMBER inputs carry one.
+    # Some DivCon-generated parm7/inpcrd pairs do not currently serialize box
+    # metadata.  In that case, mirror MDDriver's fallback: build an
+    # orthorhombic box from the coordinate extrema with 1.0 A padding on each
+    # side.  This replaces the old (and erroneous) 10 nm padding.
+    if input_box_vectors is None:
+        fallback_padding_angstrom = 1.0
+        fallback_padding_nm = fallback_padding_angstrom * 0.1
+        box_size_x = (max_x - min_x) + 2.0 * fallback_padding_nm
+        box_size_y = (max_y - min_y) + 2.0 * fallback_padding_nm
+        box_size_z = (max_z - min_z) + 2.0 * fallback_padding_nm
+        input_box_vectors = (
+            mm.Vec3(box_size_x, 0.0, 0.0) * unit.nanometer,
+            mm.Vec3(0.0, box_size_y, 0.0) * unit.nanometer,
+            mm.Vec3(0.0, 0.0, box_size_z) * unit.nanometer,
+        )
+        input_box_source = (
+            f"coordinate bounds + {fallback_padding_angstrom:.1f} A padding/side"
+        )
 
-# Create box vector for solvent addition
-box_vector = mm.Vec3(box_size_x, box_size_y, box_size_z)
-
-if not skip_waterbox:
-    # Add a water box and neutralize the system with counterions
-    modeller.addSolvent(forcefield, model='tip3p', boxSize=box_vector, ionicStrength=0.15*unit.molar)
-
+    modeller.topology.setPeriodicBoxVectors(input_box_vectors)
+    box_dimensions = [
+        input_box_vectors[0][0].value_in_unit(unit.nanometers),
+        input_box_vectors[1][1].value_in_unit(unit.nanometers),
+        input_box_vectors[2][2].value_in_unit(unit.nanometers),
+    ]
+    print(
+        f"Skipping water box addition; using {input_box_source} periodic box (nm):",
+        box_dimensions,
+    )
+else:
+    # When Python creates the solvent box, retain the established 1 nm padding
+    # behavior.  Modeller.addSolvent() sets the resulting periodic box.
+    padding = 1.0 * unit.nanometers
+    box_size_x = (max_x - min_x) + 2 * padding.value_in_unit(unit.nanometers)
+    box_size_y = (max_y - min_y) + 2 * padding.value_in_unit(unit.nanometers)
+    box_size_z = (max_z - min_z) + 2 * padding.value_in_unit(unit.nanometers)
+    box_vector = mm.Vec3(box_size_x, box_size_y, box_size_z)
+    modeller.addSolvent(
+        forcefield,
+        model='tip3p',
+        boxSize=box_vector,
+        ionicStrength=0.15*unit.molar,
+    )
+    final_box_vectors = modeller.topology.getPeriodicBoxVectors()
+    if final_box_vectors is not None:
+        print(
+            "Generated periodic box (nm):",
+            [
+                final_box_vectors[0][0].value_in_unit(unit.nanometers),
+                final_box_vectors[1][1].value_in_unit(unit.nanometers),
+                final_box_vectors[2][2].value_in_unit(unit.nanometers),
+            ],
+        )
 # Now create the system again after modifying the topology
 system = forcefield.createSystem(
     modeller.topology,
     nonbondedMethod=app.PME,
     nonbondedCutoff=1.0 * unit.nanometers,
-    constraints=app.HBonds
+    constraints=app.HBonds,
+    rigidWater=True,
+    removeCMMotion=True,
+    ewaldErrorTolerance=1.0e-4,
 )
+
+def _find_nonbonded_force(openmm_system):
+    forces = [
+        openmm_system.getForce(i)
+        for i in range(openmm_system.getNumForces())
+        if isinstance(openmm_system.getForce(i), mm.NonbondedForce)
+    ]
+    if len(forces) != 1:
+        raise RuntimeError(
+            f"Expected exactly one OpenMM NonbondedForce, found {len(forces)}"
+        )
+    return forces[0]
+
+def _generated_nonbonded_class_parameters(xml_filename, wanted_classes):
+    """Read sigma/epsilon (OpenMM XML units) for selected transferred classes."""
+    xml_root = ET.parse(xml_filename).getroot()
+    nb_element = xml_root.find("NonbondedForce")
+    if nb_element is None:
+        raise RuntimeError(f"No NonbondedForce found in {xml_filename}")
+
+    parameters = {}
+    for atom_element in nb_element.findall("Atom"):
+        atom_class = atom_element.get("class")
+        if atom_class in wanted_classes:
+            parameters[atom_class] = (
+                float(atom_element.get("sigma")),
+                float(atom_element.get("epsilon")),
+            )
+    missing = set(wanted_classes) - set(parameters)
+    if missing:
+        raise RuntimeError(
+            f"Missing transferred nonbonded classes in {xml_filename}: "
+            + ", ".join(sorted(missing))
+        )
+    return parameters
+
+def align_and_report_nonbonded_parameters(openmm_system, topology):
+    """
+    Align existing DivCon water particles to the DivCon-transferred OW/HW
+    nonbonded parameters, then report the effective OpenMM nonbonded setup.
+
+    The stock amber14/tip3p.xml file supplies the HOH residue template and the
+    rigid TIP3P geometry.  The generated force-field XML contains the exact
+    OW/HW Lennard-Jones values transferred from the DivCon input.  Applying
+    those values here makes the Python validation Hamiltonian use the same
+    per-particle water charge/LJ parameters as MDDriver while retaining the
+    standard TIP3P topology/constraint geometry.
+    """
+    nonbonded = _find_nonbonded_force(openmm_system)
+    transferred_water_lj = _generated_nonbonded_class_parameters(
+        GENERATED_FORCEFIELD_XML, {"OW", "HW"}
+    )
+
+    topology_atoms = list(topology.atoms())
+    can_map_to_input = (
+        len(topology_atoms) == len(divcon_input_atom_charges)
+        and openmm_system.getNumParticles() == len(divcon_input_atom_charges)
+    )
+
+    water_particle_count = 0
+    if skip_waterbox and not can_map_to_input:
+        raise RuntimeError(
+            "Prepared topology atom count/order no longer matches the supplied "
+            "DivCon topology; can not safely transfer water parameters by index."
+        )
+
+    # For the validation path (--skip-waterbox), transfer the authoritative
+    # DivCon charge plus OW/HW LJ values to every existing water particle.
+    # For Python-generated solvent, retain the selected stock TIP3P particles.
+    if skip_waterbox:
+        for atom in topology_atoms:
+            if atom.residue.name not in WATER_RESIDUE_NAMES:
+                continue
+
+            if atom.element is not None and atom.element.symbol == "O":
+                atom_class = "OW"
+            elif atom.element is not None and atom.element.symbol == "H":
+                atom_class = "HW"
+            else:
+                raise RuntimeError(
+                    f"Unexpected atom {atom.name} in water residue {atom.residue.name}"
+                )
+
+            sigma_nm, epsilon_kj = transferred_water_lj[atom_class]
+            charge_e = divcon_input_atom_charges[atom.index]
+            nonbonded.setParticleParameters(
+                atom.index,
+                charge_e * unit.elementary_charge,
+                sigma_nm * unit.nanometer,
+                epsilon_kj * unit.kilojoule_per_mole,
+            )
+            water_particle_count += 1
+
+    method_names = {
+        mm.NonbondedForce.NoCutoff: "NoCutoff",
+        mm.NonbondedForce.CutoffNonPeriodic: "CutoffNonPeriodic",
+        mm.NonbondedForce.CutoffPeriodic: "CutoffPeriodic",
+        mm.NonbondedForce.Ewald: "Ewald",
+        mm.NonbondedForce.PME: "PME",
+        mm.NonbondedForce.LJPME: "LJPME",
+    }
+    print("OpenMM nonbonded configuration:")
+    print(f"  water template XML       : {WATER_MODEL_XML}")
+    print(f"  transferred parameter XML: {GENERATED_FORCEFIELD_XML}")
+    print(f"  method                   : {method_names.get(nonbonded.getNonbondedMethod(), nonbonded.getNonbondedMethod())}")
+    print(f"  cutoff (nm)              : {nonbonded.getCutoffDistance().value_in_unit(unit.nanometer):.8f}")
+    print(f"  Ewald error tolerance    : {nonbonded.getEwaldErrorTolerance():.8g}")
+    print(f"  dispersion correction    : {nonbonded.getUseDispersionCorrection()}")
+    print(f"  switching function       : {nonbonded.getUseSwitchingFunction()}")
+    if nonbonded.getUseSwitchingFunction():
+        print(f"  switching distance (nm)  : {nonbonded.getSwitchingDistance().value_in_unit(unit.nanometer):.8f}")
+    print(f"  nonbonded particles      : {nonbonded.getNumParticles()}")
+    print(f"  nonbonded exceptions     : {nonbonded.getNumExceptions()}")
+    if skip_waterbox:
+        print(f"  DivCon water particles aligned: {water_particle_count}")
+
+    total_charge_e = 0.0
+    for particle_index in range(nonbonded.getNumParticles()):
+        charge, _, _ = nonbonded.getParticleParameters(particle_index)
+        total_charge_e += charge.value_in_unit(unit.elementary_charge)
+    print(f"  total particle charge (e): {total_charge_e:.10f}")
+
+    print("DivCon-transferred OW/HW LJ parameters:")
+    for atom_class in ("OW", "HW"):
+        sigma_nm, epsilon_kj = transferred_water_lj[atom_class]
+        print(
+            f"  {atom_class}: sigma={sigma_nm:.12f} nm  "
+            f"epsilon={epsilon_kj:.12f} kJ/mol"
+        )
+
+    # Report actual parameters on one representative water and the first Na/Cl
+    # ions, if present.  This reports the final values OpenMM will actually use.
+    representative_atoms = []
+    first_water_residue = next(
+        (r for r in topology.residues() if r.name in WATER_RESIDUE_NAMES), None
+    )
+    if first_water_residue is not None:
+        representative_atoms.extend(list(first_water_residue.atoms()))
+
+    seen_ion_residues = set()
+    for atom in topology_atoms:
+        residue_name = atom.residue.name.upper()
+        if residue_name in {"NA", "CL"} and residue_name not in seen_ion_residues:
+            representative_atoms.append(atom)
+            seen_ion_residues.add(residue_name)
+        if len(seen_ion_residues) == 2:
+            break
+
+    if representative_atoms:
+        print("Representative effective OpenMM particle parameters:")
+        for atom in representative_atoms:
+            charge, sigma, epsilon = nonbonded.getParticleParameters(atom.index)
+            input_type = (
+                divcon_input_atom_types[atom.index] if atom.index < len(divcon_input_atom_types)
+                else "<generated>"
+            )
+            input_charge = (
+                divcon_input_atom_charges[atom.index] if atom.index < len(divcon_input_atom_charges)
+                else float("nan")
+            )
+            print(
+                f"  index={atom.index:5d} {atom.residue.name}:{atom.name:<4s} "
+                f"DivConType={input_type:<8s} "
+                f"DivConQ={input_charge:+.8f} "
+                f"OpenMMQ={charge.value_in_unit(unit.elementary_charge):+.8f} "
+                f"sigma={sigma.value_in_unit(unit.nanometer):.12f} nm "
+                f"epsilon={epsilon.value_in_unit(unit.kilojoule_per_mole):.12f} kJ/mol"
+            )
+
+    if first_water_residue is not None:
+        water_indices = {atom.index for atom in first_water_residue.atoms()}
+        print("Representative water constraints:")
+        for constraint_index in range(openmm_system.getNumConstraints()):
+            atom1, atom2, distance = openmm_system.getConstraintParameters(constraint_index)
+            if atom1 in water_indices and atom2 in water_indices:
+                print(
+                    f"  {atom1}-{atom2}: "
+                    f"{distance.value_in_unit(unit.nanometer):.12f} nm"
+                )
+
+    return nonbonded
+
+nonbonded_force = align_and_report_nonbonded_parameters(system, modeller.topology)
+
+# Match the C++ MDDriver force-group layout so that OpenMM energies can be
+# compared component-by-component without changing the Hamiltonian.  Any force
+# type outside these four expected AMBER/OpenMM terms is isolated in group 4
+# and reported separately as a diagnostic.
+for force_index in range(system.getNumForces()):
+    force = system.getForce(force_index)
+    if isinstance(force, mm.HarmonicBondForce):
+        force.setForceGroup(0)
+    elif isinstance(force, mm.HarmonicAngleForce):
+        force.setForceGroup(1)
+    elif isinstance(force, mm.PeriodicTorsionForce):
+        force.setForceGroup(2)
+    elif isinstance(force, mm.NonbondedForce):
+        force.setForceGroup(3)
+    else:
+        force.setForceGroup(4)
+
+def report_openmm_energy_components(simulation, label):
+    """Report OpenMM potential-energy components using the C++ force groups."""
+    component_groups = (
+        ("Bond", 0),
+        ("Angle", 1),
+        ("Torsion", 2),
+        ("Nonbonded", 3),
+    )
+
+    print(f"OpenMM energy decomposition - {label} (kJ/mol):")
+    component_sum = 0.0
+    for component_name, group in component_groups:
+        state = simulation.context.getState(getEnergy=True, groups=(1 << group))
+        energy = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        component_sum += energy
+        print(f"  {component_name:<12}: {energy:.6f}")
+
+    other_state = simulation.context.getState(getEnergy=True, groups=(1 << 4))
+    other_energy = other_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+    total_state = simulation.context.getState(getEnergy=True)
+    total_energy = total_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+
+    if abs(other_energy) > 1.0e-8:
+        print(f"  {'Other':<12}: {other_energy:.6f}")
+    print(f"  {'4-part sum':<12}: {component_sum:.6f}")
+    print(f"  {'Total':<12}: {total_energy:.6f}")
+    print(f"  {'Residual':<12}: {(total_energy - component_sum - other_energy):.6e}")
 
 # Set up the integrator
 integrator = mm.LangevinIntegrator(
@@ -386,6 +719,23 @@ simulation = app.Simulation(modeller.topology, system, integrator)
 # Set initial positions from Amber coordinates
 simulation.context.setPositions(modeller.positions)
 
+# Record the actual OpenMM execution platform and the authoritative starting
+# periodic box used by this Context.  These are high-value congruence checks.
+platform = simulation.context.getPlatform()
+print(f"OpenMM execution platform: {platform.getName()}")
+print(f"OpenMM particles: {system.getNumParticles()}")
+print(f"OpenMM constraints: {system.getNumConstraints()}")
+initial_state = simulation.context.getState(getEnergy=True, getPositions=True)
+initial_box = initial_state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(unit.nanometers)
+print(
+    "OpenMM initial box (nm):",
+    [float(initial_box[0][0]), float(initial_box[1][1]), float(initial_box[2][2])],
+)
+print(
+    "OpenMM initial potential energy (kJ/mol):",
+    initial_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole),
+)
+report_openmm_energy_components(simulation, "initial")
 
 # Double check system
 # Extract the system from the simulation
@@ -424,24 +774,32 @@ else:
 
 
 
-# Minimize energy
-print(f'Minimizing {minimize_nsteps} steps ...', flush=True)
+# Minimize energy using the same OpenMM LocalEnergyMinimizer semantics as the
+# C++ driver: 10 kJ/mol/nm RMS-force tolerance and a maximum iteration count.
+minimization_tolerance = 10.0
+print(
+    f'Minimizing with OpenMM: tolerance={minimization_tolerance:.2f} kJ/mol/nm, '
+    f'maxIterations={minimize_nsteps} ...',
+    flush=True,
+)
 start_time = time.time()
-
-# Minimize until energy convergence
-prev_energy = float('inf')
-tolerance = 10.0  # kJ/mol threshold for convergence
-for i in range(0, minimize_nsteps, 500):
-    simulation.minimizeEnergy(maxIterations=500)
-    state = simulation.context.getState(getEnergy=True)
-    energy = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
-    print(f"Step {i} Current Potential Energy: {energy:.2f} kJ/mol")
-    if abs(prev_energy - energy) < tolerance:
-        print(f'Converged (tolerance: {tolerance:.2f} kJ/mol) at step: {i}')
-        break
-    prev_energy = energy
+mm.LocalEnergyMinimizer.minimize(
+    simulation.context,
+    minimization_tolerance,
+    minimize_nsteps,
+)
+minimized_state = simulation.context.getState(getEnergy=True)
+print(
+    "Post-minimization Potential Energy: "
+    f"{minimized_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole):.2f} kJ/mol"
+)
+report_openmm_energy_components(simulation, "post-minimization")
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
+
+# Match the C++ protocol: initialize velocities once after minimization and
+# carry them continuously through NVT, NPT, and production.
+simulation.context.setVelocitiesToTemperature(298*unit.kelvin)
 
 def save_imaged_pdb(simulation, filename):
     """
@@ -507,9 +865,9 @@ def get_equilibration_atom_indices(simulation):
 
 
 def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_steps=100000, report_interval=1000, atom_indices=None):
-    """Monitor aligned RMSD on a meaningful atom subset to determine equilibration convergence."""
+    """Run exactly max_steps while monitoring aligned RMSD on a meaningful atom subset."""
     rmsd_values = []
-    converged = False
+    convergence_reported = False
 
     md_topology = md.Topology.from_openmm(simulation.topology)
     if atom_indices is None:
@@ -521,8 +879,11 @@ def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_st
     ref_positions = reference_state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
     ref_traj = md.Trajectory(np.array(ref_positions)[np.newaxis, :, :], md_topology)
 
-    for step in range(0, max_steps, report_interval):
-        simulation.step(report_interval)
+    completed_steps = 0
+    while completed_steps < max_steps:
+        chunk = min(report_interval, max_steps - completed_steps)
+        simulation.step(chunk)
+        completed_steps += chunk
 
         # Extract current positions and compute aligned RMSD against the fixed reference.
         state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
@@ -532,15 +893,107 @@ def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_st
         rmsd = md.rmsd(cur_traj, ref_traj, atom_indices=atom_indices)[0]
         rmsd_values.append(rmsd)
 
-        print(f"Step {step + report_interval}: RMSD = {rmsd:.3f} nm", flush=True)
+        print(f"Step {completed_steps}: RMSD = {rmsd:.3f} nm", flush=True)
 
-        if len(rmsd_values) > 5 and all(r < threshold for r in rmsd_values[-5:]):
-            print(f'Equilibration converged at step {step + report_interval} with RMSD {rmsd:.3f} nm')
-            converged = True
+        if (
+            not convergence_reported
+            and len(rmsd_values) > 5
+            and all(r < threshold for r in rmsd_values[-5:])
+        ):
+            print(
+                f'RMSD convergence criterion satisfied at step {completed_steps} '
+                f'with RMSD {rmsd:.3f} nm; continuing to requested equilibration length.'
+            )
+            convergence_reported = True
+
+    if not convergence_reported:
+        print(
+            f"Completed requested equilibration length of {max_steps} steps; "
+            "RMSD convergence criterion was not reached."
+        )
+
+
+def compute_target_pressure_bar(barostat=None):
+    """Return barostat target pressure in bar."""
+    if barostat is None:
+        return float("nan")
+    return barostat.getDefaultPressure().value_in_unit(unit.bar)
+
+
+def compute_instantaneous_pressure_bar(simulation):
+    """Return instantaneous pressure in bar when available, otherwise NaN."""
+    if not hasattr(mm.MonteCarloBarostat, "computeCurrentPressure"):
+        return float("nan")
+    try:
+        pressure = mm.MonteCarloBarostat.computeCurrentPressure(simulation.context)
+        return pressure.value_in_unit(unit.bar)
+    except Exception:
+        return float("nan")
+
+
+def compute_structural_metrics(simulation, reference_positions_nm, atom_indices):
+    """Compute aligned RMSD and radius of gyration (nm) on selected atoms."""
+    state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
+    cur_positions = state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
+
+    idx = np.asarray(atom_indices, dtype=np.int64)
+    ref_subset = np.asarray(reference_positions_nm)[idx]
+    cur_subset = np.asarray(cur_positions)[idx]
+
+    # Center both subsets.
+    ref_centered = ref_subset - ref_subset.mean(axis=0)
+    cur_centered = cur_subset - cur_subset.mean(axis=0)
+
+    # Kabsch alignment: rotate current subset onto reference subset.
+    covariance = cur_centered.T @ ref_centered
+    u_mat, _, v_t = np.linalg.svd(covariance)
+    rotation = v_t.T @ u_mat.T
+    if np.linalg.det(rotation) < 0:
+        v_t[-1, :] *= -1
+        rotation = v_t.T @ u_mat.T
+
+    cur_aligned = cur_centered @ rotation
+    diff = cur_aligned - ref_centered
+    rmsd_nm = float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
+
+    # Radius of gyration from current coordinates (translation invariant).
+    rg_nm = float(np.sqrt(np.mean(np.sum(cur_centered * cur_centered, axis=1))))
+    return rmsd_nm, rg_nm
+
+
+def compute_degrees_of_freedom(system):
+    """Compute mechanical degrees of freedom for instantaneous temperature estimates."""
+    dof = 0
+    for i in range(system.getNumParticles()):
+        if system.getParticleMass(i) > 0 * unit.dalton:
+            dof += 3
+
+    dof -= system.getNumConstraints()
+
+    for i in range(system.getNumForces()):
+        if isinstance(system.getForce(i), mm.CMMotionRemover):
+            dof -= 3
             break
 
-    if not converged:
-        print(f"Maximum equilibration steps {max_steps} reached without full convergence.")
+    return max(dof, 1)
+
+
+def compute_density_g_per_ml(simulation, state):
+    """Compute density from topology mass and periodic volume."""
+    total_mass = 0.0 * unit.dalton
+    for atom in simulation.topology.atoms():
+        if atom.element is not None:
+            total_mass += atom.element.mass
+
+    # Atom masses are molar masses; convert to absolute mass via Avogadro's constant.
+    absolute_mass = total_mass / unit.AVOGADRO_CONSTANT_NA
+    density = absolute_mass / state.getPeriodicBoxVolume()
+    return density.value_in_unit(unit.gram / unit.milliliter)
+
+
+def compute_temperature_k(kinetic_energy, dof):
+    """Compute instantaneous temperature from kinetic energy and DOF."""
+    return (2 * kinetic_energy / (dof * unit.MOLAR_GAS_CONSTANT_R)).value_in_unit(unit.kelvin)
 
 # NVT Equilibration with RMSD monitoring
 print('Equilibrating (NVT) with RMSD monitoring...', flush=True)
@@ -557,7 +1010,8 @@ with open("nvt_equilibrated.xml", "w") as f:
     
 # NPT Equilibration with RMSD monitoring
 print('Equilibrating (NPT) with RMSD monitoring...', flush=True)
-system.addForce(mm.MonteCarloBarostat(1 * unit.bar, 298 * unit.kelvin, 25))
+barostat = mm.MonteCarloBarostat(1 * unit.bar, 298 * unit.kelvin, 25)
+system.addForce(barostat)
 simulation.context.reinitialize(preserveState=True)
 start_time = time.time()
 monitor_rmsd_equilibration(simulation, "nvt_equilibrated.xml", 0.05, ntp_equil_nsteps, atom_indices=equilibration_atom_indices)
@@ -567,16 +1021,115 @@ print(f"Elapsed time: {elapsed_time:.6f} seconds")
 # Save final equilibrated positions
 save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
-simulation.context.setVelocitiesToTemperature(298*unit.kelvin)
+# Continue directly from the equilibrated NPT velocities into production.
 # Reset step count so production logs/reporters are production-relative.
 simulation.currentStep = 0
 #simulation.reporters.append(app.PDBReporter('output.pdb', preport_interval))
-simulation.reporters.append(app.StateDataReporter(sys.stdout, preport_interval, step=True, potentialEnergy=True, temperature=True))
-simulation.reporters.append(app.StateDataReporter('energies.csv', preport_interval, step=True, potentialEnergy=True, temperature=True))
-simulation.reporters.append(app.DCDReporter('output.dcd', preport_interval))
+simulation.reporters.append(app.StateDataReporter(
+    'energies.csv',
+    preport_interval,
+    step=True,
+    potentialEnergy=True,
+    kineticEnergy=True,
+    temperature=True,
+    volume=True,
+    density=True,
+    elapsedTime=True,
+))
+# Keep a handle to the DCD reporter so the equilibrated production starting
+# structure can be written explicitly as frame 0.  Subsequent frames are still
+# written automatically at preport_interval (for example 0, 500, 1000, ...).
+dcd_reporter = app.DCDReporter('output.dcd', preport_interval)
+simulation.reporters.append(dcd_reporter)
 print (f'Running Production NPT Simulation - {production_nsteps * 0.002} ps ....', flush=True)
+
+# Capture the production reference before taking any production MD steps.  Use
+# this exact same State both as the structural RMSD reference and as DCD frame 0
+# so the first trajectory frame is the authoritative production starting point.
+production_reference_state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
+production_reference_positions = production_reference_state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
+dcd_reporter.report(simulation, production_reference_state)
+print("Saved production step 0 frame to output.dcd", flush=True)
+production_dof = compute_degrees_of_freedom(system)
+instantaneous_pressure_supported = hasattr(mm.MonteCarloBarostat, "computeCurrentPressure")
+
+if not instantaneous_pressure_supported:
+    print(
+        "Note: instantaneous pressure not supported on this OpenMM build; reporting NaN for instantaneous_pressure_bar.",
+        flush=True,
+    )
+
+print(
+    "Production metrics (step, pe_kj_per_mol, ke_kj_per_mol, temp_k, volume_nm3, density_g_per_ml, target_pressure_bar, instantaneous_pressure_bar, rmsd_nm, rg_nm, wall_time_s):",
+    flush=True,
+)
 start_time = time.time()
-simulation.step(production_nsteps)
+steps_remaining = production_nsteps
+with open("production_metrics.csv", "w", newline="") as metrics_csv:
+    writer = csv.writer(metrics_csv)
+    writer.writerow([
+        "step",
+        "potential_energy_kj_per_mol",
+        "kinetic_energy_kj_per_mol",
+        "temperature_k",
+        "volume_nm3",
+        "density_g_per_ml",
+        "target_pressure_bar",
+        "instantaneous_pressure_bar",
+        "pressure_source",
+        "rmsd_nm",
+        "rg_nm",
+        "wall_time_s",
+    ])
+
+    while steps_remaining > 0:
+        try:
+            chunk = min(preport_interval, steps_remaining)
+            simulation.step(chunk)
+            steps_remaining -= chunk
+
+            report_state = simulation.context.getState(getEnergy=True, enforcePeriodicBox=True)
+            pe_kj_per_mol = report_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+            ke_quantity = report_state.getKineticEnergy()
+            ke_kj_per_mol = ke_quantity.value_in_unit(unit.kilojoule_per_mole)
+            temp_k = compute_temperature_k(ke_quantity, production_dof)
+            volume_nm3 = report_state.getPeriodicBoxVolume().value_in_unit(unit.nanometer**3)
+            density_g_per_ml = compute_density_g_per_ml(simulation, report_state)
+            target_pressure_bar = compute_target_pressure_bar(barostat)
+            instantaneous_pressure_bar = compute_instantaneous_pressure_bar(simulation)
+            pressure_source = "instantaneous" if not np.isnan(instantaneous_pressure_bar) else "target_only"
+            rmsd_nm, rg_nm = compute_structural_metrics(
+                simulation,
+                production_reference_positions,
+                equilibration_atom_indices,
+            )
+            wall_time_s = time.time() - start_time
+
+            writer.writerow([
+                simulation.currentStep,
+                pe_kj_per_mol,
+                ke_kj_per_mol,
+                temp_k,
+                volume_nm3,
+                density_g_per_ml,
+                target_pressure_bar,
+                instantaneous_pressure_bar,
+                pressure_source,
+                rmsd_nm,
+                rg_nm,
+                wall_time_s,
+            ])
+
+            print(
+                f"  {simulation.currentStep}, {pe_kj_per_mol:.6f}, {ke_kj_per_mol:.6f}, {temp_k:.3f}, {volume_nm3:.6f}, {density_g_per_ml:.6f}, {target_pressure_bar:.6f}, {instantaneous_pressure_bar:.6f}, {rmsd_nm:.6f}, {rg_nm:.6f}, {wall_time_s:.3f}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"ERROR during production metrics at step {simulation.currentStep}: {exc}",
+                flush=True,
+            )
+            raise
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
@@ -598,7 +1151,14 @@ summary_values = {
     "step": simulation.currentStep,
     "potential_energy_kj_per_mol": summary_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole),
     "kinetic_energy_kj_per_mol": summary_state.getKineticEnergy().value_in_unit(unit.kilojoule_per_mole),
-    "temperature_k": simulation.integrator.getTemperature().value_in_unit(unit.kelvin),
+    "temperature_k": compute_temperature_k(summary_state.getKineticEnergy(), production_dof),
+    "volume_nm3": summary_state.getPeriodicBoxVolume().value_in_unit(unit.nanometer**3),
+    "density_g_per_ml": compute_density_g_per_ml(simulation, summary_state),
+    "target_pressure_bar": compute_target_pressure_bar(barostat),
+    "instantaneous_pressure_bar": compute_instantaneous_pressure_bar(simulation),
+    "rmsd_nm": compute_structural_metrics(simulation, production_reference_positions, equilibration_atom_indices)[0],
+    "rg_nm": compute_structural_metrics(simulation, production_reference_positions, equilibration_atom_indices)[1],
+    "wall_time_s": elapsed_time,
 }
 
 print("Simulation summary:")
