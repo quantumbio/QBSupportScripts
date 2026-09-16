@@ -9,18 +9,18 @@ It has three input modes:
 
 1. Explicit JSON files / globs (backwards-compatible style):
 
-       python summarize_MD_comparisons_v2.py */*_summary.json \
+       python summarize_MD_comparisons_v3.py */*_summary.json \
            --csv all_systems_summary.csv \
            --plots summary_plots.pdf
 
 2. A PDB-ID list file.  Each JSON is expected at
    <root>/<PDBID>/<PDBID>_summary.json:
 
-       python summarize_MD_comparisons_v2.py --root . --list anal.list
+       python summarize_MD_comparisons_v3.py --root . --list anal.list
 
 3. Automatic discovery of immediate four-character alphanumeric directories:
 
-       python summarize_MD_comparisons_v2.py --root .
+       python summarize_MD_comparisons_v3.py --root .
 
 Unless overridden, the script writes:
 
@@ -29,12 +29,13 @@ Unless overridden, the script writes:
     md_comparison_review.list
     md_comparison_good.list
     md_comparison_good_limited.list
+    md_comparison_pending.list
     md_comparison_errors.list
 
 Use --plots FILE.pdf to additionally write a multi-page PDF with descriptive
 cross-system distributions.
 
-Triage categories are intentionally REVIEW / GOOD / GOOD_LIMITED / ERROR rather
+Triage categories are intentionally REVIEW / GOOD / GOOD_LIMITED / PENDING / ERROR rather
 than PASS / FAIL.  The thresholds below are conservative smoke-test review
 thresholds, not claims of ensemble equivalence or statistical convergence.
 
@@ -130,9 +131,19 @@ CORE_DIAGNOSTICS = (
     "postmin_total_sym_pct",
     "postmin_nonbonded_sym_pct",
     "production_pe_mean_sym_pct",
-    "ca_distance_rmse_angstrom",
-    "rg_relative_difference_pct",
 )
+
+# Compatibility with the analysisMD.py version currently generating the running
+# validation set.  That script computes Rg directly from the raw protein
+# coordinates and computes C-alpha internal distances with periodic=False before
+# explicitly making molecules whole/reimaging them.  For wrapped trajectories,
+# those JSON structural metrics can therefore become tens of Angstroms different
+# even when the Hamiltonian/thermodynamic validation is otherwise sound.
+#
+# Keep all structural values in the CSV/report for later diagnosis, but do NOT
+# use them as hard REVIEW triggers until analysisMD.py is fixed and the affected
+# summaries are regenerated.
+CURRENT_ANALYSISMD_STRUCTURAL_ADVISORY_ONLY = True
 
 # Metrics retained from the original summarizer.  These are descriptive and are
 # not primary short-run validation criteria.
@@ -263,7 +274,9 @@ CSV_FIELDS = [
 
     # Triage metadata.
     "missing_core_diagnostics",
+    "review_categories",
     "review_reasons",
+    "structural_advisories",
     "notes",
 ]
 
@@ -568,7 +581,13 @@ def extract_metrics(system: str, json_path: Path, summary: dict) -> dict[str, An
 
 def classify(summary: dict, row: dict[str, Any]) -> None:
     reasons: list[str] = []
+    categories: set[str] = set()
+    structural_advisories: list[str] = []
     notes: list[str] = []
+
+    def review(category: str, text: str) -> None:
+        categories.add(category)
+        add_reason(reasons, text)
 
     frames1 = row.get("frames_input1")
     frames2 = row.get("frames_input2")
@@ -576,96 +595,88 @@ def classify(summary: dict, row: dict[str, Any]) -> None:
     atoms2 = row.get("atoms_input2")
 
     if frames1 is not None and frames2 is not None and frames1 != frames2:
-        add_reason(reasons, f"trajectory frame mismatch ({frames1} vs {frames2})")
+        review("SYSTEM", f"trajectory frame mismatch ({frames1} vs {frames2})")
     if atoms1 is not None and atoms2 is not None and atoms1 != atoms2:
-        add_reason(reasons, f"trajectory atom mismatch ({atoms1} vs {atoms2})")
+        review("SYSTEM", f"trajectory atom mismatch ({atoms1} vs {atoms2})")
 
+    before = len(reasons)
     row["system_mismatch_count"] = compare_exact_system_fields(summary, reasons)
+    if len(reasons) > before:
+        categories.add("SYSTEM")
+
+    before = len(reasons)
     row["protocol_mismatch_count"] = compare_protocol(summary, reasons)
+    if len(reasons) > before:
+        categories.add("PROTOCOL")
+
+    before = len(reasons)
     representative_parameter_checks(summary, reasons)
+    if len(reasons) > before:
+        categories.add("SYSTEM")
 
     q1 = finite_float(row.get("charge_input1_e"))
     q2 = finite_float(row.get("charge_input2_e"))
     if q1 is not None and abs(q1) > THRESHOLDS["charge_abs_e"]:
-        add_reason(reasons, f"{row['label1']} charge={q1:+.6g} e")
+        review("CHARGE", f"{row['label1']} charge={q1:+.6g} e")
     if q2 is not None and abs(q2) > THRESHOLDS["charge_abs_e"]:
-        add_reason(reasons, f"{row['label2']} charge={q2:+.6g} e")
+        review("CHARGE", f"{row['label2']} charge={q2:+.6g} e")
     if q1 is not None and q2 is not None:
         qdelta = abs(q1 - q2)
         if qdelta > THRESHOLDS["charge_delta_e"]:
-            add_reason(reasons, f"charge disagreement={qdelta:.6g} e")
+            review("CHARGE", f"charge disagreement={qdelta:.6g} e")
 
     box_delta = finite_float(row.get("initial_box_max_delta_nm"))
     if box_delta is not None and box_delta > THRESHOLDS["initial_box_max_delta_nm"]:
-        add_reason(reasons, f"initial box max delta={box_delta:.4g} nm")
+        review("SYSTEM", f"initial box max delta={box_delta:.4g} nm")
 
     post_total = finite_float(row.get("postmin_total_sym_pct"))
     if post_total is not None and post_total > THRESHOLDS["postmin_total_sym_pct"]:
-        add_reason(reasons, f"post-min total energy={post_total:.3f}%")
+        review("ENERGY", f"post-min total energy={post_total:.3f}%")
 
     post_nb = finite_float(row.get("postmin_nonbonded_sym_pct"))
     if post_nb is not None and post_nb > THRESHOLDS["postmin_nonbonded_sym_pct"]:
-        add_reason(reasons, f"post-min nonbonded energy={post_nb:.3f}%")
+        review("ENERGY", f"post-min nonbonded energy={post_nb:.3f}%")
 
     pe_mean = finite_float(row.get("production_pe_mean_sym_pct"))
     if pe_mean is not None and pe_mean > THRESHOLDS["production_pe_mean_sym_pct"]:
-        add_reason(reasons, f"production PE mean={pe_mean:.3f}%")
+        review("ENERGY", f"production PE mean={pe_mean:.3f}%")
 
     pe_max = finite_float(row.get("production_pe_max_sym_pct"))
     if pe_max is not None and pe_max > THRESHOLDS["production_pe_max_sym_pct"]:
-        add_reason(reasons, f"production PE max={pe_max:.3f}%")
+        review("ENERGY", f"production PE max={pe_max:.3f}%")
 
     for column, threshold_key, label in (
-        (
-            "production_temperature_mean_sym_pct",
-            "production_temperature_mean_sym_pct",
-            "production temperature mean",
-        ),
-        (
-            "production_volume_mean_sym_pct",
-            "production_volume_mean_sym_pct",
-            "production volume mean",
-        ),
-        (
-            "production_density_mean_sym_pct",
-            "production_density_mean_sym_pct",
-            "production density mean",
-        ),
+        ("production_temperature_mean_sym_pct", "production_temperature_mean_sym_pct", "production temperature mean"),
+        ("production_volume_mean_sym_pct", "production_volume_mean_sym_pct", "production volume mean"),
+        ("production_density_mean_sym_pct", "production_density_mean_sym_pct", "production density mean"),
     ):
         value = finite_float(row.get(column))
         if value is not None and value > THRESHOLDS[threshold_key]:
-            add_reason(reasons, f"{label}={value:.3f}%")
+            review("THERMODYNAMICS", f"{label}={value:.3f}%")
 
+    # Current analysisMD.py compatibility: preserve structural metrics, but treat
+    # threshold excursions as advisory rather than REVIEW.  The current producer
+    # can compare wrapped coordinates without first making protein molecules whole.
     ca_rmse = finite_float(row.get("ca_distance_rmse_angstrom"))
     if ca_rmse is not None and ca_rmse > THRESHOLDS["ca_distance_rmse_angstrom"]:
         qualifier = "SEVERE " if ca_rmse > 3.0 else ""
-        add_reason(reasons, f"{qualifier}C-alpha distance RMSE={ca_rmse:.3f} A")
+        structural_advisories.append(f"{qualifier}C-alpha distance RMSE={ca_rmse:.3f} A")
 
     ca_r = finite_float(row.get("ca_distance_pearson_r"))
     if ca_r is not None and ca_r < THRESHOLDS["ca_distance_pearson_min"]:
-        add_reason(reasons, f"C-alpha distance Pearson r={ca_r:.4f}")
+        structural_advisories.append(f"C-alpha distance Pearson r={ca_r:.4f}")
 
     rg_relative = finite_float(row.get("rg_relative_difference_pct"))
-    if (
-        rg_relative is not None
-        and abs(rg_relative) > THRESHOLDS["rg_relative_difference_pct"]
-    ):
+    if rg_relative is not None and abs(rg_relative) > THRESHOLDS["rg_relative_difference_pct"]:
         qualifier = "SEVERE " if abs(rg_relative) > 20.0 else ""
-        add_reason(reasons, f"{qualifier}Rg mean delta={rg_relative:+.3f}%")
+        structural_advisories.append(f"{qualifier}Rg mean delta={rg_relative:+.3f}%")
 
     rmsf_rmse = finite_float(row.get("rmsf_profile_rmse_angstrom"))
-    if (
-        rmsf_rmse is not None
-        and rmsf_rmse > THRESHOLDS["rmsf_profile_rmse_angstrom"]
-    ):
-        add_reason(reasons, f"RMSF profile RMSE={rmsf_rmse:.3f} A")
+    if rmsf_rmse is not None and rmsf_rmse > THRESHOLDS["rmsf_profile_rmse_angstrom"]:
+        structural_advisories.append(f"RMSF profile RMSE={rmsf_rmse:.3f} A")
 
-    # Secondary short-run metrics are notes, not hard triage criteria.
     hbond_jaccard = finite_float(row.get("hbond_jaccard"))
-    if (
-        hbond_jaccard is not None
-        and hbond_jaccard < THRESHOLDS["hbond_jaccard_report"]
-    ):
+    if hbond_jaccard is not None and hbond_jaccard < THRESHOLDS["hbond_jaccard_report"]:
         notes.append(f"low H-bond Jaccard={hbond_jaccard:.3f}")
 
     dssp = finite_float(row.get("dssp_diff_pct"))
@@ -682,8 +693,27 @@ def classify(summary: dict, row: dict[str, Any]) -> None:
     else:
         row["status"] = "GOOD"
 
+    row["review_categories"] = ";".join(sorted(categories))
     row["review_reasons"] = "; ".join(reasons)
+    row["structural_advisories"] = "; ".join(structural_advisories)
     row["notes"] = "; ".join(notes)
+
+
+def pending_row(system: str, json_path: Path) -> dict[str, Any]:
+    row = {field: None for field in CSV_FIELDS}
+    row.update(
+        {
+            "system": system,
+            "status": "PENDING",
+            "json_path": str(json_path),
+            "review_categories": "",
+            "review_reasons": "summary JSON not available yet",
+            "structural_advisories": "",
+            "notes": "",
+            "missing_core_diagnostics": ";".join(CORE_DIAGNOSTICS),
+        }
+    )
+    return row
 
 
 def error_row(system: str, json_path: Path, message: str) -> dict[str, Any]:
@@ -693,7 +723,9 @@ def error_row(system: str, json_path: Path, message: str) -> dict[str, Any]:
             "system": system,
             "status": "ERROR",
             "json_path": str(json_path),
+            "review_categories": "ERROR",
             "review_reasons": message,
+            "structural_advisories": "",
             "notes": "",
             "missing_core_diagnostics": ";".join(CORE_DIAGNOSTICS),
         }
@@ -717,7 +749,7 @@ def infer_system_name(json_path: Path, summary: dict | None = None) -> str:
 def analyze_one(json_path: Path, system_hint: str | None = None) -> dict[str, Any]:
     system = system_hint or infer_system_name(json_path)
     if not json_path.is_file():
-        return error_row(system, json_path, "summary JSON missing")
+        return pending_row(system, json_path)
 
     try:
         with json_path.open() as handle:
@@ -884,7 +916,7 @@ def write_list(path: Path, rows: list[dict[str, Any]], statuses: set[str]) -> No
 
 
 def write_report(path: Path, rows: list[dict[str, Any]], input_description: str) -> None:
-    counts = {status: 0 for status in ("REVIEW", "GOOD", "GOOD_LIMITED", "ERROR")}
+    counts = {status: 0 for status in ("REVIEW", "GOOD", "GOOD_LIMITED", "PENDING", "ERROR")}
     for row in rows:
         counts[row["status"]] = counts.get(row["status"], 0) + 1
 
@@ -899,6 +931,7 @@ def write_report(path: Path, rows: list[dict[str, Any]], input_description: str)
         handle.write(f"REVIEW       : {counts.get('REVIEW', 0)}\n")
         handle.write(f"GOOD         : {counts.get('GOOD', 0)}\n")
         handle.write(f"GOOD_LIMITED : {counts.get('GOOD_LIMITED', 0)}\n")
+        handle.write(f"PENDING      : {counts.get('PENDING', 0)}\n")
         handle.write(f"ERROR        : {counts.get('ERROR', 0)}\n\n")
 
         handle.write("Interpretation\n")
@@ -906,8 +939,17 @@ def write_report(path: Path, rows: list[dict[str, Any]], input_description: str)
         handle.write("REVIEW: one or more conservative engineering-review thresholds were exceeded.\n")
         handle.write("GOOD: no review threshold was exceeded and all core diagnostics were present.\n")
         handle.write("GOOD_LIMITED: available metrics did not trigger review, but core diagnostics were absent.\n")
-        handle.write("ERROR: summary JSON was missing, unreadable, or could not be processed.\n")
+        handle.write("PENDING: summary JSON does not exist yet; ignored for scientific triage.\n")
+        handle.write("ERROR: an existing summary JSON was unreadable or could not be processed.\n")
         handle.write("These labels are triage categories, not proof of ensemble equivalence or convergence.\n\n")
+        handle.write("Current analysisMD compatibility\n")
+        handle.write("------------------------------\n")
+        handle.write(
+            "Structural trajectory metrics are retained as advisories only for this running batch. "
+            "The current analysisMD.py computes Rg and internal C-alpha distances from raw trajectory "
+            "coordinates without an explicit make-whole/reimaging step; wrapped proteins can therefore "
+            "create very large apparent structural differences. These metrics do not trigger REVIEW here.\n\n"
+        )
 
         handle.write("Primary triage thresholds\n")
         handle.write("-------------------------\n")
@@ -925,6 +967,16 @@ def write_report(path: Path, rows: list[dict[str, Any]], input_description: str)
                 handle.write(f"{row['system']}: {row['review_reasons']}\n")
         handle.write("\n")
 
+        handle.write("Structural advisories from current analysisMD output\n")
+        handle.write("---------------------------------------------------\n")
+        advisory_rows = [row for row in rows if row.get("structural_advisories")]
+        if not advisory_rows:
+            handle.write("None\n")
+        else:
+            for row in advisory_rows:
+                handle.write(f"{row['system']}: {row['structural_advisories']}\n")
+        handle.write("\n")
+
         handle.write("Good but limited diagnostics\n")
         handle.write("----------------------------\n")
         limited_rows = [row for row in rows if row["status"] == "GOOD_LIMITED"]
@@ -937,8 +989,18 @@ def write_report(path: Path, rows: list[dict[str, Any]], input_description: str)
                 )
         handle.write("\n")
 
-        handle.write("Errors / missing summaries\n")
-        handle.write("--------------------------\n")
+        handle.write("Pending summaries\n")
+        handle.write("-----------------\n")
+        pending_rows = [row for row in rows if row["status"] == "PENDING"]
+        if not pending_rows:
+            handle.write("None\n")
+        else:
+            for row in pending_rows:
+                handle.write(f"{row['system']}\n")
+        handle.write("\n")
+
+        handle.write("Errors in existing summaries\n")
+        handle.write("----------------------------\n")
         error_rows = [row for row in rows if row["status"] == "ERROR"]
         if not error_rows:
             handle.write("None\n")
@@ -1081,6 +1143,7 @@ def print_console_summary(rows: list[dict[str, Any]], outputs: dict[str, Path]) 
         f"REVIEW={counts.get('REVIEW', 0)}  "
         f"GOOD={counts.get('GOOD', 0)}  "
         f"GOOD_LIMITED={counts.get('GOOD_LIMITED', 0)}  "
+        f"PENDING={counts.get('PENDING', 0)}  "
         f"ERROR={counts.get('ERROR', 0)}"
     )
     print()
@@ -1090,6 +1153,14 @@ def print_console_summary(rows: list[dict[str, Any]], outputs: dict[str, Path]) 
         print("Manual review candidates:")
         for row in review_rows:
             print(f"  {row['system']}: {row['review_reasons']}")
+        print()
+
+    advisory_rows = [row for row in rows if row.get("structural_advisories")]
+    if advisory_rows:
+        print(
+            f"Structural advisories (not REVIEW triggers with current analysisMD.py): "
+            f"{len(advisory_rows)}"
+        )
         print()
 
     delta_stats = stats_table(rows, signed_delta_fields(rows))
@@ -1162,7 +1233,7 @@ def main(argv: list[str] | None = None) -> int:
     rows = [analyze_one(path, system_hint) for system_hint, path in input_pairs]
 
     # Review candidates first, then limited/good results, then data-flow errors.
-    rank = {"REVIEW": 0, "GOOD_LIMITED": 1, "GOOD": 2, "ERROR": 3}
+    rank = {"REVIEW": 0, "GOOD_LIMITED": 1, "GOOD": 2, "PENDING": 3, "ERROR": 4}
     rows.sort(key=lambda row: (rank.get(str(row.get("status")), 99), str(row["system"])))
 
     prefix = Path(args.prefix)
@@ -1171,9 +1242,10 @@ def main(argv: list[str] | None = None) -> int:
     review_path = prefix.with_name(prefix.name + "_review.list")
     good_path = prefix.with_name(prefix.name + "_good.list")
     limited_path = prefix.with_name(prefix.name + "_good_limited.list")
+    pending_path = prefix.with_name(prefix.name + "_pending.list")
     error_path = prefix.with_name(prefix.name + "_errors.list")
 
-    for output_path in (csv_path, report_path, review_path, good_path, limited_path, error_path):
+    for output_path in (csv_path, report_path, review_path, good_path, limited_path, pending_path, error_path):
         output_path.parent.mkdir(parents=True, exist_ok=True)
     if args.plots:
         args.plots.parent.mkdir(parents=True, exist_ok=True)
@@ -1191,6 +1263,7 @@ def main(argv: list[str] | None = None) -> int:
     write_list(review_path, rows, {"REVIEW"})
     write_list(good_path, rows, {"GOOD"})
     write_list(limited_path, rows, {"GOOD_LIMITED"})
+    write_list(pending_path, rows, {"PENDING"})
     write_list(error_path, rows, {"ERROR"})
 
     outputs = {
@@ -1199,6 +1272,7 @@ def main(argv: list[str] | None = None) -> int:
         "review list": review_path,
         "good list": good_path,
         "limited list": limited_path,
+        "pending list": pending_path,
         "error list": error_path,
     }
 
@@ -1208,8 +1282,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print_console_summary(rows, outputs)
 
-    # Missing/invalid JSON is a data-flow failure and returns nonzero. REVIEW is
-    # deliberately not a process failure.
+    # A missing JSON is PENDING during an active batch and is not a process failure.
+    # Malformed/unreadable existing JSON remains ERROR. REVIEW is also not a process failure.
     return 1 if any(row["status"] == "ERROR" for row in rows) else 0
 
 
