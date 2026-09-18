@@ -701,6 +701,10 @@ for force_index in range(system.getNumForces()):
     else:
         force.setForceGroup(4)
 
+with open("openmm_system.xml", "w") as xml_file:
+    xml_file.write(mm.XmlSerializer.serialize(system))
+print("Serialized OpenMM System to openmm_system.xml", flush=True)
+
 def report_openmm_energy_components(simulation, label):
     """Report OpenMM potential-energy components using the C++ force groups."""
     component_groups = (
@@ -736,6 +740,10 @@ integrator = mm.LangevinIntegrator(
     0.002*unit.picoseconds
 )
 
+with open("openmm_integrator.xml", "w") as xml_file:
+    xml_file.write(mm.XmlSerializer.serialize(integrator))
+print("Serialized OpenMM Integrator to openmm_integrator.xml", flush=True)
+
 # Set up the simulation
 simulation = app.Simulation(modeller.topology, system, integrator)
 #simulation = app.Simulation(prmtop.topology, system, integrator)
@@ -749,7 +757,16 @@ platform = simulation.context.getPlatform()
 print(f"OpenMM execution platform: {platform.getName()}")
 print(f"OpenMM particles: {system.getNumParticles()}")
 print(f"OpenMM constraints: {system.getNumConstraints()}")
-initial_state = simulation.context.getState(getEnergy=True, getPositions=True)
+initial_state = simulation.context.getState(
+    getEnergy=True,
+    getPositions=True,
+    getParameters=True,
+    enforcePeriodicBox=False,
+)
+with open("openmm_initial_state.xml", "w") as xml_file:
+    xml_file.write(mm.XmlSerializer.serialize(initial_state))
+print("Serialized OpenMM initial State to openmm_initial_state.xml", flush=True)
+
 initial_box = initial_state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(unit.nanometers)
 print(
     "OpenMM initial box (nm):",
