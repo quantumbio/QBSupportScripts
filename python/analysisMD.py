@@ -123,6 +123,7 @@ from __future__ import annotations
 # ─── Standard Library ────────────────────────────────────────────────────────
 import argparse
 import gzip
+import heapq
 import hashlib
 import shutil
 import csv
@@ -205,6 +206,7 @@ CONFIG = {
         "relative_tolerance": 1.0e-10,
         "position_tolerance_nm": 1.0e-7,
         "energy_tolerance_kj_per_mol": 1.0e-6,
+        "constraint_geometry_thresholds_nm": (1.0e-6, 1.0e-5, 1.0e-4),
         "top_n_differences": 10
     },
 
@@ -1774,7 +1776,212 @@ def _openmm_nonbonded_exception_offset_records(force) -> list:
     return records
 
 
-def _compare_openmm_force(force1, force2, constraint_pairs1=None, constraint_pairs2=None) -> dict:
+def _openmm_atom_annotation(topology, particle_index: int) -> dict | None:
+    """Return a JSON-safe chemical identity for one OpenMM particle index."""
+    if topology is None:
+        return None
+    try:
+        atom = topology.atom(int(particle_index))
+    except Exception:
+        return None
+
+    residue = atom.residue
+    chain_index = int(residue.chain.index)
+    chain_label = chr(ord("A") + chain_index) if 0 <= chain_index < 26 else str(chain_index)
+    residue_label = f"{chain_label}:{residue.name}{residue.resSeq}"
+    return {
+        "particle_index": int(particle_index),
+        "atom_name": str(atom.name),
+        "residue_name": str(residue.name),
+        "residue_sequence": int(residue.resSeq),
+        "chain_index": chain_index,
+        "residue_label": residue_label,
+        "label": f"{residue_label}:{atom.name}",
+    }
+
+
+def _openmm_key_annotation(key, topology, atom_key_count: int | None) -> str | None:
+    if topology is None or atom_key_count is None:
+        return None
+    labels = []
+    for particle_index in list(key)[:atom_key_count]:
+        annotation = _openmm_atom_annotation(topology, particle_index)
+        labels.append(annotation["label"] if annotation else f"particle {particle_index}")
+    suffix = list(key)[atom_key_count:]
+    text = " / ".join(labels)
+    if suffix:
+        text += f" ; key-extra={suffix}"
+    return text
+
+
+def _openmm_finalize_delta_groups(groups: dict) -> list[dict]:
+    result = []
+    for name, values in groups.items():
+        count = values["count"]
+        result.append({
+            "name": name,
+            "count": count,
+            "mean_signed_delta_e": values["sum_signed"] / count if count else 0.0,
+            "mean_absolute_delta_e": values["sum_absolute"] / count if count else 0.0,
+            "rms_delta_e": float(np.sqrt(values["sum_squared"] / count)) if count else 0.0,
+            "max_absolute_delta_e": values["max_absolute"],
+        })
+    result.sort(key=lambda item: (item["max_absolute_delta_e"], item["count"]), reverse=True)
+    return result
+
+
+def _openmm_nonbonded_charge_residue_summary(records1: list, records2: list,
+                                               topology1, topology2) -> dict | None:
+    """Localize per-particle charge disagreements by residue type and instance."""
+    if topology1 is None or topology2 is None:
+        return None
+
+    by_type = defaultdict(lambda: {
+        "count": 0, "sum_signed": 0.0, "sum_absolute": 0.0,
+        "sum_squared": 0.0, "max_absolute": 0.0,
+    })
+    by_instance = defaultdict(lambda: {
+        "count": 0, "sum_signed": 0.0, "sum_absolute": 0.0,
+        "sum_squared": 0.0, "max_absolute": 0.0,
+    })
+    individual = []
+
+    for (key1, values1), (key2, values2) in zip(records1, records2):
+        if tuple(key1) != tuple(key2):
+            continue
+        q1 = float(values1[0])
+        q2 = float(values2[0])
+        if _openmm_numbers_match(q1, q2):
+            continue
+
+        particle_index = int(key1[0])
+        annotation1 = _openmm_atom_annotation(topology1, particle_index)
+        annotation2 = _openmm_atom_annotation(topology2, particle_index)
+        type1 = annotation1["residue_name"] if annotation1 else "<unknown>"
+        type2 = annotation2["residue_name"] if annotation2 else "<unknown>"
+        residue_type = type1 if type1 == type2 else f"{type1}/{type2}"
+        label1 = annotation1["residue_label"] if annotation1 else f"particle {particle_index}"
+        label2 = annotation2["residue_label"] if annotation2 else f"particle {particle_index}"
+        residue_instance = label1 if label1 == label2 else f"{label1}/{label2}"
+
+        delta = q1 - q2
+        absolute = abs(delta)
+        for groups, group_name in ((by_type, residue_type), (by_instance, residue_instance)):
+            acc = groups[group_name]
+            acc["count"] += 1
+            acc["sum_signed"] += delta
+            acc["sum_absolute"] += absolute
+            acc["sum_squared"] += delta * delta
+            acc["max_absolute"] = max(acc["max_absolute"], absolute)
+
+        individual.append({
+            "particle_index": particle_index,
+            "input1": annotation1,
+            "input2": annotation2,
+            "charge_input1_e": q1,
+            "charge_input2_e": q2,
+            "delta_input1_minus_input2_e": delta,
+            "absolute_difference_e": absolute,
+        })
+
+    individual.sort(key=lambda item: item["absolute_difference_e"], reverse=True)
+    top_n = CONFIG["openmm_xml_validation"]["top_n_differences"]
+    return {
+        "mismatch_count": len(individual),
+        "by_residue_type": _openmm_finalize_delta_groups(by_type),
+        "by_residue_instance": _openmm_finalize_delta_groups(by_instance),
+        "top_particle_mismatches": individual[:top_n],
+    }
+
+
+def _openmm_constraint_geometry(system, state, topology) -> dict:
+    """Measure how closely a serialized State satisfies its System constraints."""
+    positions = np.asarray(
+        state.getPositions(asNumpy=True).value_in_unit(openmm_unit.nanometer), dtype=float
+    )
+    box = np.asarray(
+        state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(openmm_unit.nanometer), dtype=float
+    )
+    inverse_box = None
+    try:
+        if abs(float(np.linalg.det(box))) > 1.0e-15:
+            inverse_box = np.linalg.inv(box)
+    except np.linalg.LinAlgError:
+        inverse_box = None
+
+    buckets = {"all": [], "water": [], "nonwater": []}
+    top_n = CONFIG["openmm_xml_validation"]["top_n_differences"]
+    top_heap = []
+    for constraint_index in range(system.getNumConstraints()):
+        p1, p2, target = system.getConstraintParameters(constraint_index)
+        p1 = int(p1)
+        p2 = int(p2)
+        target_nm = _openmm_float(target, openmm_unit.nanometer)
+        displacement = positions[p2] - positions[p1]
+        if inverse_box is not None:
+            fractional = displacement @ inverse_box
+            fractional -= np.round(fractional)
+            displacement = fractional @ box
+        actual_nm = float(np.linalg.norm(displacement))
+        delta_nm = actual_nm - target_nm
+        absolute_nm = abs(delta_nm)
+
+        is_water = False
+        annotation1 = _openmm_atom_annotation(topology, p1)
+        annotation2 = _openmm_atom_annotation(topology, p2)
+        if annotation1 and annotation2:
+            is_water = (
+                annotation1["residue_label"] == annotation2["residue_label"]
+                and annotation1["residue_name"].upper() in {"HOH", "WAT"}
+            )
+
+        buckets["all"].append(delta_nm)
+        buckets["water" if is_water else "nonwater"].append(delta_nm)
+        record = {
+            "constraint_index": int(constraint_index),
+            "particle1": p1,
+            "particle2": p2,
+            "input_atom1": annotation1,
+            "input_atom2": annotation2,
+            "is_water": bool(is_water),
+            "target_nm": target_nm,
+            "actual_nm": actual_nm,
+            "delta_actual_minus_target_nm": delta_nm,
+            "absolute_violation_nm": absolute_nm,
+        }
+        heap_item = (absolute_nm, int(constraint_index), record)
+        if len(top_heap) < top_n:
+            heapq.heappush(top_heap, heap_item)
+        elif absolute_nm > top_heap[0][0]:
+            heapq.heapreplace(top_heap, heap_item)
+
+    thresholds = CONFIG["openmm_xml_validation"]["constraint_geometry_thresholds_nm"]
+    summaries = {}
+    for name, values in buckets.items():
+        array = np.asarray(values, dtype=float)
+        absolute = np.abs(array)
+        summaries[name] = {
+            "count": int(array.size),
+            "mean_signed_violation_nm": float(array.mean()) if array.size else 0.0,
+            "mean_absolute_violation_nm": float(absolute.mean()) if array.size else 0.0,
+            "rms_violation_nm": float(np.sqrt(np.mean(array * array))) if array.size else 0.0,
+            "max_absolute_violation_nm": float(absolute.max()) if array.size else 0.0,
+            "counts_above_threshold_nm": {
+                f"{threshold:.1e}": int(np.count_nonzero(absolute > threshold))
+                for threshold in thresholds
+            },
+        }
+
+    top_records = [item[2] for item in sorted(top_heap, reverse=True)]
+    return {
+        "minimum_image_used": inverse_box is not None,
+        "summaries": summaries,
+        "top_violations": top_records,
+    }
+
+
+def _compare_openmm_force(force1, force2, constraint_pairs1=None, constraint_pairs2=None,
+                          topology1=None, topology2=None) -> dict:
     force_type = type(force1).__name__
     result = {
         "type": force_type,
@@ -1893,6 +2100,9 @@ def _compare_openmm_force(force1, force2, constraint_pairs1=None, constraint_pai
                 "input2": charge2,
                 "delta_input1_minus_input2": charge1 - charge2,
             },
+            "charge_residue_summary": _openmm_nonbonded_charge_residue_summary(
+                particle_records1, particle_records2, topology1, topology2
+            ),
             "exceptions": exceptions,
             "global_parameters": globals_result,
             "particle_parameter_offsets": particle_offsets,
@@ -1924,7 +2134,7 @@ def _compare_openmm_force(force1, force2, constraint_pairs1=None, constraint_pai
     return result
 
 
-def _compare_openmm_systems(system1, system2) -> dict:
+def _compare_openmm_systems(system1, system2, topology1=None, topology2=None) -> dict:
     problems = []
     warnings = []
     result = {}
@@ -2060,7 +2270,9 @@ def _compare_openmm_systems(system1, system2) -> dict:
         list2 = inventory2.get(force_type, [])
         for occurrence, ((index1, force1), (index2, force2)) in enumerate(zip(list1, list2)):
             comparison = _compare_openmm_force(
-                force1, force2, constraint_pairs1=constraint_pairs1, constraint_pairs2=constraint_pairs2
+                force1, force2,
+                constraint_pairs1=constraint_pairs1, constraint_pairs2=constraint_pairs2,
+                topology1=topology1, topology2=topology2
             )
             comparison["force_index_input1"] = int(index1)
             comparison["force_index_input2"] = int(index2)
@@ -2292,7 +2504,8 @@ def _compare_openmm_states(state1, state2) -> dict:
 
 
 def compare_serialized_openmm_xml(out1: Path | None, out2: Path | None,
-                                  label1: str, label2: str):
+                                  label1: str, label2: str,
+                                  topology1=None, topology2=None):
     """Discover and semantically compare OpenMM XmlSerializer files beside MD logs."""
     paths1 = _discover_openmm_serialized_paths(out1)
     paths2 = _discover_openmm_serialized_paths(out2)
@@ -2304,7 +2517,7 @@ def compare_serialized_openmm_xml(out1: Path | None, out2: Path | None,
         return None
 
     result = {
-        "comparison_version": 2,
+        "comparison_version": 3,
         "input1_label": label1,
         "input2_label": label2,
         "tolerances": dict(CONFIG["openmm_xml_validation"]),
@@ -2331,10 +2544,13 @@ def compare_serialized_openmm_xml(out1: Path | None, out2: Path | None,
         return result
 
     comparisons = (
-        ("system", _compare_openmm_systems),
+        ("system", lambda obj1, obj2: _compare_openmm_systems(
+            obj1, obj2, topology1=topology1, topology2=topology2
+        )),
         ("integrator", _compare_openmm_integrators),
         ("initial_state", _compare_openmm_states),
     )
+    loaded_objects = {}
     for key, comparator in comparisons:
         path1 = paths1[key]
         path2 = paths2[key]
@@ -2353,6 +2569,7 @@ def compare_serialized_openmm_xml(out1: Path | None, out2: Path | None,
         try:
             object1 = _load_openmm_serialized_object(Path(path1))
             object2 = _load_openmm_serialized_object(Path(path2))
+            loaded_objects[key] = (object1, object2)
             comparison = comparator(object1, object2)
             result[key] = comparison
             for problem in comparison.get("problems", []):
@@ -2364,6 +2581,19 @@ def compare_serialized_openmm_xml(out1: Path | None, out2: Path | None,
                 f"failed to compare {key} XML: {type(exc).__name__}: {exc}"
             )
             result[key] = {"comparison_error": f"{type(exc).__name__}: {exc}"}
+
+    if "system" in loaded_objects and "initial_state" in loaded_objects:
+        system1, system2 = loaded_objects["system"]
+        state1, state2 = loaded_objects["initial_state"]
+        try:
+            result["initial_constraint_geometry"] = {
+                "input1": _openmm_constraint_geometry(system1, state1, topology1),
+                "input2": _openmm_constraint_geometry(system2, state2, topology2),
+            }
+        except Exception as exc:
+            result["warnings"].append(
+                f"initial constraint geometry diagnostic failed: {type(exc).__name__}: {exc}"
+            )
 
     result["fully_compared"] = all(
         key in result
@@ -2402,13 +2632,20 @@ def _print_openmm_field_statistics(title: str, result: dict) -> None:
         )
 
 
-def _print_openmm_top_record_differences(title: str, result: dict, limit: int = 3) -> None:
+def _print_openmm_top_record_differences(title: str, result: dict, limit: int = 3,
+                                         topology1=None, topology2=None,
+                                         atom_key_count: int | None = None) -> None:
     shown = 0
-    for side, key_name in (("input1-only", "keys_only_input1"), ("input2-only", "keys_only_input2")):
+    for side, key_name, topology in (
+        ("input1-only", "keys_only_input1", topology1),
+        ("input2-only", "keys_only_input2", topology2),
+    ):
         for key in result.get(key_name, []):
             if shown >= limit:
                 return
-            print(f"      {title} {side} key={key}")
+            annotation = _openmm_key_annotation(key, topology, atom_key_count)
+            suffix = f"  [{annotation}]" if annotation else ""
+            print(f"      {title} {side} key={key}{suffix}")
             shown += 1
 
     for mismatch in result.get("top_parameter_mismatches", []):
@@ -2422,11 +2659,20 @@ def _print_openmm_top_record_differences(title: str, result: dict, limit: int = 
                 f"{field}: {values['input1']:.8g} vs {values['input2']:.8g} "
                 f"(delta={values['delta_input1_minus_input2']:+.3e})"
             )
-        print(f"      {title} key={mismatch['key']}  " + "; ".join(changed))
+        annotation1 = _openmm_key_annotation(mismatch["key"], topology1, atom_key_count)
+        annotation2 = _openmm_key_annotation(mismatch["key"], topology2, atom_key_count)
+        annotations = []
+        if annotation1:
+            annotations.append(f"input1={annotation1}")
+        if annotation2 and annotation2 != annotation1:
+            annotations.append(f"input2={annotation2}")
+        suffix = f"  [{' ; '.join(annotations)}]" if annotations else ""
+        print(f"      {title} key={mismatch['key']}{suffix}  " + "; ".join(changed))
         shown += 1
 
 
-def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison: dict) -> None:
+def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison: dict,
+                                              topology1=None, topology2=None) -> None:
     if not comparison:
         return
 
@@ -2456,11 +2702,17 @@ def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison:
             f"{system['particle_mass_totals_dalton']['delta_input1_minus_input2']:+.6g} Da"
         )
         if not system["particle_masses"]["match"]:
-            _print_openmm_top_record_differences("particle masses", system["particle_masses"])
+            _print_openmm_top_record_differences(
+                "particle masses", system["particle_masses"],
+                topology1=topology1, topology2=topology2, atom_key_count=1
+            )
         _print_openmm_record_summary("constraints", system["constraints"])
         _print_openmm_field_statistics("constraints", system["constraints"])
         if not system["constraints"]["match"]:
-            _print_openmm_top_record_differences("constraints", system["constraints"])
+            _print_openmm_top_record_differences(
+                "constraints", system["constraints"],
+                topology1=topology1, topology2=topology2, atom_key_count=2
+            )
         print(
             f"    default periodic box         : max |delta|="
             f"{system['default_periodic_box_nm']['max_absolute_difference_nm']:.6g} nm"
@@ -2494,7 +2746,16 @@ def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison:
                             f"unconstrained={overlap['input2_only_terms_not_constrained']}"
                         )
                     if not force_result["terms"]["match"]:
-                        _print_openmm_top_record_differences(prefix, force_result["terms"])
+                        atom_key_count = {
+                            "HarmonicBondForce": 2,
+                            "HarmonicAngleForce": 3,
+                            "PeriodicTorsionForce": 4,
+                        }.get(force_type)
+                        _print_openmm_top_record_differences(
+                            prefix, force_result["terms"],
+                            topology1=topology1, topology2=topology2,
+                            atom_key_count=atom_key_count
+                        )
                 if force_type == "NonbondedForce":
                     print(
                         f"    {prefix + ' settings':<28}: "
@@ -2510,13 +2771,30 @@ def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison:
                     )
                     if not force_result["particles"]["match"]:
                         _print_openmm_top_record_differences(
-                            prefix + " particles", force_result["particles"]
+                            prefix + " particles", force_result["particles"],
+                            topology1=topology1, topology2=topology2, atom_key_count=1
                         )
+                    charge_summary = force_result.get("charge_residue_summary")
+                    if charge_summary and charge_summary["mismatch_count"]:
+                        print("      charge mismatches by residue type (largest |delta q|):")
+                        for entry in charge_summary["by_residue_type"][:5]:
+                            print(
+                                f"        {entry['name']:<20} n={entry['count']:<5d} "
+                                f"mean_abs={entry['mean_absolute_delta_e']:.6g} e "
+                                f"max={entry['max_absolute_delta_e']:.6g} e"
+                            )
+                        print("      largest residue-instance charge mismatches:")
+                        for entry in charge_summary["by_residue_instance"][:3]:
+                            print(
+                                f"        {entry['name']:<28} n={entry['count']:<4d} "
+                                f"max={entry['max_absolute_delta_e']:.6g} e"
+                            )
                     _print_openmm_record_summary(prefix + " exceptions", force_result["exceptions"])
                     _print_openmm_field_statistics(prefix + " exceptions", force_result["exceptions"])
                     if not force_result["exceptions"]["match"]:
                         _print_openmm_top_record_differences(
-                            prefix + " exceptions", force_result["exceptions"]
+                            prefix + " exceptions", force_result["exceptions"],
+                            topology1=topology1, topology2=topology2, atom_key_count=2
                         )
         if system["metadata_difference_count"]:
             print(
@@ -2580,6 +2858,34 @@ def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison:
             f"    kinetic energy (diagnostic)  : delta="
             f"{state['kinetic_energy_kj_per_mol']['delta_input1_minus_input2']:+.6g} kJ/mol"
         )
+
+    constraint_geometry = comparison.get("initial_constraint_geometry")
+    if constraint_geometry:
+        print("\n  Initial constraint-geometry diagnostic")
+        for side_key, label in (("input1", label1), ("input2", label2)):
+            diagnostic = constraint_geometry[side_key]
+            print(f"    {label}:")
+            for bucket_name in ("all", "water", "nonwater"):
+                stats = diagnostic["summaries"][bucket_name]
+                thresholds = stats["counts_above_threshold_nm"]
+                print(
+                    f"      {bucket_name:<9} n={stats['count']:<7d} "
+                    f"rms={stats['rms_violation_nm']:.6g} nm "
+                    f"max={stats['max_absolute_violation_nm']:.6g} nm "
+                    f">1e-5nm={thresholds.get('1.0e-05', 0)}"
+                )
+            if diagnostic["top_violations"]:
+                print("      largest violations:")
+                for item in diagnostic["top_violations"][:3]:
+                    atom1 = item["input_atom1"]
+                    atom2 = item["input_atom2"]
+                    label_atom1 = atom1["label"] if atom1 else str(item["particle1"])
+                    label_atom2 = atom2["label"] if atom2 else str(item["particle2"])
+                    print(
+                        f"        {label_atom1} -- {label_atom2}: "
+                        f"actual-target={item['delta_actual_minus_target_nm']:+.6g} nm "
+                        f"(target={item['target_nm']:.8g} nm)"
+                    )
 
     if comparison.get("problems"):
         print("\n  Serialized XML differences requiring review:")
@@ -2735,8 +3041,8 @@ def main()->None:
         plt.savefig(f"{args.out_prefix}_rmsf_aligned.pdf",dpi=CONFIG["plot"]["dpi"]); plt.close()
 
         # Aligned residue lists (built earlier from m1 / m2)
-        aligned_res1 = [t1.topology.atom(ca).residue for ca in m1]
-        aligned_res2 = [t2.topology.atom(ca).residue for ca in m2]
+        aligned_res1 = [prot1.topology.atom(ca).residue for ca in m1]
+        aligned_res2 = [prot2.topology.atom(ca).residue for ca in m2]
         n_aligned    = len(aligned_res1)
 
         # ───────── TRAJECTORY VALIDATION: RMSF PROFILE SIMILARITY ─────────
@@ -3871,12 +4177,14 @@ def main()->None:
             }
 
             serialized_xml_comparison = compare_serialized_openmm_xml(
-                args.out1, args.out2, args.label1, args.label2
+                args.out1, args.out2, args.label1, args.label2,
+                topology1=t1.topology, topology2=t2.topology
             )
             if serialized_xml_comparison is not None:
                 openmm_validation["serialized_xml"] = serialized_xml_comparison
                 print_serialized_openmm_xml_comparison(
-                    args.label1, args.label2, serialized_xml_comparison
+                    args.label1, args.label2, serialized_xml_comparison,
+                    topology1=t1.topology, topology2=t2.topology
                 )
 
             if out1_data:
