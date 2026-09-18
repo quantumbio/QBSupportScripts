@@ -1642,7 +1642,7 @@ def _openmm_nonbonded_settings(force) -> dict:
 
     alpha, nx, ny, nz = force.getPMEParameters()
     settings.update({
-        "pme_alpha_per_nm": _openmm_float(alpha, 1 / openmm_unit.nanometer),
+        "pme_alpha_per_nm": _openmm_float(alpha, openmm_unit.nanometer**-1),
         "pme_grid_x": int(nx),
         "pme_grid_y": int(ny),
         "pme_grid_z": int(nz)
@@ -1650,7 +1650,7 @@ def _openmm_nonbonded_settings(force) -> dict:
     if hasattr(force, "getLJPMEParameters"):
         alpha_lj, nx_lj, ny_lj, nz_lj = force.getLJPMEParameters()
         settings.update({
-            "ljpme_alpha_per_nm": _openmm_float(alpha_lj, 1 / openmm_unit.nanometer),
+            "ljpme_alpha_per_nm": _openmm_float(alpha_lj, openmm_unit.nanometer**-1),
             "ljpme_grid_x": int(nx_lj),
             "ljpme_grid_y": int(ny_lj),
             "ljpme_grid_z": int(nz_lj)
@@ -2007,7 +2007,7 @@ def _compare_openmm_integrators(integrator1, integrator2) -> dict:
 
     for name, getter, target_unit in (
         ("temperature_k", "getTemperature", openmm_unit.kelvin),
-        ("friction_per_ps", "getFriction", 1 / openmm_unit.picosecond),
+        ("friction_per_ps", "getFriction", openmm_unit.picosecond**-1),
         ("random_number_seed", "getRandomNumberSeed", None),
     ):
         if hasattr(integrator1, getter) and hasattr(integrator2, getter):
