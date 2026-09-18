@@ -27,6 +27,8 @@ Analyses Performed
 14. MD output/screenout validation (if provided)            → printed / PDFs / JSON
     - Auto-detects Python/OpenMM, DivCon/C++/OpenMM, or legacy three-column output
     - Compares system construction, energy decomposition, protocol, and thermodynamics
+    - If OpenMM XmlSerializer files are beside the MD logs, compares the serialized
+      System, Integrator, and initial State semantically
 15. Ligand Analyses (if `--ligand` is specified):
     a. Ligand RMSD vs. time                               → *_ligand_rmsd.pdf
     b. Ligand SASA vs. time                               → *_ligand_sasa.pdf
@@ -66,7 +68,8 @@ Top-level fields include:
   - dccm_overall: DCCM correlations and Δ-correlation highlights
   - ligand: (if applicable) ligand RMSD, RMSF, SASA, H-bonds, contact fingerprint, and DCCM
   - out1_summary / out2_summary: backwards-compatible thermodynamic summaries
-  - openmm_validation: normalized MD-log data plus system, energy, protocol, and production comparisons
+  - openmm_validation: normalized MD-log data plus system, energy, protocol, production, and
+    optional serialized OpenMM System/Integrator/State comparisons
 
 Usage Examples
 --------------
@@ -120,11 +123,13 @@ from __future__ import annotations
 # ─── Standard Library ────────────────────────────────────────────────────────
 import argparse
 import gzip
+import hashlib
 import shutil
 import csv
 import logging
 import re
 import tempfile
+from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple
 import json
@@ -140,6 +145,13 @@ from Bio.Align import PairwiseAligner
 from Bio.Data import IUPACData
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
+
+try:
+    import openmm as mm
+    from openmm import unit as openmm_unit
+except ImportError:
+    mm = None
+    openmm_unit = None
 
 # ─────────────────────────────  CONFIG  ──────────────────────────────────────
 residue_mapping = {             # standard 3‑letter + Amber variants
@@ -182,6 +194,18 @@ CONFIG = {
         "top_n_rmsf_differences": 10,
         "top_n_distance_differences": 10,
         "distance_pair_chunk_size": 5000   # bound temporary memory for large proteins
+    },
+
+    # Semantic comparison of OpenMM XmlSerializer output.  These tolerances are
+    # intentionally tight: the XML files describe the actual OpenMM objects, not
+    # noisy trajectory observables.  Larger differences should be surfaced for
+    # inspection rather than silently accepted.
+    "openmm_xml_validation": {
+        "absolute_tolerance": 1.0e-10,
+        "relative_tolerance": 1.0e-10,
+        "position_tolerance_nm": 1.0e-7,
+        "energy_tolerance_kj_per_mol": 1.0e-6,
+        "top_n_differences": 10
     },
 
     "plot": {
@@ -1324,6 +1348,1051 @@ def plot_production_validation(
         plt.tight_layout()
         plt.savefig(f"{out_prefix}_potential_energy_delta.pdf", dpi=CONFIG["plot"]["dpi"])
         plt.close()
+
+
+# ───────── SERIALIZED OPENMM XML VALIDATION ───────────────────────────────────
+_OPENMM_SERIALIZED_FILENAMES = {
+    "system": "openmm_system.xml",
+    "integrator": "openmm_integrator.xml",
+    "initial_state": "openmm_initial_state.xml",
+}
+
+
+def _openmm_float(value, target_unit=None) -> float:
+    """Convert an OpenMM scalar/Quantity to a plain float in a documented unit."""
+    if target_unit is not None and hasattr(value, "value_in_unit"):
+        return float(value.value_in_unit(target_unit))
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        if hasattr(value, "_value"):
+            return float(value._value)
+        raise
+
+
+def _openmm_numbers_match(value1: float, value2: float, absolute_tolerance=None,
+                           relative_tolerance=None) -> bool:
+    cfg = CONFIG["openmm_xml_validation"]
+    atol = cfg["absolute_tolerance"] if absolute_tolerance is None else absolute_tolerance
+    rtol = cfg["relative_tolerance"] if relative_tolerance is None else relative_tolerance
+    return abs(value1 - value2) <= atol + rtol * max(abs(value1), abs(value2))
+
+
+def _openmm_scalar_comparison(value1, value2, absolute_tolerance=None,
+                              relative_tolerance=None) -> dict:
+    if isinstance(value1, (bool, str, int)) or isinstance(value2, (bool, str, int)):
+        return {"input1": value1, "input2": value2, "match": value1 == value2}
+
+    value1 = float(value1)
+    value2 = float(value2)
+    return {
+        "input1": value1,
+        "input2": value2,
+        "delta_input1_minus_input2": value1 - value2,
+        "absolute_difference": abs(value1 - value2),
+        "match": _openmm_numbers_match(
+            value1, value2, absolute_tolerance, relative_tolerance
+        )
+    }
+
+
+def _openmm_compare_settings(settings1: dict, settings2: dict) -> dict:
+    fields = {}
+    missing1 = []
+    missing2 = []
+    n_different = 0
+
+    for field in sorted(set(settings1) | set(settings2)):
+        if field not in settings1:
+            missing1.append(field)
+            n_different += 1
+            continue
+        if field not in settings2:
+            missing2.append(field)
+            n_different += 1
+            continue
+        comparison = _openmm_scalar_comparison(settings1[field], settings2[field])
+        fields[field] = comparison
+        if not comparison["match"]:
+            n_different += 1
+
+    return {
+        "fields": fields,
+        "missing_from_input1": missing1,
+        "missing_from_input2": missing2,
+        "n_different": n_different,
+        "match": n_different == 0
+    }
+
+
+def _openmm_compare_keyed_records(records1: list, records2: list, field_names: tuple[str, ...]) -> dict:
+    """Compare parameter records as keyed multisets, independent of record order."""
+    grouped1 = defaultdict(list)
+    grouped2 = defaultdict(list)
+    for key, values in records1:
+        grouped1[tuple(key)].append(tuple(float(v) for v in values))
+    for key, values in records2:
+        grouped2[tuple(key)].append(tuple(float(v) for v in values))
+
+    keys1 = set(grouped1)
+    keys2 = set(grouped2)
+    only1 = sorted(keys1 - keys2)
+    only2 = sorted(keys2 - keys1)
+    multiplicity_mismatches = []
+    parameter_mismatches = []
+    max_abs = {name: 0.0 for name in field_names}
+
+    cfg = CONFIG["openmm_xml_validation"]
+    atol = cfg["absolute_tolerance"]
+    rtol = cfg["relative_tolerance"]
+
+    for key in sorted(keys1 & keys2):
+        values1 = sorted(grouped1[key])
+        values2 = sorted(grouped2[key])
+        if len(values1) != len(values2):
+            multiplicity_mismatches.append({
+                "key": list(key),
+                "count_input1": len(values1),
+                "count_input2": len(values2)
+            })
+
+        for params1, params2 in zip(values1, values2):
+            differences = {}
+            mismatch = False
+            tolerance_score = 0.0
+            for field, value1, value2 in zip(field_names, params1, params2):
+                delta = value1 - value2
+                absolute = abs(delta)
+                max_abs[field] = max(max_abs[field], absolute)
+                allowed = atol + rtol * max(abs(value1), abs(value2))
+                score = absolute / allowed if allowed > 0.0 else (0.0 if absolute == 0.0 else float("inf"))
+                tolerance_score = max(tolerance_score, score)
+                match = absolute <= allowed
+                if not match:
+                    mismatch = True
+                differences[field] = {
+                    "input1": value1,
+                    "input2": value2,
+                    "delta_input1_minus_input2": delta,
+                    "absolute_difference": absolute,
+                    "match": match
+                }
+
+            if mismatch:
+                parameter_mismatches.append({
+                    "key": list(key),
+                    "fields": differences,
+                    "tolerance_score": tolerance_score
+                })
+
+    parameter_mismatches.sort(key=lambda item: item["tolerance_score"], reverse=True)
+    top_n = CONFIG["openmm_xml_validation"]["top_n_differences"]
+
+    return {
+        "count_input1": len(records1),
+        "count_input2": len(records2),
+        "count_match": len(records1) == len(records2),
+        "keys_only_input1_count": len(only1),
+        "keys_only_input2_count": len(only2),
+        "keys_only_input1": [list(key) for key in only1[:top_n]],
+        "keys_only_input2": [list(key) for key in only2[:top_n]],
+        "multiplicity_mismatch_count": len(multiplicity_mismatches),
+        "multiplicity_mismatches": multiplicity_mismatches[:top_n],
+        "parameter_mismatch_count": len(parameter_mismatches),
+        "top_parameter_mismatches": parameter_mismatches[:top_n],
+        "max_absolute_difference_by_field": max_abs,
+        "match": (
+            len(records1) == len(records2)
+            and not only1
+            and not only2
+            and not multiplicity_mismatches
+            and not parameter_mismatches
+        )
+    }
+
+
+def _openmm_path_metadata(path: Path | None) -> dict:
+    if path is None:
+        return {"path": None, "exists": False}
+    path = Path(path)
+    result = {"path": str(path), "exists": path.is_file()}
+    if path.is_file():
+        payload = path.read_bytes()
+        result["size_bytes"] = len(payload)
+        result["sha256"] = hashlib.sha256(payload).hexdigest()
+    return result
+
+
+def _discover_openmm_serialized_paths(out_path: Path | None) -> dict[str, Path | None]:
+    if out_path is None:
+        return {key: None for key in _OPENMM_SERIALIZED_FILENAMES}
+    base = Path(out_path).parent
+    return {key: base / filename for key, filename in _OPENMM_SERIALIZED_FILENAMES.items()}
+
+
+def _load_openmm_serialized_object(path: Path):
+    with open(path, "r") as handle:
+        return mm.XmlSerializer.deserialize(handle.read())
+
+
+def _openmm_force_inventory(system) -> dict[str, list]:
+    inventory = defaultdict(list)
+    for force_index in range(system.getNumForces()):
+        force = system.getForce(force_index)
+        inventory[type(force).__name__].append((force_index, force))
+    return dict(inventory)
+
+
+def _openmm_force_metadata(force1, force2) -> dict:
+    metadata = {
+        "force_group": _openmm_scalar_comparison(
+            int(force1.getForceGroup()), int(force2.getForceGroup())
+        ),
+        "name": _openmm_scalar_comparison(str(force1.getName()), str(force2.getName()))
+    }
+    if hasattr(force1, "usesPeriodicBoundaryConditions") and hasattr(force2, "usesPeriodicBoundaryConditions"):
+        metadata["uses_periodic_boundary_conditions"] = _openmm_scalar_comparison(
+            bool(force1.usesPeriodicBoundaryConditions()),
+            bool(force2.usesPeriodicBoundaryConditions())
+        )
+    return metadata
+
+
+def _openmm_force_metadata_difference_count(metadata: dict) -> int:
+    # Force group/name differences are useful diagnostics but do not by themselves
+    # alter the Hamiltonian.  PBC usage is physics-affecting and is counted by the
+    # force-specific comparison where applicable.
+    return sum(
+        1 for key in ("force_group", "name")
+        if key in metadata and not metadata[key]["match"]
+    )
+
+
+def _openmm_harmonic_bond_records(force) -> list:
+    records = []
+    k_unit = openmm_unit.kilojoule_per_mole / openmm_unit.nanometer**2
+    for index in range(force.getNumBonds()):
+        p1, p2, length, k = force.getBondParameters(index)
+        key = tuple(sorted((int(p1), int(p2))))
+        records.append((key, (
+            _openmm_float(length, openmm_unit.nanometer),
+            _openmm_float(k, k_unit)
+        )))
+    return records
+
+
+def _openmm_harmonic_angle_records(force) -> list:
+    records = []
+    k_unit = openmm_unit.kilojoule_per_mole / openmm_unit.radian**2
+    for index in range(force.getNumAngles()):
+        p1, p2, p3, theta, k = force.getAngleParameters(index)
+        forward = (int(p1), int(p2), int(p3))
+        reverse = (int(p3), int(p2), int(p1))
+        key = min(forward, reverse)
+        records.append((key, (
+            _openmm_float(theta, openmm_unit.radian),
+            _openmm_float(k, k_unit)
+        )))
+    return records
+
+
+def _openmm_periodic_torsion_records(force) -> list:
+    records = []
+    for index in range(force.getNumTorsions()):
+        p1, p2, p3, p4, periodicity, phase, k = force.getTorsionParameters(index)
+        # Keep atom order explicit.  Reversing a torsion can change the sign
+        # convention for its phase, so treating reversed tuples as identical can
+        # hide a real representation difference.
+        key = (int(p1), int(p2), int(p3), int(p4), int(periodicity))
+        records.append((key, (
+            _openmm_float(phase, openmm_unit.radian),
+            _openmm_float(k, openmm_unit.kilojoule_per_mole)
+        )))
+    return records
+
+
+def _openmm_nonbonded_method_name(value) -> str:
+    method_map = {
+        int(mm.NonbondedForce.NoCutoff): "NoCutoff",
+        int(mm.NonbondedForce.CutoffNonPeriodic): "CutoffNonPeriodic",
+        int(mm.NonbondedForce.CutoffPeriodic): "CutoffPeriodic",
+        int(mm.NonbondedForce.Ewald): "Ewald",
+        int(mm.NonbondedForce.PME): "PME",
+        int(mm.NonbondedForce.LJPME): "LJPME",
+    }
+    return method_map.get(int(value), str(int(value)))
+
+
+def _openmm_nonbonded_settings(force) -> dict:
+    settings = {
+        "method": _openmm_nonbonded_method_name(force.getNonbondedMethod()),
+        "cutoff_nm": _openmm_float(force.getCutoffDistance(), openmm_unit.nanometer),
+        "reaction_field_dielectric": float(force.getReactionFieldDielectric()),
+        "ewald_error_tolerance": float(force.getEwaldErrorTolerance()),
+        "use_dispersion_correction": bool(force.getUseDispersionCorrection()),
+        "use_switching_function": bool(force.getUseSwitchingFunction()),
+        "exceptions_use_periodic_boundary_conditions": bool(
+            force.getExceptionsUsePeriodicBoundaryConditions()
+        )
+    }
+    if force.getUseSwitchingFunction():
+        settings["switching_distance_nm"] = _openmm_float(
+            force.getSwitchingDistance(), openmm_unit.nanometer
+        )
+
+    alpha, nx, ny, nz = force.getPMEParameters()
+    settings.update({
+        "pme_alpha_per_nm": _openmm_float(alpha, 1 / openmm_unit.nanometer),
+        "pme_grid_x": int(nx),
+        "pme_grid_y": int(ny),
+        "pme_grid_z": int(nz)
+    })
+    if hasattr(force, "getLJPMEParameters"):
+        alpha_lj, nx_lj, ny_lj, nz_lj = force.getLJPMEParameters()
+        settings.update({
+            "ljpme_alpha_per_nm": _openmm_float(alpha_lj, 1 / openmm_unit.nanometer),
+            "ljpme_grid_x": int(nx_lj),
+            "ljpme_grid_y": int(ny_lj),
+            "ljpme_grid_z": int(nz_lj)
+        })
+    return settings
+
+
+def _openmm_nonbonded_particle_records(force) -> list:
+    records = []
+    for index in range(force.getNumParticles()):
+        charge, sigma, epsilon = force.getParticleParameters(index)
+        records.append(((index,), (
+            _openmm_float(charge, openmm_unit.elementary_charge),
+            _openmm_float(sigma, openmm_unit.nanometer),
+            _openmm_float(epsilon, openmm_unit.kilojoule_per_mole)
+        )))
+    return records
+
+
+def _openmm_nonbonded_exception_records(force) -> list:
+    records = []
+    charge_product_unit = openmm_unit.elementary_charge**2
+    for index in range(force.getNumExceptions()):
+        p1, p2, charge_product, sigma, epsilon = force.getExceptionParameters(index)
+        key = tuple(sorted((int(p1), int(p2))))
+        records.append((key, (
+            _openmm_float(charge_product, charge_product_unit),
+            _openmm_float(sigma, openmm_unit.nanometer),
+            _openmm_float(epsilon, openmm_unit.kilojoule_per_mole)
+        )))
+    return records
+
+
+def _openmm_nonbonded_global_parameter_records(force) -> list:
+    return [
+        ((str(force.getGlobalParameterName(index)),),
+         (float(force.getGlobalParameterDefaultValue(index)),))
+        for index in range(force.getNumGlobalParameters())
+    ]
+
+
+def _openmm_nonbonded_particle_offset_records(force) -> list:
+    records = []
+    for index in range(force.getNumParticleParameterOffsets()):
+        parameter, particle, charge_scale, sigma_scale, epsilon_scale = (
+            force.getParticleParameterOffset(index)
+        )
+        records.append(((str(parameter), int(particle)), (
+            _openmm_float(charge_scale, openmm_unit.elementary_charge),
+            _openmm_float(sigma_scale, openmm_unit.nanometer),
+            _openmm_float(epsilon_scale, openmm_unit.kilojoule_per_mole)
+        )))
+    return records
+
+
+def _openmm_nonbonded_exception_offset_records(force) -> list:
+    records = []
+    charge_product_unit = openmm_unit.elementary_charge**2
+    for index in range(force.getNumExceptionParameterOffsets()):
+        parameter, exception_index, charge_scale, sigma_scale, epsilon_scale = (
+            force.getExceptionParameterOffset(index)
+        )
+        p1, p2, _, _, _ = force.getExceptionParameters(int(exception_index))
+        pair = tuple(sorted((int(p1), int(p2))))
+        records.append(((str(parameter), *pair), (
+            _openmm_float(charge_scale, charge_product_unit),
+            _openmm_float(sigma_scale, openmm_unit.nanometer),
+            _openmm_float(epsilon_scale, openmm_unit.kilojoule_per_mole)
+        )))
+    return records
+
+
+def _compare_openmm_force(force1, force2) -> dict:
+    force_type = type(force1).__name__
+    result = {
+        "type": force_type,
+        "metadata": _openmm_force_metadata(force1, force2),
+        "physics_differences": 0,
+        "metadata_differences": 0,
+        "fully_compared": True
+    }
+    result["metadata_differences"] = _openmm_force_metadata_difference_count(result["metadata"])
+
+    pbc = result["metadata"].get("uses_periodic_boundary_conditions")
+    if pbc is not None and not pbc["match"]:
+        result["physics_differences"] += 1
+
+    if isinstance(force1, mm.HarmonicBondForce) and isinstance(force2, mm.HarmonicBondForce):
+        terms = _openmm_compare_keyed_records(
+            _openmm_harmonic_bond_records(force1),
+            _openmm_harmonic_bond_records(force2),
+            ("length_nm", "k_kj_per_mol_nm2")
+        )
+        result["terms"] = terms
+        if not terms["match"]:
+            result["physics_differences"] += 1
+
+    elif isinstance(force1, mm.HarmonicAngleForce) and isinstance(force2, mm.HarmonicAngleForce):
+        terms = _openmm_compare_keyed_records(
+            _openmm_harmonic_angle_records(force1),
+            _openmm_harmonic_angle_records(force2),
+            ("theta_rad", "k_kj_per_mol_rad2")
+        )
+        result["terms"] = terms
+        if not terms["match"]:
+            result["physics_differences"] += 1
+
+    elif isinstance(force1, mm.PeriodicTorsionForce) and isinstance(force2, mm.PeriodicTorsionForce):
+        terms = _openmm_compare_keyed_records(
+            _openmm_periodic_torsion_records(force1),
+            _openmm_periodic_torsion_records(force2),
+            ("phase_rad", "k_kj_per_mol")
+        )
+        result["terms"] = terms
+        if not terms["match"]:
+            result["physics_differences"] += 1
+
+    elif isinstance(force1, mm.NonbondedForce) and isinstance(force2, mm.NonbondedForce):
+        settings = _openmm_compare_settings(
+            _openmm_nonbonded_settings(force1), _openmm_nonbonded_settings(force2)
+        )
+        particles = _openmm_compare_keyed_records(
+            _openmm_nonbonded_particle_records(force1),
+            _openmm_nonbonded_particle_records(force2),
+            ("charge_e", "sigma_nm", "epsilon_kj_per_mol")
+        )
+        exceptions = _openmm_compare_keyed_records(
+            _openmm_nonbonded_exception_records(force1),
+            _openmm_nonbonded_exception_records(force2),
+            ("charge_product_e2", "sigma_nm", "epsilon_kj_per_mol")
+        )
+        globals_result = _openmm_compare_keyed_records(
+            _openmm_nonbonded_global_parameter_records(force1),
+            _openmm_nonbonded_global_parameter_records(force2),
+            ("default_value",)
+        )
+        particle_offsets = _openmm_compare_keyed_records(
+            _openmm_nonbonded_particle_offset_records(force1),
+            _openmm_nonbonded_particle_offset_records(force2),
+            ("charge_scale_e", "sigma_scale_nm", "epsilon_scale_kj_per_mol")
+        )
+        exception_offsets = _openmm_compare_keyed_records(
+            _openmm_nonbonded_exception_offset_records(force1),
+            _openmm_nonbonded_exception_offset_records(force2),
+            ("charge_product_scale_e2", "sigma_scale_nm", "epsilon_scale_kj_per_mol")
+        )
+        result.update({
+            "settings": settings,
+            "particles": particles,
+            "exceptions": exceptions,
+            "global_parameters": globals_result,
+            "particle_parameter_offsets": particle_offsets,
+            "exception_parameter_offsets": exception_offsets
+        })
+        for part in (settings, particles, exceptions, globals_result, particle_offsets, exception_offsets):
+            if not part["match"]:
+                result["physics_differences"] += 1
+
+    elif isinstance(force1, mm.CMMotionRemover) and isinstance(force2, mm.CMMotionRemover):
+        frequency = _openmm_scalar_comparison(
+            int(force1.getFrequency()), int(force2.getFrequency())
+        )
+        result["frequency"] = frequency
+        if not frequency["match"]:
+            result["physics_differences"] += 1
+
+    else:
+        # Preserve visibility of an unexpected force type.  Raw serialization is
+        # still useful as a strict fallback, but do not claim semantic equivalence
+        # when we have not explicitly compared that Force API.
+        result["fully_compared"] = False
+        xml1 = mm.XmlSerializer.serialize(force1)
+        xml2 = mm.XmlSerializer.serialize(force2)
+        result["exact_force_xml_match"] = xml1 == xml2
+        if xml1 != xml2:
+            result["physics_differences"] += 1
+
+    return result
+
+
+def _compare_openmm_systems(system1, system2) -> dict:
+    problems = []
+    warnings = []
+    result = {}
+
+    n_particles1 = int(system1.getNumParticles())
+    n_particles2 = int(system2.getNumParticles())
+    result["particles"] = _openmm_scalar_comparison(n_particles1, n_particles2)
+    if n_particles1 != n_particles2:
+        problems.append(
+            f"particle count differs: {n_particles1} vs {n_particles2}"
+        )
+
+    mass_records1 = [
+        ((index,), (_openmm_float(system1.getParticleMass(index), openmm_unit.dalton),))
+        for index in range(n_particles1)
+    ]
+    mass_records2 = [
+        ((index,), (_openmm_float(system2.getParticleMass(index), openmm_unit.dalton),))
+        for index in range(n_particles2)
+    ]
+    masses = _openmm_compare_keyed_records(mass_records1, mass_records2, ("mass_dalton",))
+    result["particle_masses"] = masses
+    if not masses["match"]:
+        problems.append(
+            f"particle masses differ: {masses['parameter_mismatch_count']} parameter mismatches, "
+            f"{masses['keys_only_input1_count']} input1-only, {masses['keys_only_input2_count']} input2-only"
+        )
+
+    constraint_records1 = []
+    for index in range(system1.getNumConstraints()):
+        p1, p2, distance = system1.getConstraintParameters(index)
+        constraint_records1.append((
+            tuple(sorted((int(p1), int(p2)))),
+            (_openmm_float(distance, openmm_unit.nanometer),)
+        ))
+    constraint_records2 = []
+    for index in range(system2.getNumConstraints()):
+        p1, p2, distance = system2.getConstraintParameters(index)
+        constraint_records2.append((
+            tuple(sorted((int(p1), int(p2)))),
+            (_openmm_float(distance, openmm_unit.nanometer),)
+        ))
+    constraints = _openmm_compare_keyed_records(
+        constraint_records1, constraint_records2, ("distance_nm",)
+    )
+    result["constraints"] = constraints
+    if not constraints["match"]:
+        problems.append(
+            f"constraints differ: {constraints['count_input1']} vs {constraints['count_input2']} terms; "
+            f"{constraints['keys_only_input1_count']} input1-only, "
+            f"{constraints['keys_only_input2_count']} input2-only, "
+            f"{constraints['parameter_mismatch_count']} distance mismatches"
+        )
+
+    box1 = system1.getDefaultPeriodicBoxVectors()
+    box2 = system2.getDefaultPeriodicBoxVectors()
+    box_values1 = np.asarray([
+        [_openmm_float(component, openmm_unit.nanometer) for component in vector]
+        for vector in box1
+    ], dtype=float)
+    box_values2 = np.asarray([
+        [_openmm_float(component, openmm_unit.nanometer) for component in vector]
+        for vector in box2
+    ], dtype=float)
+    box_delta = box_values1 - box_values2
+    box_match = all(
+        _openmm_numbers_match(float(a), float(b))
+        for a, b in zip(box_values1.ravel(), box_values2.ravel())
+    )
+    result["default_periodic_box_nm"] = {
+        "input1": box_values1.tolist(),
+        "input2": box_values2.tolist(),
+        "delta_input1_minus_input2": box_delta.tolist(),
+        "max_absolute_difference_nm": float(np.max(np.abs(box_delta))),
+        "match": box_match
+    }
+    if not box_match:
+        problems.append(
+            "default periodic box differs: max |delta|="
+            f"{result['default_periodic_box_nm']['max_absolute_difference_nm']:.6g} nm"
+        )
+
+    virtual_sites1 = [index for index in range(n_particles1) if system1.isVirtualSite(index)]
+    virtual_sites2 = [index for index in range(n_particles2) if system2.isVirtualSite(index)]
+    result["virtual_sites"] = {
+        "indices_input1": virtual_sites1,
+        "indices_input2": virtual_sites2,
+        "match": virtual_sites1 == virtual_sites2,
+        "fully_compared": not virtual_sites1 and not virtual_sites2
+    }
+    if virtual_sites1 != virtual_sites2:
+        problems.append(
+            f"virtual-site particle indices differ: {len(virtual_sites1)} vs {len(virtual_sites2)}"
+        )
+    elif virtual_sites1:
+        warnings.append(
+            "virtual sites are present; indices/types should be inspected because their internal parameters "
+            "are not yet semantically expanded by this comparator"
+        )
+
+    inventory1 = _openmm_force_inventory(system1)
+    inventory2 = _openmm_force_inventory(system2)
+    inventory_result = {}
+    for force_type in sorted(set(inventory1) | set(inventory2)):
+        count1 = len(inventory1.get(force_type, []))
+        count2 = len(inventory2.get(force_type, []))
+        inventory_result[force_type] = {
+            "input1": count1,
+            "input2": count2,
+            "match": count1 == count2
+        }
+        if count1 != count2:
+            problems.append(
+                f"force inventory differs for {force_type}: {count1} vs {count2}"
+            )
+    result["force_inventory"] = inventory_result
+
+    forces_result = {}
+    metadata_difference_count = 0
+    fully_compared = True
+    for force_type in sorted(set(inventory1) | set(inventory2)):
+        forces_result[force_type] = []
+        list1 = inventory1.get(force_type, [])
+        list2 = inventory2.get(force_type, [])
+        for occurrence, ((index1, force1), (index2, force2)) in enumerate(zip(list1, list2)):
+            comparison = _compare_openmm_force(force1, force2)
+            comparison["force_index_input1"] = int(index1)
+            comparison["force_index_input2"] = int(index2)
+            forces_result[force_type].append(comparison)
+            metadata_difference_count += comparison["metadata_differences"]
+            fully_compared = fully_compared and comparison["fully_compared"]
+            if comparison["physics_differences"]:
+                problems.append(
+                    f"{force_type}[{occurrence}] differs in "
+                    f"{comparison['physics_differences']} physics-affecting section(s)"
+                )
+            if not comparison["fully_compared"]:
+                warnings.append(
+                    f"{force_type}[{occurrence}] used exact Force XML as a fallback; "
+                    "no force-specific semantic comparator is implemented"
+                )
+
+    result["forces"] = forces_result
+    result["metadata_difference_count"] = metadata_difference_count
+    result["fully_compared"] = fully_compared and result["virtual_sites"]["fully_compared"]
+    result["problems"] = problems
+    result["warnings"] = warnings
+    result["physics_match"] = len(problems) == 0 and result["fully_compared"]
+    return result
+
+
+def _compare_openmm_integrators(integrator1, integrator2) -> dict:
+    problems = []
+    type1 = type(integrator1).__name__
+    type2 = type(integrator2).__name__
+    result = {
+        "type": {"input1": type1, "input2": type2, "match": type1 == type2},
+        "settings": {}
+    }
+    if type1 != type2:
+        problems.append(f"integrator type differs: {type1} vs {type2}")
+
+    settings1 = {
+        "step_size_ps": _openmm_float(integrator1.getStepSize(), openmm_unit.picosecond),
+        "constraint_tolerance": float(integrator1.getConstraintTolerance()),
+        "integration_force_groups": int(integrator1.getIntegrationForceGroups())
+    }
+    settings2 = {
+        "step_size_ps": _openmm_float(integrator2.getStepSize(), openmm_unit.picosecond),
+        "constraint_tolerance": float(integrator2.getConstraintTolerance()),
+        "integration_force_groups": int(integrator2.getIntegrationForceGroups())
+    }
+
+    for name, getter, target_unit in (
+        ("temperature_k", "getTemperature", openmm_unit.kelvin),
+        ("friction_per_ps", "getFriction", 1 / openmm_unit.picosecond),
+        ("random_number_seed", "getRandomNumberSeed", None),
+    ):
+        if hasattr(integrator1, getter) and hasattr(integrator2, getter):
+            value1 = getattr(integrator1, getter)()
+            value2 = getattr(integrator2, getter)()
+            if name == "random_number_seed":
+                settings1[name] = int(value1)
+                settings2[name] = int(value2)
+            else:
+                settings1[name] = _openmm_float(value1, target_unit)
+                settings2[name] = _openmm_float(value2, target_unit)
+
+    settings = _openmm_compare_settings(settings1, settings2)
+    result["settings"] = settings
+    if not settings["match"]:
+        problems.append(f"integrator settings differ in {settings['n_different']} field(s)")
+    result["problems"] = problems
+    result["match"] = len(problems) == 0
+    return result
+
+
+def _compare_openmm_states(state1, state2) -> dict:
+    problems = []
+    cfg = CONFIG["openmm_xml_validation"]
+    result = {}
+
+    positions1 = np.asarray(
+        state1.getPositions(asNumpy=True).value_in_unit(openmm_unit.nanometer), dtype=float
+    )
+    positions2 = np.asarray(
+        state2.getPositions(asNumpy=True).value_in_unit(openmm_unit.nanometer), dtype=float
+    )
+    position_summary = {
+        "shape_input1": list(positions1.shape),
+        "shape_input2": list(positions2.shape),
+        "match": False
+    }
+    if positions1.shape == positions2.shape:
+        delta = positions1 - positions2
+        per_atom = np.sqrt(np.sum(delta * delta, axis=1))
+        bad = per_atom > cfg["position_tolerance_nm"]
+        order = np.argsort(per_atom)[::-1]
+        top_n = cfg["top_n_differences"]
+        position_summary.update({
+            "n_atoms": int(positions1.shape[0]),
+            "position_tolerance_nm": cfg["position_tolerance_nm"],
+            "n_atoms_above_tolerance": int(np.count_nonzero(bad)),
+            "max_atom_displacement_nm": float(np.max(per_atom)) if len(per_atom) else 0.0,
+            "rms_atom_displacement_nm": float(np.sqrt(np.mean(per_atom * per_atom))) if len(per_atom) else 0.0,
+            "max_absolute_coordinate_difference_nm": float(np.max(np.abs(delta))) if delta.size else 0.0,
+            "top_atom_displacements": [
+                {
+                    "particle_index": int(index),
+                    "displacement_nm": float(per_atom[index]),
+                    "delta_xyz_nm": [float(v) for v in delta[index]]
+                }
+                for index in order[:top_n]
+                if per_atom[index] > cfg["position_tolerance_nm"]
+            ],
+            "match": not np.any(bad)
+        })
+    result["positions"] = position_summary
+    if not position_summary["match"]:
+        problems.append(
+            "initial positions differ: "
+            f"{position_summary.get('n_atoms_above_tolerance', 'shape mismatch')} atoms above "
+            f"{cfg['position_tolerance_nm']:.1e} nm tolerance"
+        )
+
+    box1 = np.asarray(
+        state1.getPeriodicBoxVectors(asNumpy=True).value_in_unit(openmm_unit.nanometer), dtype=float
+    )
+    box2 = np.asarray(
+        state2.getPeriodicBoxVectors(asNumpy=True).value_in_unit(openmm_unit.nanometer), dtype=float
+    )
+    box_delta = box1 - box2
+    box_match = all(
+        _openmm_numbers_match(float(a), float(b))
+        for a, b in zip(box1.ravel(), box2.ravel())
+    )
+    result["periodic_box_nm"] = {
+        "input1": box1.tolist(),
+        "input2": box2.tolist(),
+        "delta_input1_minus_input2": box_delta.tolist(),
+        "max_absolute_difference_nm": float(np.max(np.abs(box_delta))),
+        "match": box_match
+    }
+    if not box_match:
+        problems.append(
+            "initial State periodic box differs: max |delta|="
+            f"{result['periodic_box_nm']['max_absolute_difference_nm']:.6g} nm"
+        )
+
+    potential1 = _openmm_float(state1.getPotentialEnergy(), openmm_unit.kilojoule_per_mole)
+    potential2 = _openmm_float(state2.getPotentialEnergy(), openmm_unit.kilojoule_per_mole)
+    result["potential_energy_kj_per_mol"] = _openmm_scalar_comparison(
+        potential1, potential2,
+        absolute_tolerance=cfg["energy_tolerance_kj_per_mol"],
+        relative_tolerance=0.0
+    )
+    if not result["potential_energy_kj_per_mol"]["match"]:
+        problems.append(
+            "initial State potential energy differs by "
+            f"{result['potential_energy_kj_per_mol']['absolute_difference']:.6g} kJ/mol"
+        )
+
+    kinetic1 = _openmm_float(state1.getKineticEnergy(), openmm_unit.kilojoule_per_mole)
+    kinetic2 = _openmm_float(state2.getKineticEnergy(), openmm_unit.kilojoule_per_mole)
+    result["kinetic_energy_kj_per_mol"] = _openmm_scalar_comparison(
+        kinetic1, kinetic2,
+        absolute_tolerance=cfg["energy_tolerance_kj_per_mol"],
+        relative_tolerance=0.0
+    )
+    if not result["kinetic_energy_kj_per_mol"]["match"]:
+        problems.append(
+            "initial State kinetic energy differs by "
+            f"{result['kinetic_energy_kj_per_mol']['absolute_difference']:.6g} kJ/mol"
+        )
+
+    result["time_ps"] = _openmm_scalar_comparison(
+        _openmm_float(state1.getTime(), openmm_unit.picosecond),
+        _openmm_float(state2.getTime(), openmm_unit.picosecond)
+    )
+    if not result["time_ps"]["match"]:
+        problems.append("initial State time differs")
+
+    if hasattr(state1, "getStepCount") and hasattr(state2, "getStepCount"):
+        result["step_count"] = _openmm_scalar_comparison(
+            int(state1.getStepCount()), int(state2.getStepCount())
+        )
+        if not result["step_count"]["match"]:
+            problems.append("initial State step count differs")
+
+    try:
+        parameters1 = {str(key): float(value) for key, value in state1.getParameters().items()}
+        parameters2 = {str(key): float(value) for key, value in state2.getParameters().items()}
+        result["context_parameters"] = _openmm_compare_settings(parameters1, parameters2)
+        if not result["context_parameters"]["match"]:
+            problems.append(
+                f"initial State Context parameters differ in "
+                f"{result['context_parameters']['n_different']} field(s)"
+            )
+    except Exception as exc:
+        result["context_parameters"] = {"available": False, "error": str(exc)}
+
+    result["problems"] = problems
+    result["match"] = len(problems) == 0
+    return result
+
+
+def compare_serialized_openmm_xml(out1: Path | None, out2: Path | None,
+                                  label1: str, label2: str):
+    """Discover and semantically compare OpenMM XmlSerializer files beside MD logs."""
+    paths1 = _discover_openmm_serialized_paths(out1)
+    paths2 = _discover_openmm_serialized_paths(out2)
+    any_xml = any(
+        path is not None and Path(path).is_file()
+        for path in list(paths1.values()) + list(paths2.values())
+    )
+    if not any_xml:
+        return None
+
+    result = {
+        "input1_label": label1,
+        "input2_label": label2,
+        "tolerances": dict(CONFIG["openmm_xml_validation"]),
+        "files": {"input1": {}, "input2": {}},
+        "problems": [],
+        "warnings": []
+    }
+    for key in _OPENMM_SERIALIZED_FILENAMES:
+        result["files"]["input1"][key] = _openmm_path_metadata(paths1[key])
+        result["files"]["input2"][key] = _openmm_path_metadata(paths2[key])
+
+    for key in _OPENMM_SERIALIZED_FILENAMES:
+        exists1 = result["files"]["input1"][key]["exists"]
+        exists2 = result["files"]["input2"][key]["exists"]
+        if exists1 != exists2:
+            missing_label = label2 if exists1 else label1
+            result["problems"].append(f"{key} XML is missing for {missing_label}")
+
+    if mm is None:
+        result["warnings"].append(
+            "OpenMM Python module is unavailable; serialized XML files were discovered but can not be deserialized."
+        )
+        result["fully_compared"] = False
+        return result
+
+    comparisons = (
+        ("system", _compare_openmm_systems),
+        ("integrator", _compare_openmm_integrators),
+        ("initial_state", _compare_openmm_states),
+    )
+    for key, comparator in comparisons:
+        path1 = paths1[key]
+        path2 = paths2[key]
+        exists1 = path1 is not None and Path(path1).is_file()
+        exists2 = path2 is not None and Path(path2).is_file()
+        if not exists1 or not exists2:
+            continue
+
+        result["files"]["input1"][key]["exact_bytes_match"] = (
+            Path(path1).read_bytes() == Path(path2).read_bytes()
+        )
+        result["files"]["input2"][key]["exact_bytes_match"] = (
+            result["files"]["input1"][key]["exact_bytes_match"]
+        )
+
+        try:
+            object1 = _load_openmm_serialized_object(Path(path1))
+            object2 = _load_openmm_serialized_object(Path(path2))
+            comparison = comparator(object1, object2)
+            result[key] = comparison
+            for problem in comparison.get("problems", []):
+                result["problems"].append(f"{key}: {problem}")
+            for warning in comparison.get("warnings", []):
+                result["warnings"].append(f"{key}: {warning}")
+        except Exception as exc:
+            result["problems"].append(
+                f"failed to compare {key} XML: {type(exc).__name__}: {exc}"
+            )
+            result[key] = {"comparison_error": f"{type(exc).__name__}: {exc}"}
+
+    result["fully_compared"] = all(
+        key in result
+        and "comparison_error" not in result[key]
+        and result[key].get("fully_compared", True)
+        for key, _ in comparisons
+        if result["files"]["input1"][key]["exists"]
+        or result["files"]["input2"][key]["exists"]
+    )
+    result["match"] = len(result["problems"]) == 0 and result["fully_compared"]
+    return result
+
+
+def _print_openmm_record_summary(title: str, result: dict) -> None:
+    print(
+        f"    {title:<28}: {result['count_input1']} vs {result['count_input2']}  "
+        f"only1={result['keys_only_input1_count']} only2={result['keys_only_input2_count']} "
+        f"param_diff={result['parameter_mismatch_count']}"
+    )
+
+
+def _print_openmm_top_record_differences(title: str, result: dict, limit: int = 3) -> None:
+    shown = 0
+    for side, key_name in (("input1-only", "keys_only_input1"), ("input2-only", "keys_only_input2")):
+        for key in result.get(key_name, []):
+            if shown >= limit:
+                return
+            print(f"      {title} {side} key={key}")
+            shown += 1
+
+    for mismatch in result.get("top_parameter_mismatches", []):
+        if shown >= limit:
+            return
+        changed = []
+        for field, values in mismatch["fields"].items():
+            if values["match"]:
+                continue
+            changed.append(
+                f"{field}: {values['input1']:.8g} vs {values['input2']:.8g} "
+                f"(delta={values['delta_input1_minus_input2']:+.3e})"
+            )
+        print(f"      {title} key={mismatch['key']}  " + "; ".join(changed))
+        shown += 1
+
+
+def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison: dict) -> None:
+    if not comparison:
+        return
+
+    print("\nSerialized OpenMM XML Validation")
+    print("=" * 72)
+    for key, filename in _OPENMM_SERIALIZED_FILENAMES.items():
+        file1 = comparison["files"]["input1"][key]
+        file2 = comparison["files"]["input2"][key]
+        status1 = file1["path"] if file1["exists"] else "MISSING"
+        status2 = file2["path"] if file2["exists"] else "MISSING"
+        print(f"  {filename}")
+        print(f"    {label1:<20}: {status1}")
+        print(f"    {label2:<20}: {status2}")
+
+    system = comparison.get("system")
+    if system and "comparison_error" not in system:
+        print("\n  System semantic comparison")
+        particle_status = "MATCH" if system["particles"]["match"] else "DIFFER"
+        print(
+            f"    particles                    : {particle_status:<6}  "
+            f"{system['particles']['input1']} vs {system['particles']['input2']}"
+        )
+        _print_openmm_record_summary("particle masses", system["particle_masses"])
+        if not system["particle_masses"]["match"]:
+            _print_openmm_top_record_differences("particle masses", system["particle_masses"])
+        _print_openmm_record_summary("constraints", system["constraints"])
+        if not system["constraints"]["match"]:
+            _print_openmm_top_record_differences("constraints", system["constraints"])
+        print(
+            f"    default periodic box         : max |delta|="
+            f"{system['default_periodic_box_nm']['max_absolute_difference_nm']:.6g} nm"
+        )
+        print("    force inventory:")
+        for force_type, values in system["force_inventory"].items():
+            status = "MATCH" if values["match"] else "DIFFER"
+            print(
+                f"      {force_type:<24}: {status:<6}  "
+                f"{values['input1']} vs {values['input2']}"
+            )
+        for force_type, force_comparisons in system["forces"].items():
+            for occurrence, force_result in enumerate(force_comparisons):
+                prefix = f"{force_type}[{occurrence}]"
+                if "terms" in force_result:
+                    _print_openmm_record_summary(prefix, force_result["terms"])
+                    if not force_result["terms"]["match"]:
+                        _print_openmm_top_record_differences(prefix, force_result["terms"])
+                if force_type == "NonbondedForce":
+                    print(
+                        f"    {prefix + ' settings':<28}: "
+                        f"different={force_result['settings']['n_different']}"
+                    )
+                    _print_openmm_record_summary(prefix + " particles", force_result["particles"])
+                    if not force_result["particles"]["match"]:
+                        _print_openmm_top_record_differences(
+                            prefix + " particles", force_result["particles"]
+                        )
+                    _print_openmm_record_summary(prefix + " exceptions", force_result["exceptions"])
+                    if not force_result["exceptions"]["match"]:
+                        _print_openmm_top_record_differences(
+                            prefix + " exceptions", force_result["exceptions"]
+                        )
+        if system["metadata_difference_count"]:
+            print(
+                f"    force metadata differences   : {system['metadata_difference_count']} "
+                "(group/name; reported separately from Hamiltonian differences)"
+            )
+
+    integrator = comparison.get("integrator")
+    if integrator and "comparison_error" not in integrator:
+        status = "MATCH" if integrator["match"] else "DIFFER"
+        print(f"\n  Integrator                     : {status}")
+        print(
+            f"    type                         : {integrator['type']['input1']} vs "
+            f"{integrator['type']['input2']}"
+        )
+        for field, values in integrator["settings"]["fields"].items():
+            if not values["match"]:
+                print(f"    {field:<28}: {values['input1']} vs {values['input2']}")
+
+    state = comparison.get("initial_state")
+    if state and "comparison_error" not in state:
+        status = "MATCH" if state["match"] else "DIFFER"
+        positions = state["positions"]
+        print(f"\n  Initial State                  : {status}")
+        if positions.get("n_atoms") is not None:
+            print(
+                f"    positions                    : {positions['n_atoms_above_tolerance']} atoms above "
+                f"{positions['position_tolerance_nm']:.1e} nm; max displacement="
+                f"{positions['max_atom_displacement_nm']:.6g} nm"
+            )
+        else:
+            print(
+                f"    positions                    : shape {positions['shape_input1']} vs "
+                f"{positions['shape_input2']}"
+            )
+        print(
+            f"    periodic box                 : max |delta|="
+            f"{state['periodic_box_nm']['max_absolute_difference_nm']:.6g} nm"
+        )
+        print(
+            f"    potential energy             : delta="
+            f"{state['potential_energy_kj_per_mol']['delta_input1_minus_input2']:+.6g} kJ/mol"
+        )
+
+    if comparison.get("problems"):
+        print("\n  Serialized XML differences requiring review:")
+        for problem in comparison["problems"]:
+            print(f"    - {problem}")
+    elif comparison.get("fully_compared"):
+        print("\n  No semantic differences detected in the serialized OpenMM objects.")
+    else:
+        print("\n  No differences detected in compared fields, but the XML comparison is incomplete.")
+
+    if comparison.get("warnings"):
+        print("\n  Serialized XML comparison warnings:")
+        for warning in comparison["warnings"]:
+            print(f"    - {warning}")
 
 
 # ──────────────────────────  MAIN  ───────────────────────────────────────────
@@ -2599,6 +3668,15 @@ def main()->None:
                 "input2": out2_data,
                 "comparison": None
             }
+
+            serialized_xml_comparison = compare_serialized_openmm_xml(
+                args.out1, args.out2, args.label1, args.label2
+            )
+            if serialized_xml_comparison is not None:
+                openmm_validation["serialized_xml"] = serialized_xml_comparison
+                print_serialized_openmm_xml_comparison(
+                    args.label1, args.label2, serialized_xml_comparison
+                )
 
             if out1_data:
                 compat1 = compatibility_out_summary(out1_data)
