@@ -171,10 +171,10 @@ def energy_components(context, system) -> dict[str, float]:
     values: dict[str, float] = {}
     groups = sorted(force_group_inventory(system))
     for group in groups:
-        state = context.getState(energy=True, groups=(1 << group))
+        state = context.getState(getEnergy=True, groups=(1 << group))
         value = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
         values[ENERGY_GROUP_NAMES.get(group, f"Group{group}")] = float(value)
-    total = context.getState(energy=True).getPotentialEnergy().value_in_unit(
+    total = context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(
         unit.kilojoule_per_mole
     )
     values["Total"] = float(total)
@@ -414,7 +414,7 @@ def replay_one(
     }
 
     run.context.applyConstraints(run.constraint_tolerance)
-    projected_state = run.context.getState(positions=True, energy=True, enforcePeriodicBox=False)
+    projected_state = run.context.getState(getPositions=True, getEnergy=True, enforcePeriodicBox=False)
     run.projected_positions = state_positions(projected_state)
     run.projected_box = box_tuple(projected_state)
     projected_energy = energy_components(run.context, run.system)
@@ -450,9 +450,9 @@ def replay_one(
     set_context_geometry(run.context, run.raw_positions, run.raw_box)
     mm.LocalEnergyMinimizer.minimize(run.context, tolerance, run.max_iterations)
     postmin_state = run.context.getState(
-        positions=True,
-        energy=True,
-        parameters=True,
+        getPositions=True,
+        getEnergy=True,
+        getParameters=True,
         enforcePeriodicBox=False,
     )
     run.postmin_positions = state_positions(postmin_state)
@@ -503,9 +503,9 @@ def replay_one(
         run.context.applyConstraints(run.constraint_tolerance)
         mm.LocalEnergyMinimizer.minimize(run.context, tolerance, run.max_iterations)
         projected_postmin_state = run.context.getState(
-            positions=True,
-            energy=True,
-            parameters=True,
+            getPositions=True,
+            getEnergy=True,
+            getParameters=True,
             enforcePeriodicBox=False,
         )
         run.projected_postmin_positions = state_positions(projected_postmin_state)
