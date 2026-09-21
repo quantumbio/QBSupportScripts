@@ -648,6 +648,11 @@ def _finalize_timing(timing: dict) -> None:
         timing["non_production_execution_wall_time_s"] = float(total - production)
         timing["production_fraction_of_total_percent"] = float(100.0 * production / total)
 
+    timed_md = timing.get("timed_md_stages_wall_time_s")
+    if timed_md is not None and total is not None and total > 0.0:
+        timing["non_timed_md_execution_wall_time_s"] = float(total - timed_md)
+        timing["timed_md_fraction_of_total_percent"] = float(100.0 * timed_md / total)
+
 
 def _parse_python_timing(text: str) -> dict:
     """Parse wall-clock timings emitted by runMD-fromDivCon.py."""
@@ -698,7 +703,23 @@ def _parse_cpp_timing(text: str) -> dict:
     """Parse wall-clock timings emitted by the DivCon/OpenMM MD path."""
     timing = {}
 
-    npt_time = _first_match(text, rf"NPT time:\s*({_FLOAT_RE})", float)
+    minimization = _first_match(
+        text, rf"\[MD\]\s+Minimization time:\s*({_FLOAT_RE})\s+seconds", float
+    )
+    if minimization is not None:
+        timing["minimization_wall_time_s"] = minimization
+
+    nvt_time = _first_match(
+        text, rf"\[MD\]\s+NVT equilibration time:\s*({_FLOAT_RE})\s+seconds", float
+    )
+    if nvt_time is not None:
+        timing["nvt_equilibration_wall_time_s"] = nvt_time
+
+    npt_time = _first_match(
+        text, rf"\[MD\]\s+NPT equilibration time:\s*({_FLOAT_RE})\s+seconds", float
+    )
+    if npt_time is None:
+        npt_time = _first_match(text, rf"NPT time:\s*({_FLOAT_RE})", float)
     if npt_time is not None:
         timing["npt_equilibration_wall_time_s"] = npt_time
 
@@ -713,6 +734,12 @@ def _parse_cpp_timing(text: str) -> dict:
             production = _parse_wall_time_hms(formatted)
     if production is not None:
         timing["production_wall_time_s"] = production
+
+    timed_stages = _first_match(
+        text, rf"\[MD\]\s+Timed MD stages total:\s*({_FLOAT_RE})\s+seconds", float
+    )
+    if timed_stages is not None:
+        timing["timed_md_stages_wall_time_s"] = timed_stages
 
     total = _first_match(
         text, rf"Total Computation Time \(Seconds\):\s*({_FLOAT_RE})", float
@@ -1421,6 +1448,8 @@ def print_timing_comparison(label1: str, label2: str, comparison: dict) -> None:
         ("production_wall_time_s", "Production MD wall time", "s"),
         ("timed_md_stages_wall_time_s", "Timed MD stages (complete sum)", "s"),
         ("total_execution_wall_time_s", "Total execution wall time", "s"),
+        ("non_timed_md_execution_wall_time_s", "Total minus timed MD stages", "s"),
+        ("timed_md_fraction_of_total_percent", "Timed MD stages / total execution", "%"),
         ("non_production_execution_wall_time_s", "Total minus production MD", "s"),
         ("production_fraction_of_total_percent", "Production MD / total execution", "%"),
     )
@@ -1449,7 +1478,11 @@ def print_timing_comparison(label1: str, label2: str, comparison: dict) -> None:
 
     print(f"  Differences are defined as {label1} - {label2}.")
     print(
-        "  Production MD / total execution uses the production timer divided by the whole-process timer."
+        "  Timed MD stages / total execution sums minimization, NVT, NPT, and production timers "
+        "when all four are available."
+    )
+    print(
+        "  Production MD / total execution uses the production timer alone divided by the whole-process timer."
     )
     if any(
         timing.get(field, {}).get("input1") is None or timing.get(field, {}).get("input2") is None
