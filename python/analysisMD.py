@@ -621,6 +621,109 @@ def _parse_legacy_production(lines: list[str]) -> list[dict]:
     return rows
 
 
+def _parse_wall_time_hms(value: str):
+    """Convert HH:MM:SS wall-time text to seconds."""
+    match = re.fullmatch(r"\s*(\d+):(\d+):(\d+(?:\.\d+)?)\s*", value)
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return 3600.0 * int(hours) + 60.0 * int(minutes) + float(seconds)
+
+
+def _finalize_timing(timing: dict) -> None:
+    """Add derived timing fields without inventing missing stage timings."""
+    stage_fields = (
+        "minimization_wall_time_s",
+        "nvt_equilibration_wall_time_s",
+        "npt_equilibration_wall_time_s",
+        "production_wall_time_s",
+    )
+    stage_values = [timing.get(field) for field in stage_fields]
+    if all(value is not None for value in stage_values):
+        timing["timed_md_stages_wall_time_s"] = float(sum(stage_values))
+
+    production = timing.get("production_wall_time_s")
+    total = timing.get("total_execution_wall_time_s")
+    if production is not None and total is not None and total > 0.0:
+        timing["non_production_execution_wall_time_s"] = float(total - production)
+        timing["production_fraction_of_total_percent"] = float(100.0 * production / total)
+
+
+def _parse_python_timing(text: str) -> dict:
+    """Parse wall-clock timings emitted by runMD-fromDivCon.py."""
+    timing = {}
+    stage_patterns = {
+        "minimization_wall_time_s": (
+            rf"Minimizing with OpenMM:.*?Post-minimization Potential Energy:.*?"
+            rf"Elapsed time:\s*({_FLOAT_RE})\s+seconds"
+        ),
+        "nvt_equilibration_wall_time_s": (
+            rf"Equilibrating \(NVT\).*?Elapsed time:\s*({_FLOAT_RE})\s+seconds"
+        ),
+        "npt_equilibration_wall_time_s": (
+            rf"Equilibrating \(NPT\).*?Elapsed time:\s*({_FLOAT_RE})\s+seconds"
+        ),
+        "production_wall_time_s": (
+            rf"Running Production NPT Simulation.*?Elapsed time:\s*({_FLOAT_RE})\s+seconds"
+        ),
+    }
+    for field, pattern in stage_patterns.items():
+        value = _first_match(text, pattern, float, re.DOTALL)
+        if value is not None:
+            timing[field] = value
+
+    # Prefer the explicit production summary if present.  It is the same timer
+    # used for the production table and is not the total Python process runtime.
+    summary_wall_time = _first_match(text, rf"^\s*wall_time_s:\s*({_FLOAT_RE})", float, re.MULTILINE)
+    if summary_wall_time is not None:
+        timing["production_wall_time_s"] = summary_wall_time
+
+    # Current Python logs do not emit a whole-process timer, but accept one if
+    # future versions add it.  Do not substitute the sum of stage timers: that
+    # would omit setup, force-field construction, and output work.
+    total = _first_match(
+        text,
+        rf"(?:Total Computation Time \(Seconds\):|Total execution time(?: \(seconds\))?:)\s*({_FLOAT_RE})",
+        float,
+        re.IGNORECASE,
+    )
+    if total is not None:
+        timing["total_execution_wall_time_s"] = total
+
+    _finalize_timing(timing)
+    return timing
+
+
+def _parse_cpp_timing(text: str) -> dict:
+    """Parse wall-clock timings emitted by the DivCon/OpenMM MD path."""
+    timing = {}
+
+    npt_time = _first_match(text, rf"NPT time:\s*({_FLOAT_RE})", float)
+    if npt_time is not None:
+        timing["npt_equilibration_wall_time_s"] = npt_time
+
+    production = _first_match(
+        text, rf"Production total time:\s*({_FLOAT_RE})\s+seconds", float
+    )
+    if production is None:
+        formatted = _first_match(
+            text, r"Elapsed wall time\s*:\s*(\d+:\d+:\d+(?:\.\d+)?)", str
+        )
+        if formatted is not None:
+            production = _parse_wall_time_hms(formatted)
+    if production is not None:
+        timing["production_wall_time_s"] = production
+
+    total = _first_match(
+        text, rf"Total Computation Time \(Seconds\):\s*({_FLOAT_RE})", float
+    )
+    if total is not None:
+        timing["total_execution_wall_time_s"] = total
+
+    _finalize_timing(timing)
+    return timing
+
+
 def _infer_production_timing(protocol: dict, production: list[dict]) -> None:
     steps = sorted({row["step"] for row in production})
     positive_diffs = [b - a for a, b in zip(steps, steps[1:]) if b > a]
@@ -670,7 +773,8 @@ def parse_out_file(out_path: Path):
         "representative_water_constraints": _parse_water_constraints(lines),
         "energy_decomposition_kj_per_mol": _parse_energy_decompositions(lines),
         "equilibration": {},
-        "production": []
+        "production": [],
+        "timing": {}
     }
     system = data["system"]
     protocol = data["protocol"]
@@ -726,6 +830,7 @@ def parse_out_file(out_path: Path):
         }
         if len(pressures) == 1:
             protocol["target_pressure_bar"] = next(iter(pressures))
+        data["timing"] = _parse_python_timing(text)
 
     elif implementation == "cpp_openmm":
         system["particles"] = _first_match(
@@ -837,6 +942,7 @@ def parse_out_file(out_path: Path):
             }
 
         data["production"] = _parse_cpp_production(lines)
+        data["timing"] = _parse_cpp_timing(text)
 
     else:
         data["production"] = _parse_legacy_production(lines)
@@ -1054,6 +1160,39 @@ def compare_production(data1: dict, data2: dict) -> dict:
     return result
 
 
+def compare_timing(data1: dict, data2: dict) -> dict:
+    """Compare available wall-clock timings while preserving missing values."""
+    fields = (
+        "minimization_wall_time_s",
+        "nvt_equilibration_wall_time_s",
+        "npt_equilibration_wall_time_s",
+        "production_wall_time_s",
+        "timed_md_stages_wall_time_s",
+        "total_execution_wall_time_s",
+        "non_production_execution_wall_time_s",
+        "production_fraction_of_total_percent",
+    )
+    timing1 = data1.get("timing", {})
+    timing2 = data2.get("timing", {})
+    result = {}
+
+    for field in fields:
+        value1 = timing1.get(field)
+        value2 = timing2.get(field)
+        if value1 is None and value2 is None:
+            continue
+
+        values = {
+            "input1": float(value1) if value1 is not None else None,
+            "input2": float(value2) if value2 is not None else None,
+        }
+        if value1 is not None and value2 is not None:
+            values.update(_numeric_comparison(value1, value2))
+        result[field] = values
+
+    return result
+
+
 def compare_openmm_outputs(data1: dict, data2: dict) -> dict:
     system_fields = [
         "particles", "constraints", "nonbonded_particles", "nonbonded_exceptions",
@@ -1072,6 +1211,7 @@ def compare_openmm_outputs(data1: dict, data2: dict) -> dict:
         "representative_particles": _compare_representative_particles(data1, data2),
         "representative_water_constraints": _compare_water_constraints(data1, data2),
         "energy_decomposition_kj_per_mol": _compare_energy_sections(data1, data2),
+        "timing": compare_timing(data1, data2),
         "production": compare_production(data1, data2)
     }
 
@@ -1140,6 +1280,17 @@ def print_single_output_summary(label: str, data: dict) -> None:
     if protocol.get("production_duration_ps") is not None:
         print(f"  {'Production duration':<27}: {protocol['production_duration_ps']:.3f} ps")
     print(f"  {'Production rows':<27}: {len(data.get('production', []))}")
+
+    timing = data.get("timing", {})
+    if timing.get("production_wall_time_s") is not None:
+        print(f"  {'Production wall time':<27}: {timing['production_wall_time_s']:.6f} s")
+    if timing.get("total_execution_wall_time_s") is not None:
+        print(f"  {'Total execution wall time':<27}: {timing['total_execution_wall_time_s']:.6f} s")
+    if timing.get("production_fraction_of_total_percent") is not None:
+        print(
+            f"  {'Production / total':<27}: "
+            f"{timing['production_fraction_of_total_percent']:.3f}%"
+        )
 
 
 def print_system_comparison(label1: str, label2: str, comparison: dict) -> None:
@@ -1248,6 +1399,67 @@ def print_protocol_comparison(label1: str, label2: str, comparison: dict) -> Non
                 f"  {name:<34}: {values['input1']:.6g} vs {values['input2']:.6g} "
                 f"(Δ {values['delta_input1_minus_input2']:+.6g})"
             )
+
+
+def print_timing_comparison(label1: str, label2: str, comparison: dict) -> None:
+    timing = comparison.get("timing", {})
+    if not timing:
+        return
+
+    print("\nTiming Analysis")
+    print("=" * 72)
+    print(
+        f"  {'Timing metric':<31} {label1[:16]:>16} {label2[:16]:>16} "
+        f"{'Delta (1-2)':>14} {'sym |Delta| %':>13}"
+    )
+    print("  " + "-" * 94)
+
+    labels = (
+        ("minimization_wall_time_s", "Minimization wall time", "s"),
+        ("nvt_equilibration_wall_time_s", "NVT equilibration wall time", "s"),
+        ("npt_equilibration_wall_time_s", "NPT equilibration wall time", "s"),
+        ("production_wall_time_s", "Production MD wall time", "s"),
+        ("timed_md_stages_wall_time_s", "Timed MD stages (complete sum)", "s"),
+        ("total_execution_wall_time_s", "Total execution wall time", "s"),
+        ("non_production_execution_wall_time_s", "Total minus production MD", "s"),
+        ("production_fraction_of_total_percent", "Production MD / total execution", "%"),
+    )
+
+    def fmt(value, unit):
+        if value is None:
+            return "n/a"
+        if unit == "%":
+            return f"{value:.3f}%"
+        return f"{value:.6f}"
+
+    for field, title, unit in labels:
+        values = timing.get(field)
+        if not values:
+            continue
+        value1 = values.get("input1")
+        value2 = values.get("input2")
+        delta = values.get("delta_input1_minus_input2")
+        relative = values.get("symmetric_relative_difference_percent")
+        delta_text = "n/a" if delta is None else f"{delta:+.6f}"
+        relative_text = "n/a" if relative is None else f"{relative:.3f}"
+        print(
+            f"  {title:<31} {fmt(value1, unit):>16} {fmt(value2, unit):>16} "
+            f"{delta_text:>14} {relative_text:>13}"
+        )
+
+    print(f"  Differences are defined as {label1} - {label2}.")
+    print(
+        "  Production MD / total execution uses the production timer divided by the whole-process timer."
+    )
+    if any(
+        timing.get(field, {}).get("input1") is None or timing.get(field, {}).get("input2") is None
+        for field in ("total_execution_wall_time_s", "production_fraction_of_total_percent")
+        if field in timing
+    ):
+        print(
+            "  n/a means that the corresponding screenout does not report the required whole-process timing; "
+            "stage sums are not substituted for total execution time."
+        )
 
 
 def print_production_comparison(label1: str, label2: str, comparison: dict) -> None:
@@ -4203,6 +4415,7 @@ def main()->None:
                 print_system_comparison(args.label1, args.label2, output_comparison)
                 print_representative_parameter_comparison(output_comparison)
                 print_protocol_comparison(args.label1, args.label2, output_comparison)
+                print_timing_comparison(args.label1, args.label2, output_comparison)
                 print_energy_comparison(args.label1, args.label2, output_comparison)
                 print_production_comparison(args.label1, args.label2, output_comparison)
                 plot_production_validation(
