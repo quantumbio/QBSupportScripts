@@ -100,6 +100,26 @@ test_run = args.test_run
 medium_run = args.medium_run
 skip_waterbox = args.skip_waterbox
 
+# Mirror MDDriver.cpp's DEV_MD_SEED convention.  When set, the base seed is
+# applied to the Langevin integrator, base+1 initializes velocities, and
+# base+2 seeds the MonteCarloBarostat.  When unset, preserve OpenMM's automatic
+# stochastic seeding while still initializing velocities before equilibration.
+md_seed_env = os.getenv("DEV_MD_SEED")
+md_seed = None
+if md_seed_env is not None:
+    try:
+        md_seed = int(md_seed_env)
+    except ValueError:
+        parser.error("DEV_MD_SEED must be an integer")
+
+    print("[MD] Random seed mode: deterministic")
+    print(f"[MD] Random seed: {md_seed}")
+    print(f"[MD] Langevin integrator seed: {md_seed}")
+    print(f"[MD] Velocity initialization seed: {md_seed + 1}")
+    print(f"[MD] MonteCarloBarostat seed: {md_seed + 2}")
+else:
+    print("[MD] Random seed mode: automatic")
+
 if test_run:
     minimize_nsteps   = 500  # ~quick minimization
     nvt_equil_nsteps  = 1000
@@ -739,6 +759,8 @@ integrator = mm.LangevinIntegrator(
     1.0/unit.picoseconds,
     0.002*unit.picoseconds
 )
+if md_seed is not None:
+    integrator.setRandomNumberSeed(md_seed)
 
 with open("openmm_integrator.xml", "w") as xml_file:
     xml_file.write(mm.XmlSerializer.serialize(integrator))
@@ -839,8 +861,12 @@ elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
 
 # Match the C++ protocol: initialize velocities once after minimization and
-# carry them continuously through NVT, NPT, and production.
-simulation.context.setVelocitiesToTemperature(298*unit.kelvin)
+# carry them continuously through NVT, NPT, and production.  Use the same
+# DEV_MD_SEED+1 convention when deterministic seeding is requested.
+if md_seed is not None:
+    simulation.context.setVelocitiesToTemperature(298*unit.kelvin, md_seed + 1)
+else:
+    simulation.context.setVelocitiesToTemperature(298*unit.kelvin)
 
 def save_imaged_pdb(simulation, filename):
     """
@@ -1052,6 +1078,8 @@ with open("nvt_equilibrated.xml", "w") as f:
 # NPT Equilibration with RMSD monitoring
 print('Equilibrating (NPT) with RMSD monitoring...', flush=True)
 barostat = mm.MonteCarloBarostat(1 * unit.bar, 298 * unit.kelvin, 25)
+if md_seed is not None:
+    barostat.setRandomNumberSeed(md_seed + 2)
 system.addForce(barostat)
 simulation.context.reinitialize(preserveState=True)
 start_time = time.time()

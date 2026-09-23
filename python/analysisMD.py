@@ -751,6 +751,29 @@ def _parse_cpp_timing(text: str) -> dict:
     return timing
 
 
+def _parse_md_seed_protocol(text: str) -> dict:
+    """Parse deterministic/automatic OpenMM random-seed reporting."""
+    protocol = {}
+
+    seed_mode = _first_match(
+        text, r"\[MD\]\s+Random seed mode:\s*(deterministic|automatic)", str, re.IGNORECASE
+    )
+    if seed_mode is not None:
+        protocol["random_seed_mode"] = seed_mode.lower()
+
+    for field, pattern in (
+        ("random_seed", r"\[MD\]\s+Random seed:\s*(-?\d+)"),
+        ("integrator_random_seed", r"\[MD\]\s+Langevin integrator seed:\s*(-?\d+)"),
+        ("velocity_random_seed", r"\[MD\]\s+Velocity initialization seed:\s*(-?\d+)"),
+        ("barostat_random_seed", r"\[MD\]\s+MonteCarloBarostat seed:\s*(-?\d+)"),
+    ):
+        value = _first_match(text, pattern, int)
+        if value is not None:
+            protocol[field] = value
+
+    return protocol
+
+
 def _infer_production_timing(protocol: dict, production: list[dict]) -> None:
     steps = sorted({row["step"] for row in production})
     positive_diffs = [b - a for a, b in zip(steps, steps[1:]) if b > a]
@@ -849,6 +872,7 @@ def parse_out_file(out_path: Path):
         protocol["production_duration_ps"] = _first_match(
             text, rf"Running Production NPT Simulation -\s*({_FLOAT_RE})\s+ps"
         )
+        protocol.update(_parse_md_seed_protocol(text))
 
         data["production"] = _parse_python_production(lines)
         pressures = {
@@ -945,6 +969,7 @@ def parse_out_file(out_path: Path):
         if production_match:
             protocol["production_steps"] = int(production_match.group(1))
             protocol["production_duration_ps"] = float(production_match.group(2))
+        protocol.update(_parse_md_seed_protocol(text))
 
         nvt_energy = _first_match(
             text, rf"\[MD\] NVT equilibration done\. Potential Energy:\s*({_FLOAT_RE})"
@@ -1196,6 +1221,8 @@ def compare_timing(data1: dict, data2: dict) -> dict:
         "production_wall_time_s",
         "timed_md_stages_wall_time_s",
         "total_execution_wall_time_s",
+        "non_timed_md_execution_wall_time_s",
+        "timed_md_fraction_of_total_percent",
         "non_production_execution_wall_time_s",
         "production_fraction_of_total_percent",
     )
@@ -1229,7 +1256,8 @@ def compare_openmm_outputs(data1: dict, data2: dict) -> dict:
     protocol_fields = [
         "minimization_limit", "nvt_steps", "npt_steps", "production_steps",
         "production_report_interval_steps", "target_temperature_k", "target_pressure_bar",
-        "production_duration_ps", "timestep_ps"
+        "production_duration_ps", "timestep_ps", "random_seed_mode", "random_seed",
+        "integrator_random_seed", "velocity_random_seed", "barostat_random_seed"
     ]
 
     return {
@@ -1308,16 +1336,34 @@ def print_single_output_summary(label: str, data: dict) -> None:
         print(f"  {'Production duration':<27}: {protocol['production_duration_ps']:.3f} ps")
     print(f"  {'Production rows':<27}: {len(data.get('production', []))}")
 
+    for field, title in (
+        ("random_seed_mode", "Random seed mode"),
+        ("random_seed", "Random seed"),
+        ("integrator_random_seed", "Integrator random seed"),
+        ("velocity_random_seed", "Velocity random seed"),
+        ("barostat_random_seed", "Barostat random seed"),
+    ):
+        if protocol.get(field) is not None:
+            print(f"  {title:<27}: {protocol[field]}")
+
     timing = data.get("timing", {})
-    if timing.get("production_wall_time_s") is not None:
-        print(f"  {'Production wall time':<27}: {timing['production_wall_time_s']:.6f} s")
-    if timing.get("total_execution_wall_time_s") is not None:
-        print(f"  {'Total execution wall time':<27}: {timing['total_execution_wall_time_s']:.6f} s")
-    if timing.get("production_fraction_of_total_percent") is not None:
-        print(
-            f"  {'Production / total':<27}: "
-            f"{timing['production_fraction_of_total_percent']:.3f}%"
-        )
+    for field, title in (
+        ("minimization_wall_time_s", "Minimization wall time"),
+        ("nvt_equilibration_wall_time_s", "NVT equilibration wall time"),
+        ("npt_equilibration_wall_time_s", "NPT equilibration wall time"),
+        ("production_wall_time_s", "Production wall time"),
+        ("timed_md_stages_wall_time_s", "Timed MD stages wall time"),
+        ("total_execution_wall_time_s", "Total execution wall time"),
+        ("non_timed_md_execution_wall_time_s", "Total minus timed MD"),
+    ):
+        if timing.get(field) is not None:
+            print(f"  {title:<27}: {timing[field]:.6f} s")
+    for field, title in (
+        ("timed_md_fraction_of_total_percent", "Timed MD / total"),
+        ("production_fraction_of_total_percent", "Production / total"),
+    ):
+        if timing.get(field) is not None:
+            print(f"  {title:<27}: {timing[field]:.3f}%")
 
 
 def print_system_comparison(label1: str, label2: str, comparison: dict) -> None:
