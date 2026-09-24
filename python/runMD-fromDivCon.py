@@ -421,15 +421,12 @@ if not skip_waterbox:
 # does not change atom count/order or coordinates, and rewriting an inpcrd via
 # ParmEd may omit optional periodic box records.
 if skip_waterbox:
-    print("OpenMM System construction: direct AMBER prmtop")
+    print("OpenMM System construction: direct ParmEd AMBER structure")
+    # Keep the concrete ParmEd structure loaded directly from the supplied
+    # parm7/inpcrd pair.  This avoids both the generated FFXML/template path
+    # and AmberPrmtopFile's version-dependent requirement that periodic box
+    # metadata be present in the parm7 before PME System construction.
     inpcrd = app.AmberInpcrdFile(inpcrdFile)
-    if inpcrd.boxVectors is not None:
-        prmtop = app.AmberPrmtopFile(
-            prmtopFile,
-            periodicBoxVectors=inpcrd.boxVectors,
-        )
-    else:
-        prmtop = app.AmberPrmtopFile(prmtopFile)
 else:
     print("OpenMM System construction: generated ForceField (Python solvation path)")
     prmtop = app.AmberPrmtopFile('modified_with_unique_residues.prmtop')
@@ -492,7 +489,19 @@ if skip_waterbox:
             f"coordinate bounds + {fallback_padding_angstrom:.1f} A padding/side"
         )
 
-    prmtop.topology.setPeriodicBoxVectors(input_box_vectors)
+        # ParmEd stores box lengths in Angstrom and angles in degrees.
+        # Setting the Structure box makes the synthesized periodic cell part
+        # of the direct createSystem() call even when the input AMBER files do
+        # not contain periodic box metadata.
+        prmtop.box = [
+            box_size_x * 10.0,
+            box_size_y * 10.0,
+            box_size_z * 10.0,
+            90.0,
+            90.0,
+            90.0,
+        ]
+
     modeller.topology.setPeriodicBoxVectors(input_box_vectors)
     box_dimensions = [
         input_box_vectors[0][0].value_in_unit(unit.nanometers),
@@ -538,6 +547,7 @@ if skip_waterbox:
         rigidWater=True,
         removeCMMotion=True,
         ewaldErrorTolerance=1.0e-4,
+        flexibleConstraints=False,
     )
     system.setDefaultPeriodicBoxVectors(*input_box_vectors)
 else:
@@ -1233,6 +1243,7 @@ if skip_waterbox:
         rigidWater=False,
         removeCMMotion=False,
         ewaldErrorTolerance=1.0e-4,
+        flexibleConstraints=True,
     )
     tmpSystem.setDefaultPeriodicBoxVectors(*input_box_vectors)
 else:
