@@ -186,7 +186,7 @@ WATER_RESIDUE_NAMES = {"HOH", "WAT"}
 # Identify water residues and remove the artificial H-H connectivity used by
 # the DivCon/AMBER topology representation.  Identify the two hydrogens by
 # atomic number rather than assuming any particular atom ordering.
-for residue in prmtop.residues:
+for residue in (() if skip_waterbox else prmtop.residues):
     if residue.name not in WATER_RESIDUE_NAMES:
         continue
 
@@ -256,7 +256,7 @@ original_residue_names = {}
 counter = 0
 
 # Loop through all residues and analyze their bonding patterns for all residue types
-for residue in prmtop.residues:
+for residue in (() if skip_waterbox else prmtop.residues):
     residue_type = residue.name
 
     # Generate the bond fingerprint for this residue
@@ -301,23 +301,25 @@ divcon_input_atom_charges = [float(atom.charge) for atom in prmtop.atoms]
 divcon_input_atom_types = [str(atom.type) for atom in prmtop.atoms]
 
 # Extract defined residues from the selected OpenMM water/ion force field.
+# This is only needed by the legacy Python-owned solvation path.
 defined_residues = set()
-forcefield_xml_file = importlib.resources.files('openmm.app.data') / WATER_MODEL_XML
-print(f"OpenMM water/ion template force field: {WATER_MODEL_XML}")
+if not skip_waterbox:
+    forcefield_xml_file = importlib.resources.files('openmm.app.data') / WATER_MODEL_XML
+    print(f"OpenMM water/ion template force field: {WATER_MODEL_XML}")
 
-# Parse the XML to find all residue names
-tree = ET.parse(forcefield_xml_file)
-root = tree.getroot()
+    # Parse the XML to find all residue names
+    tree = ET.parse(forcefield_xml_file)
+    root = tree.getroot()
 
-# Look for <Residue> elements in the XML
-for residue in root.findall(".//Residue"):
-    defined_residues.add(residue.get('name'))
+    # Look for <Residue> elements in the XML
+    for residue in root.findall(".//Residue"):
+        defined_residues.add(residue.get('name'))
 
 # Initialize skip_residues with the defined residues from the forcefield
 skip_residues = {"WAT", "HOH"}.union(defined_residues)
 
 # Rename residues in the topology based on unique bonding patterns
-for residue in prmtop.residues:
+for residue in (() if skip_waterbox else prmtop.residues):
     residue_name = residue.name
     
     # Skip renaming for residues in the skip_residues set
@@ -329,96 +331,109 @@ for residue in prmtop.residues:
         original_residue_names[new_residue_names[residue]] = residue.name
         residue.name = new_residue_names[residue]
 
-# Save the modified topology to check
-prmtop.save('modified_with_unique_residues.prmtop')
-prmtop.save('modified_with_unique_residues.pdb')
-prmtop.save('modified_with_unique_residues.inpcrd')
+if not skip_waterbox:
+    # Save the modified topology to check
+    prmtop.save('modified_with_unique_residues.prmtop')
+    prmtop.save('modified_with_unique_residues.pdb')
+    prmtop.save('modified_with_unique_residues.inpcrd')
 
-# Now create the XML force field with the unique residues
-param_set = pmd.openmm.OpenMMParameterSet.from_structure(prmtop)
-param_set.write(GENERATED_FORCEFIELD_XML)
+    # Now create the XML force field with the unique residues
+    param_set = pmd.openmm.OpenMMParameterSet.from_structure(prmtop)
+    param_set.write(GENERATED_FORCEFIELD_XML)
 
-# Load the force field XML file
-tree = ET.parse(GENERATED_FORCEFIELD_XML)
-root = tree.getroot()
+    # Load the force field XML file
+    tree = ET.parse(GENERATED_FORCEFIELD_XML)
+    root = tree.getroot()
 
-# Create a set to track unique residue names already added to XML
-written_residues = set()
+    # Create a set to track unique residue names already added to XML
+    written_residues = set()
 
-# Create a new <Residues> section
-residues_element = ET.Element("Residues")
+    # Create a new <Residues> section
+    residues_element = ET.Element("Residues")
 
-# Loop over the unique residues and their parameters
-for residue in prmtop.residues:
-    residue_name = residue.name
+    # Loop over the unique residues and their parameters
+    for residue in prmtop.residues:
+        residue_name = residue.name
     
-    # Skip writing residue information for residues in the skip_residues set
-    if residue_name in skip_residues:
-        continue  # Skip this residue if it's in the skip set
+        # Skip writing residue information for residues in the skip_residues set
+        if residue_name in skip_residues:
+            continue  # Skip this residue if it's in the skip set
     
-    # Check if this residue has already been added to the XML
-    if residue_name in written_residues:
-        continue  # Skip this residue if it has already been processed
+        # Check if this residue has already been added to the XML
+        if residue_name in written_residues:
+            continue  # Skip this residue if it has already been processed
 
-    residue_element = ET.Element("Residue", name=residue_name)
+        residue_element = ET.Element("Residue", name=residue_name)
 
-    # Add atoms
-    for atom in residue.atoms:
-        atom_element = ET.SubElement(residue_element, "Atom", name=atom.name, type=atom.type, charge=str(atom.charge))
+        # Add atoms
+        for atom in residue.atoms:
+            atom_element = ET.SubElement(residue_element, "Atom", name=atom.name, type=atom.type, charge=str(atom.charge))
     
-    # Add bonds and external bonds
-    bonded_atoms = set()
-    for atom in residue.atoms:
-        for bond in atom.bonds:
-            other_atom = bond.atom2 if bond.atom1 == atom else bond.atom1
+        # Add bonds and external bonds
+        bonded_atoms = set()
+        for atom in residue.atoms:
+            for bond in atom.bonds:
+                other_atom = bond.atom2 if bond.atom1 == atom else bond.atom1
             
-            if other_atom.residue == atom.residue:
-                # Internal bond: atoms belong to the same residue
-                bond_tuple = tuple(sorted([bond.atom1.name, bond.atom2.name]))
-                if bond_tuple not in bonded_atoms:
-                    bond_element = ET.SubElement(residue_element, "Bond", atomName1=bond.atom1.name, atomName2=bond.atom2.name)
-                    bonded_atoms.add(bond_tuple)
-            else:
-                # External bond: atoms belong to different residues
-                external_bond_element = ET.SubElement(residue_element, "ExternalBond", atomName=atom.name)
+                if other_atom.residue == atom.residue:
+                    # Internal bond: atoms belong to the same residue
+                    bond_tuple = tuple(sorted([bond.atom1.name, bond.atom2.name]))
+                    if bond_tuple not in bonded_atoms:
+                        bond_element = ET.SubElement(residue_element, "Bond", atomName1=bond.atom1.name, atomName2=bond.atom2.name)
+                        bonded_atoms.add(bond_tuple)
+                else:
+                    # External bond: atoms belong to different residues
+                    external_bond_element = ET.SubElement(residue_element, "ExternalBond", atomName=atom.name)
 
-    # Append residue to the <Residues> section
-    residues_element.append(residue_element)
+        # Append residue to the <Residues> section
+        residues_element.append(residue_element)
     
-    # Add the residue name to the written set
-    written_residues.add(residue_name)
+        # Add the residue name to the written set
+        written_residues.add(residue_name)
 
-# Append <Residues> section to the root of the force field XML
-root.append(residues_element)
+    # Append <Residues> section to the root of the force field XML
+    root.append(residues_element)
 
-# Function to indent XML for pretty printing
-def indent(elem, level=0):
-    i = "\n" + level * "  "  # Use two spaces for indentation
-    if len(elem):
-        if not elem.text or not elem.text.strip():
-            elem.text = i + "  "
-        if not elem.tail or not elem.tail.strip():
-            elem.tail = i
-        for subelem in elem:
-            indent(subelem, level + 1)
-        if not elem.tail or not elem.tail.strip():
-            elem.tail = i
-    else:
-        if level and (not elem.tail or not elem.tail.strip()):
-            elem.tail = i
+    # Function to indent XML for pretty printing
+    def indent(elem, level=0):
+        i = "\n" + level * "  "  # Use two spaces for indentation
+        if len(elem):
+            if not elem.text or not elem.text.strip():
+                elem.text = i + "  "
+            if not elem.tail or not elem.tail.strip():
+                elem.tail = i
+            for subelem in elem:
+                indent(subelem, level + 1)
+            if not elem.tail or not elem.tail.strip():
+                elem.tail = i
+        else:
+            if level and (not elem.tail or not elem.tail.strip()):
+                elem.tail = i
 
-# Indent the root for pretty printing
-indent(root)
+    # Indent the root for pretty printing
+    indent(root)
 
-# Write the modified and indented XML to a file
-tree.write(GENERATED_FORCEFIELD_XML, xml_declaration=True, encoding='utf-8', method="xml")
+    # Write the modified and indented XML to a file
+    tree.write(GENERATED_FORCEFIELD_XML, xml_declaration=True, encoding='utf-8', method="xml")
 
 # Load the modified topology, but retain coordinates/box information from the
 # original supplied inpcrd.  The residue-renaming/topology preparation above
 # does not change atom count/order or coordinates, and rewriting an inpcrd via
 # ParmEd may omit optional periodic box records.
-prmtop = app.AmberPrmtopFile('modified_with_unique_residues.prmtop')
-inpcrd = app.AmberInpcrdFile(inpcrdFile)
+if skip_waterbox:
+    print("OpenMM System construction: direct AMBER prmtop")
+    inpcrd = app.AmberInpcrdFile(inpcrdFile)
+    if inpcrd.boxVectors is not None:
+        prmtop = app.AmberPrmtopFile(
+            prmtopFile,
+            periodicBoxVectors=inpcrd.boxVectors,
+        )
+    else:
+        prmtop = app.AmberPrmtopFile(prmtopFile)
+else:
+    print("OpenMM System construction: generated ForceField (Python solvation path)")
+    prmtop = app.AmberPrmtopFile('modified_with_unique_residues.prmtop')
+    inpcrd = app.AmberInpcrdFile(inpcrdFile)
 
 # Prefer the box carried by the authoritative input coordinate file.  If that
 # file does not carry box vectors, fall back to the box retained in the
@@ -427,7 +442,7 @@ input_box_vectors = inpcrd.boxVectors
 input_box_source = "input inpcrd"
 if input_box_vectors is None:
     input_box_vectors = prmtop.topology.getPeriodicBoxVectors()
-    input_box_source = "prepared prmtop"
+    input_box_source = "input prmtop" if skip_waterbox else "prepared prmtop"
 
 # Extract positions from inpcrd
 positions = inpcrd.getPositions()
@@ -447,10 +462,11 @@ min_x, max_x = min(x_coords), max(x_coords)
 min_y, max_y = min(y_coords), max(y_coords)
 min_z, max_z = min(z_coords), max(z_coords)
 
-# The generated XML carries the DivCon-transferred AMBER atom classes and
-# nonbonded parameters (including OW/HW), while the stock TIP3P file supplies
-# the standard HOH/WAT and ion residue templates.
-forcefield = app.ForceField(WATER_MODEL_XML, GENERATED_FORCEFIELD_XML)
+# The generated ForceField is only needed when Python owns solvation.  The
+# --skip-waterbox validation path constructs its System directly from parm7.
+forcefield = None
+if not skip_waterbox:
+    forcefield = app.ForceField(WATER_MODEL_XML, GENERATED_FORCEFIELD_XML)
 
 # Use Modeller for the final topology/positions passed to OpenMM.
 modeller = app.Modeller(prmtop.topology, inpcrd.positions)
@@ -476,6 +492,7 @@ if skip_waterbox:
             f"coordinate bounds + {fallback_padding_angstrom:.1f} A padding/side"
         )
 
+    prmtop.topology.setPeriodicBoxVectors(input_box_vectors)
     modeller.topology.setPeriodicBoxVectors(input_box_vectors)
     box_dimensions = [
         input_box_vectors[0][0].value_in_unit(unit.nanometers),
@@ -510,16 +527,29 @@ else:
                 final_box_vectors[2][2].value_in_unit(unit.nanometers),
             ],
         )
-# Now create the system again after modifying the topology
-system = forcefield.createSystem(
-    modeller.topology,
-    nonbondedMethod=app.PME,
-    nonbondedCutoff=1.0 * unit.nanometers,
-    constraints=app.HBonds,
-    rigidWater=True,
-    removeCMMotion=True,
-    ewaldErrorTolerance=1.0e-4,
-)
+# Construct the validation System directly from the supplied parm7.  This
+# preserves the concrete AMBER term inventory and avoids the ParmEd -> FFXML ->
+# ForceField reconstruction used by the legacy Python solvation path.
+if skip_waterbox:
+    system = prmtop.createSystem(
+        nonbondedMethod=app.PME,
+        nonbondedCutoff=1.0 * unit.nanometers,
+        constraints=app.HBonds,
+        rigidWater=True,
+        removeCMMotion=True,
+        ewaldErrorTolerance=1.0e-4,
+    )
+    system.setDefaultPeriodicBoxVectors(*input_box_vectors)
+else:
+    system = forcefield.createSystem(
+        modeller.topology,
+        nonbondedMethod=app.PME,
+        nonbondedCutoff=1.0 * unit.nanometers,
+        constraints=app.HBonds,
+        rigidWater=True,
+        removeCMMotion=True,
+        ewaldErrorTolerance=1.0e-4,
+    )
 
 def _find_nonbonded_force(openmm_system):
     forces = [
@@ -556,62 +586,43 @@ def _generated_nonbonded_class_parameters(xml_filename, wanted_classes):
         )
     return parameters
 
-def align_and_report_nonbonded_parameters(openmm_system, topology):
-    """
-    Align existing DivCon water particles to the DivCon-transferred OW/HW
-    nonbonded parameters, then report the effective OpenMM nonbonded setup.
-
-    The stock amber14/tip3p.xml file supplies the HOH residue template and the
-    rigid TIP3P geometry.  The generated force-field XML contains the exact
-    OW/HW Lennard-Jones values transferred from the DivCon input.  Applying
-    those values here makes the Python validation Hamiltonian use the same
-    per-particle water charge/LJ parameters as MDDriver while retaining the
-    standard TIP3P topology/constraint geometry.
-    """
+def report_nonbonded_parameters(openmm_system, topology):
+    """Report the effective OpenMM nonbonded setup and direct-AMBER charge audit."""
     nonbonded = _find_nonbonded_force(openmm_system)
-    transferred_water_lj = _generated_nonbonded_class_parameters(
-        GENERATED_FORCEFIELD_XML, {"OW", "HW"}
-    )
-
     topology_atoms = list(topology.atoms())
-    can_map_to_input = (
-        len(topology_atoms) == len(divcon_input_atom_charges)
-        and openmm_system.getNumParticles() == len(divcon_input_atom_charges)
-    )
 
-    water_particle_count = 0
-    if skip_waterbox and not can_map_to_input:
-        raise RuntimeError(
-            "Prepared topology atom count/order no longer matches the supplied "
-            "DivCon topology; can not safely transfer water parameters by index."
-        )
-
-    # For the validation path (--skip-waterbox), transfer the authoritative
-    # DivCon charge plus OW/HW LJ values to every existing water particle.
-    # For Python-generated solvent, retain the selected stock TIP3P particles.
+    transferred_water_lj = None
     if skip_waterbox:
-        for atom in topology_atoms:
-            if atom.residue.name not in WATER_RESIDUE_NAMES:
-                continue
-
-            if atom.element is not None and atom.element.symbol == "O":
-                atom_class = "OW"
-            elif atom.element is not None and atom.element.symbol == "H":
-                atom_class = "HW"
-            else:
-                raise RuntimeError(
-                    f"Unexpected atom {atom.name} in water residue {atom.residue.name}"
-                )
-
-            sigma_nm, epsilon_kj = transferred_water_lj[atom_class]
-            charge_e = divcon_input_atom_charges[atom.index]
-            nonbonded.setParticleParameters(
-                atom.index,
-                charge_e * unit.elementary_charge,
-                sigma_nm * unit.nanometer,
-                epsilon_kj * unit.kilojoule_per_mole,
+        can_map_to_input = (
+            len(topology_atoms) == len(divcon_input_atom_charges)
+            and openmm_system.getNumParticles() == len(divcon_input_atom_charges)
+        )
+        if not can_map_to_input:
+            raise RuntimeError(
+                "Direct AMBER topology atom count/order no longer matches the supplied "
+                "parm7; can not validate particle parameters by index."
             )
-            water_particle_count += 1
+
+        charge_mismatch_count = 0
+        charge_max_abs_delta = 0.0
+        for particle_index, input_charge in enumerate(divcon_input_atom_charges):
+            charge, _, _ = nonbonded.getParticleParameters(particle_index)
+            openmm_charge = charge.value_in_unit(unit.elementary_charge)
+            delta = abs(openmm_charge - input_charge)
+            if delta > 1.0e-10:
+                charge_mismatch_count += 1
+            charge_max_abs_delta = max(charge_max_abs_delta, delta)
+
+        print("Direct AMBER particle charge audit:")
+        print(
+            f"  mismatches (>1e-10 e): {charge_mismatch_count}/"
+            f"{len(divcon_input_atom_charges)}"
+        )
+        print(f"  max |delta q| (e)       : {charge_max_abs_delta:.12g}")
+    else:
+        transferred_water_lj = _generated_nonbonded_class_parameters(
+            GENERATED_FORCEFIELD_XML, {"OW", "HW"}
+        )
 
     method_names = {
         mm.NonbondedForce.NoCutoff: "NoCutoff",
@@ -622,8 +633,11 @@ def align_and_report_nonbonded_parameters(openmm_system, topology):
         mm.NonbondedForce.LJPME: "LJPME",
     }
     print("OpenMM nonbonded configuration:")
-    print(f"  water template XML       : {WATER_MODEL_XML}")
-    print(f"  transferred parameter XML: {GENERATED_FORCEFIELD_XML}")
+    if skip_waterbox:
+        print("  parameter source          : direct AMBER prmtop")
+    else:
+        print(f"  water template XML       : {WATER_MODEL_XML}")
+        print(f"  transferred parameter XML: {GENERATED_FORCEFIELD_XML}")
     print(f"  method                   : {method_names.get(nonbonded.getNonbondedMethod(), nonbonded.getNonbondedMethod())}")
     print(f"  cutoff (nm)              : {nonbonded.getCutoffDistance().value_in_unit(unit.nanometer):.8f}")
     print(f"  Ewald error tolerance    : {nonbonded.getEwaldErrorTolerance():.8g}")
@@ -633,8 +647,6 @@ def align_and_report_nonbonded_parameters(openmm_system, topology):
         print(f"  switching distance (nm)  : {nonbonded.getSwitchingDistance().value_in_unit(unit.nanometer):.8f}")
     print(f"  nonbonded particles      : {nonbonded.getNumParticles()}")
     print(f"  nonbonded exceptions     : {nonbonded.getNumExceptions()}")
-    if skip_waterbox:
-        print(f"  DivCon water particles aligned: {water_particle_count}")
 
     total_charge_e = 0.0
     for particle_index in range(nonbonded.getNumParticles()):
@@ -642,13 +654,14 @@ def align_and_report_nonbonded_parameters(openmm_system, topology):
         total_charge_e += charge.value_in_unit(unit.elementary_charge)
     print(f"  total particle charge (e): {total_charge_e:.10f}")
 
-    print("DivCon-transferred OW/HW LJ parameters:")
-    for atom_class in ("OW", "HW"):
-        sigma_nm, epsilon_kj = transferred_water_lj[atom_class]
-        print(
-            f"  {atom_class}: sigma={sigma_nm:.12f} nm  "
-            f"epsilon={epsilon_kj:.12f} kJ/mol"
-        )
+    if transferred_water_lj is not None:
+        print("DivCon-transferred OW/HW LJ parameters:")
+        for atom_class in ("OW", "HW"):
+            sigma_nm, epsilon_kj = transferred_water_lj[atom_class]
+            print(
+                f"  {atom_class}: sigma={sigma_nm:.12f} nm  "
+                f"epsilon={epsilon_kj:.12f} kJ/mol"
+            )
 
     # Report actual parameters on one representative water and the first Na/Cl
     # ions, if present.  This reports the final values OpenMM will actually use.
@@ -673,11 +686,13 @@ def align_and_report_nonbonded_parameters(openmm_system, topology):
         for atom in representative_atoms:
             charge, sigma, epsilon = nonbonded.getParticleParameters(atom.index)
             input_type = (
-                divcon_input_atom_types[atom.index] if atom.index < len(divcon_input_atom_types)
+                divcon_input_atom_types[atom.index]
+                if atom.index < len(divcon_input_atom_types)
                 else "<generated>"
             )
             input_charge = (
-                divcon_input_atom_charges[atom.index] if atom.index < len(divcon_input_atom_charges)
+                divcon_input_atom_charges[atom.index]
+                if atom.index < len(divcon_input_atom_charges)
                 else float("nan")
             )
             print(
@@ -702,7 +717,7 @@ def align_and_report_nonbonded_parameters(openmm_system, topology):
 
     return nonbonded
 
-nonbonded_force = align_and_report_nonbonded_parameters(system, modeller.topology)
+nonbonded_force = report_nonbonded_parameters(system, modeller.topology)
 
 # Match the C++ MDDriver force-group layout so that OpenMM energies can be
 # compared component-by-component without changing the Hamiltonian.  Any force
@@ -1206,14 +1221,31 @@ print(f"Elapsed time: {elapsed_time:.6f} seconds")
 filename = f'final-{production_nsteps * 0.002}ps.pdb'  # Format to one decimal place
 save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
-# Note: to ouput a parmtop file, use ParMed - which requires a conversion to non-rigid Water
-#       Reason: PDB files are often used to provide a topology file to MDTraj.
-#           However, it would seem that when the list of residues is long (e.g. water box) PDB file limits imprede.
-tmpSystem = forcefield.createSystem (simulation.topology, rigidWater=False)
-positions = simulation.context.getState(getPositions=True).getPositions()   # update to remove enforcePeriodicBox=True
-structure = pmd.openmm.topsystem.load_topology(simulation.topology, system=tmpSystem, xyz=positions)
-structure.save("output.prmtop", format="amber") 
-structure.save("output.inpcrd", format="rst7") 
+# Note: to output a parmtop file, use a non-rigid/unconstrained System so the
+# complete AMBER valence terms are represented in the companion topology.
+# For --skip-waterbox, construct that System directly from the same input parm7
+# rather than recreating it through the generated ForceField/FFXML path.
+if skip_waterbox:
+    tmpSystem = prmtop.createSystem(
+        nonbondedMethod=app.PME,
+        nonbondedCutoff=1.0 * unit.nanometers,
+        constraints=None,
+        rigidWater=False,
+        removeCMMotion=False,
+        ewaldErrorTolerance=1.0e-4,
+    )
+    tmpSystem.setDefaultPeriodicBoxVectors(*input_box_vectors)
+else:
+    tmpSystem = forcefield.createSystem(simulation.topology, rigidWater=False)
+
+positions = simulation.context.getState(getPositions=True).getPositions()
+structure = pmd.openmm.topsystem.load_topology(
+    simulation.topology,
+    system=tmpSystem,
+    xyz=positions,
+)
+structure.save("output.prmtop", format="amber")
+structure.save("output.inpcrd", format="rst7")
 
 summary_state = simulation.context.getState(getEnergy=True, enforcePeriodicBox=True)
 summary_values = {
