@@ -1231,32 +1231,49 @@ print(f"Elapsed time: {elapsed_time:.6f} seconds")
 filename = f'final-{production_nsteps * 0.002}ps.pdb'  # Format to one decimal place
 save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
-# Note: to output a parmtop file, use a non-rigid/unconstrained System so the
-# complete AMBER valence terms are represented in the companion topology.
-# For --skip-waterbox, construct that System directly from the same input parm7
-# rather than recreating it through the generated ForceField/FFXML path.
+# Write a companion AMBER topology/restart for the final coordinates.  For the
+# direct parm7 path, preserve the original concrete AMBER parameterization
+# instead of round-tripping the OpenMM System back through ParmEd.
 if skip_waterbox:
-    tmpSystem = prmtop.createSystem(
-        nonbondedMethod=app.PME,
-        nonbondedCutoff=1.0 * unit.nanometers,
-        constraints=None,
-        rigidWater=False,
-        removeCMMotion=False,
-        ewaldErrorTolerance=1.0e-4,
-        flexibleConstraints=True,
+    final_output_state = simulation.context.getState(
+        getPositions=True,
+        enforcePeriodicBox=False,
     )
-    tmpSystem.setDefaultPeriodicBoxVectors(*input_box_vectors)
+    prmtop.coordinates = final_output_state.getPositions(asNumpy=True).value_in_unit(
+        unit.angstrom
+    )
+
+    final_box_nm = final_output_state.getPeriodicBoxVectors(
+        asNumpy=True
+    ).value_in_unit(unit.nanometer)
+    box_lengths_nm = [np.linalg.norm(vector) for vector in final_box_nm]
+
+    def box_angle_degrees(vector1, vector2):
+        cosine = np.dot(vector1, vector2) / (
+            np.linalg.norm(vector1) * np.linalg.norm(vector2)
+        )
+        return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
+
+    prmtop.box = [
+        10.0 * box_lengths_nm[0],
+        10.0 * box_lengths_nm[1],
+        10.0 * box_lengths_nm[2],
+        box_angle_degrees(final_box_nm[1], final_box_nm[2]),
+        box_angle_degrees(final_box_nm[0], final_box_nm[2]),
+        box_angle_degrees(final_box_nm[0], final_box_nm[1]),
+    ]
+    prmtop.write_parm("output.prmtop")
+    prmtop.write_rst7("output.inpcrd", netcdf=False)
 else:
     tmpSystem = forcefield.createSystem(simulation.topology, rigidWater=False)
-
-positions = simulation.context.getState(getPositions=True).getPositions()
-structure = pmd.openmm.topsystem.load_topology(
-    simulation.topology,
-    system=tmpSystem,
-    xyz=positions,
-)
-structure.save("output.prmtop", format="amber")
-structure.save("output.inpcrd", format="rst7")
+    positions = simulation.context.getState(getPositions=True).getPositions()
+    structure = pmd.openmm.topsystem.load_topology(
+        simulation.topology,
+        system=tmpSystem,
+        xyz=positions,
+    )
+    structure.save("output.prmtop", format="amber")
+    structure.save("output.inpcrd", format="rst7")
 
 summary_state = simulation.context.getState(getEnergy=True, enforcePeriodicBox=True)
 summary_values = {
