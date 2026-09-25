@@ -61,6 +61,44 @@ import numpy as np
 import pandas as pd
 
 
+LOG_TAIL_BYTES = 256 * 1024
+
+# These are deliberately high-confidence terminal failure signatures rather
+# than an exhaustive list of Python/OpenMM exception names.  An unfinished log
+# with no terminal signature remains PENDING because it may still be running.
+FATAL_LOG_PATTERNS = (
+    ("Python traceback", re.compile(r"Traceback \(most recent call last\):")),
+    ("fatal Python error", re.compile(r"Fatal Python error:", re.IGNORECASE)),
+    (
+        "production exception",
+        re.compile(r"^ERROR during production metrics at step ", re.MULTILINE),
+    ),
+    ("segmentation fault", re.compile(r"segmentation fault", re.IGNORECASE)),
+    ("bus error", re.compile(r"\bbus error\b", re.IGNORECASE)),
+    (
+        "floating-point exception",
+        re.compile(r"\bfloating point exception\b", re.IGNORECASE),
+    ),
+    ("aborted process", re.compile(r"\baborted(?: \(core dumped\))?\b", re.IGNORECASE)),
+    ("core dump", re.compile(r"\bcore dumped\b", re.IGNORECASE)),
+    (
+        "uncaught C++ exception",
+        re.compile(r"terminate called after throwing an instance", re.IGNORECASE),
+    ),
+    (
+        "killed process",
+        re.compile(
+            r"^(?:\s*Killed\s*|.*:\s*line\s+\d+:\s+\d+\s+Killed\b.*)$",
+            re.MULTILINE | re.IGNORECASE,
+        ),
+    ),
+    (
+        "out-of-memory termination",
+        re.compile(r"(?:out of memory|oom-kill|killed process)", re.IGNORECASE),
+    ),
+)
+
+
 THRESHOLDS = {
     # Hamiltonian/system invariants.
     "charge_abs_e": 1.0e-4,
@@ -699,7 +737,11 @@ def classify(summary: dict, row: dict[str, Any]) -> None:
     row["notes"] = "; ".join(notes)
 
 
-def pending_row(system: str, json_path: Path) -> dict[str, Any]:
+def pending_row(
+    system: str,
+    json_path: Path,
+    message: str = "summary JSON not available yet",
+) -> dict[str, Any]:
     row = {field: None for field in CSV_FIELDS}
     row.update(
         {
@@ -707,7 +749,7 @@ def pending_row(system: str, json_path: Path) -> dict[str, Any]:
             "status": "PENDING",
             "json_path": str(json_path),
             "review_categories": "",
-            "review_reasons": "summary JSON not available yet",
+            "review_reasons": message,
             "structural_advisories": "",
             "notes": "",
             "missing_core_diagnostics": ";".join(CORE_DIAGNOSTICS),
@@ -733,6 +775,115 @@ def error_row(system: str, json_path: Path, message: str) -> dict[str, Any]:
     return row
 
 
+def read_log_tail(path: Path, max_bytes: int = LOG_TAIL_BYTES) -> str:
+    """Read only the tail of a potentially large screenout file."""
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(0, size - max_bytes))
+        return handle.read().decode("utf-8", errors="replace")
+
+
+def inspect_terminal_log(path: Path, success_markers: tuple[str, ...]) -> tuple[str, str | None]:
+    """Best-effort terminal-state detection from a screenout file.
+
+    SUCCESS requires all supplied completion markers.  ERROR requires a strong
+    fatal signature.  Anything else is INCOMPLETE because the process may still
+    be running and a screenout file alone cannot distinguish that safely.
+    """
+    if not path.is_file():
+        return "MISSING", None
+
+    try:
+        text = read_log_tail(path)
+    except OSError as exc:
+        return "ERROR", f"cannot read {path}: {exc}"
+
+    success_position = -1
+    if success_markers and all(marker in text for marker in success_markers):
+        success_position = max(text.rfind(marker) for marker in success_markers)
+
+    failure_position = -1
+    failure_label = None
+    for label, pattern in FATAL_LOG_PATTERNS:
+        matches = list(pattern.finditer(text))
+        if matches and matches[-1].start() > failure_position:
+            failure_position = matches[-1].start()
+            failure_label = label
+
+    if failure_position > success_position:
+        return "ERROR", failure_label
+    if success_position >= 0:
+        return "SUCCESS", None
+    return "INCOMPLETE", None
+
+
+def classify_missing_summary(system: str, json_path: Path) -> dict[str, Any]:
+    """Classify a missing analysis summary from available run screenouts."""
+    run_dir = json_path.parent
+    log_specs = (
+        (
+            "Python MD",
+            run_dir / "python" / "md.screenout",
+            ("Simulation summary:", "  wall_time_s:"),
+        ),
+        (
+            "C++ MD",
+            run_dir / "cpp" / "md.screenout",
+            ("Job Complete", "Total Computation Time (Seconds):"),
+        ),
+        (
+            "analysis",
+            run_dir / "analysis.screenout",
+            ("INFO: Wrote summary JSON to",),
+        ),
+    )
+
+    states = {}
+    for label, path, success_markers in log_specs:
+        state, detail = inspect_terminal_log(path, success_markers)
+        states[label] = (state, detail, path)
+        if state == "ERROR":
+            reason = detail or "terminal failure signature"
+            return error_row(
+                system,
+                json_path,
+                f"{label} failed: {reason} detected in {path}",
+            )
+
+    analysis_state, _, analysis_path = states["analysis"]
+    if analysis_state == "SUCCESS":
+        return error_row(
+            system,
+            json_path,
+            f"analysis reports successful summary write but JSON is missing: {analysis_path}",
+        )
+
+    incomplete = [
+        label for label in ("Python MD", "C++ MD", "analysis")
+        if states[label][0] == "INCOMPLETE"
+    ]
+    completed = [
+        label for label in ("Python MD", "C++ MD")
+        if states[label][0] == "SUCCESS"
+    ]
+
+    if incomplete:
+        message = (
+            "summary JSON not available; no terminal success/failure marker yet in "
+            + ", ".join(incomplete)
+        )
+    elif completed:
+        message = (
+            "summary JSON not available yet; completed run logs: "
+            + ", ".join(completed)
+        )
+    else:
+        message = "summary JSON not available yet; no terminal run evidence found"
+
+    return pending_row(system, json_path, message)
+
+
 def infer_system_name(json_path: Path, summary: dict | None = None) -> str:
     if isinstance(summary, dict):
         out_prefix = summary.get("out_prefix")
@@ -749,7 +900,7 @@ def infer_system_name(json_path: Path, summary: dict | None = None) -> str:
 def analyze_one(json_path: Path, system_hint: str | None = None) -> dict[str, Any]:
     system = system_hint or infer_system_name(json_path)
     if not json_path.is_file():
-        return pending_row(system, json_path)
+        return classify_missing_summary(system, json_path)
 
     try:
         with json_path.open() as handle:
@@ -939,8 +1090,14 @@ def write_report(path: Path, rows: list[dict[str, Any]], input_description: str)
         handle.write("REVIEW: one or more conservative engineering-review thresholds were exceeded.\n")
         handle.write("GOOD: no review threshold was exceeded and all core diagnostics were present.\n")
         handle.write("GOOD_LIMITED: available metrics did not trigger review, but core diagnostics were absent.\n")
-        handle.write("PENDING: summary JSON does not exist yet; ignored for scientific triage.\n")
-        handle.write("ERROR: an existing summary JSON was unreadable or could not be processed.\n")
+        handle.write(
+            "PENDING: summary JSON does not exist and available screenouts do not show a "
+            "terminal failure; the run may still be active.\n"
+        )
+        handle.write(
+            "ERROR: a terminal failure was detected in a screenout, or an existing summary "
+            "JSON was unreadable or could not be processed.\n"
+        )
         handle.write("These labels are triage categories, not proof of ensemble equivalence or convergence.\n\n")
         handle.write("Current analysisMD compatibility\n")
         handle.write("------------------------------\n")
@@ -999,8 +1156,8 @@ def write_report(path: Path, rows: list[dict[str, Any]], input_description: str)
                 handle.write(f"{row['system']}\n")
         handle.write("\n")
 
-        handle.write("Errors in existing summaries\n")
-        handle.write("----------------------------\n")
+        handle.write("Errors / failed runs\n")
+        handle.write("--------------------\n")
         error_rows = [row for row in rows if row["status"] == "ERROR"]
         if not error_rows:
             handle.write("None\n")
@@ -1282,8 +1439,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print_console_summary(rows, outputs)
 
-    # A missing JSON is PENDING during an active batch and is not a process failure.
-    # Malformed/unreadable existing JSON remains ERROR. REVIEW is also not a process failure.
+    # A missing JSON is PENDING unless available screenouts contain strong terminal
+    # failure evidence. Malformed/unreadable existing JSON remains ERROR. REVIEW
+    # is also not a process failure.
     return 1 if any(row["status"] == "ERROR" for row in rows) else 0
 
 
