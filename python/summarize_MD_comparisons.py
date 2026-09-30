@@ -164,7 +164,7 @@ PROTOCOL_FIELDS = (
 )
 
 CORE_DIAGNOSTICS = (
-    "charge_input1_e",
+#    "charge_input1_e",
     "charge_input2_e",
     "postmin_total_sym_pct",
     "postmin_nonbonded_sym_pct",

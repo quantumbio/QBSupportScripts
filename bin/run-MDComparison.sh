@@ -49,6 +49,7 @@ PYTHON=python
 : "${EQUILIBRATION_STEPS:=500}"
 : "${PRODUCTION_STEPS:=2000}"
 : "${REPORT_INTERVAL:=500}"
+: "${PREP_LEVEL:=all}"
 
 export MINIMIZATION_STEPS
 export EQUILIBRATION_STEPS
@@ -192,10 +193,11 @@ echo "======================================================================"
 echo "Preparing common waterboxed system"
 echo "Working directory: ${ROOT_WORKDIR}"
 echo "Screen output    : ${ROOT_WORKDIR}/prepare.screenout"
+echo "Prepare level    : ${PREP_LEVEL}"
 echo "======================================================================"
 
 "${DIVCON}/bin/qmechanic" "${PDBID}" \
-    --prepare sidechains \
+    --prepare ${PREP_LEVEL} \
     -h amberff14sb \
     --waterbox \
     --np 16 \
@@ -234,9 +236,13 @@ echo "======================================================================"
 
     export DEV_MIN_STEPS="${MINIMIZATION_STEPS}"
     export DEV_MD_REPORT_INTERVAL="${REPORT_INTERVAL}"
-    
-    "${DIVCON}/bin/qmechanic" "${PDBID}+H+wb.pdb" \
-        -h amberff14sb \
+
+#    "${DIVCON}/bin/qmechanic" "${PDBID}+H+wb.pdb" \
+#        -h amberff14sb \
+
+
+    "${DIVCON}/bin/qmechanic" "${PDBID}+wb.inpcrd" \
+        -h "${PDBID}+wb.parm7" \
         --np 20 -v 3 \
         -O \
         --symmetry off \
