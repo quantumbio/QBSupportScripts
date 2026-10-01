@@ -1960,6 +1960,120 @@ def _openmm_periodic_torsion_records(force) -> list:
     return records
 
 
+def _openmm_reverse_torsion_key(key) -> tuple:
+    """Return the same torsion key with the four atom indices reversed."""
+    p1, p2, p3, p4, periodicity = tuple(key)
+    return (p4, p3, p2, p1, periodicity)
+
+
+def _openmm_canonical_torsion_orientation_key(key) -> tuple:
+    """Collapse forward/reverse atom order for diagnostic counting only."""
+    key = tuple(key)
+    reverse = _openmm_reverse_torsion_key(key)
+    return min(key, reverse)
+
+
+def _openmm_torsion_parameter_lists_match(values1: list, values2: list) -> bool:
+    """Compare stored (phase, k) lists without declaring reversal equivalent."""
+    values1 = sorted(tuple(float(value) for value in values) for values in values1)
+    values2 = sorted(tuple(float(value) for value in values) for values in values2)
+    if len(values1) != len(values2):
+        return False
+
+    return all(
+        all(_openmm_numbers_match(value1, value2) for value1, value2 in zip(params1, params2))
+        for params1, params2 in zip(values1, values2)
+    )
+
+
+def _openmm_torsion_orientation_diagnostic(records1: list, records2: list) -> dict:
+    """Diagnose whether strict torsion-key differences are simple reversals.
+
+    The primary torsion comparison remains order-sensitive.  This diagnostic
+    separately asks whether an exact-only key has the reversed atom order in the
+    other input, while preserving periodicity.  It also reports what the unique
+    key inventory would look like if forward/reverse order were collapsed.
+    """
+    grouped1 = defaultdict(list)
+    grouped2 = defaultdict(list)
+    for key, values in records1:
+        grouped1[tuple(key)].append(tuple(float(value) for value in values))
+    for key, values in records2:
+        grouped2[tuple(key)].append(tuple(float(value) for value in values))
+
+    keys1 = set(grouped1)
+    keys2 = set(grouped2)
+    only1 = keys1 - keys2
+    only2 = keys2 - keys1
+
+    normalized1 = {_openmm_canonical_torsion_orientation_key(key) for key in keys1}
+    normalized2 = {_openmm_canonical_torsion_orientation_key(key) for key in keys2}
+
+    reversed1 = []
+    for key in sorted(only1):
+        reverse_key = _openmm_reverse_torsion_key(key)
+        if reverse_key not in keys2:
+            continue
+        reversed1.append({
+            "key_input1": list(key),
+            "reverse_key_input2": list(reverse_key),
+            "count_input1": len(grouped1[key]),
+            "count_input2": len(grouped2[reverse_key]),
+            "stored_parameters_match": _openmm_torsion_parameter_lists_match(
+                grouped1[key], grouped2[reverse_key]
+            ),
+        })
+
+    reversed2 = []
+    for key in sorted(only2):
+        reverse_key = _openmm_reverse_torsion_key(key)
+        if reverse_key not in keys1:
+            continue
+        reversed2.append({
+            "key_input2": list(key),
+            "reverse_key_input1": list(reverse_key),
+            "count_input2": len(grouped2[key]),
+            "count_input1": len(grouped1[reverse_key]),
+            "stored_parameters_match": _openmm_torsion_parameter_lists_match(
+                grouped2[key], grouped1[reverse_key]
+            ),
+        })
+
+    def bidirectional_pair_count(keys: set) -> int:
+        return len({
+            _openmm_canonical_torsion_orientation_key(key)
+            for key in keys
+            if _openmm_reverse_torsion_key(key) in keys
+            and _openmm_reverse_torsion_key(key) != key
+        })
+
+    top_n = CONFIG["openmm_xml_validation"]["top_n_differences"]
+    reversed_keys1 = {tuple(item["key_input1"]) for item in reversed1}
+    reversed_keys2 = {tuple(item["key_input2"]) for item in reversed2}
+
+    return {
+        "orientation_normalized_unique_key_count_input1": len(normalized1),
+        "orientation_normalized_unique_key_count_input2": len(normalized2),
+        "orientation_normalized_common_unique_key_count": len(normalized1 & normalized2),
+        "orientation_normalized_only_input1_count": len(normalized1 - normalized2),
+        "orientation_normalized_only_input2_count": len(normalized2 - normalized1),
+        "input1_only_with_reverse_in_input2_count": len(reversed1),
+        "input2_only_with_reverse_in_input1_count": len(reversed2),
+        "input1_only_without_reverse_in_input2_count": len(only1 - reversed_keys1),
+        "input2_only_without_reverse_in_input1_count": len(only2 - reversed_keys2),
+        "bidirectional_key_pair_count_input1": bidirectional_pair_count(keys1),
+        "bidirectional_key_pair_count_input2": bidirectional_pair_count(keys2),
+        "reversed_parameter_mismatch_count_input1_to_input2": sum(
+            1 for item in reversed1 if not item["stored_parameters_match"]
+        ),
+        "reversed_parameter_mismatch_count_input2_to_input1": sum(
+            1 for item in reversed2 if not item["stored_parameters_match"]
+        ),
+        "reversed_examples_input1_to_input2": reversed1[:top_n],
+        "reversed_examples_input2_to_input1": reversed2[:top_n],
+    }
+
+
 def _openmm_nonbonded_method_name(value) -> str:
     method_map = {
         int(mm.NonbondedForce.NoCutoff): "NoCutoff",
@@ -2344,12 +2458,17 @@ def _compare_openmm_force(force1, force2, constraint_pairs1=None, constraint_pai
             result["physics_differences"] += 1
 
     elif isinstance(force1, mm.PeriodicTorsionForce) and isinstance(force2, mm.PeriodicTorsionForce):
+        torsion_records1 = _openmm_periodic_torsion_records(force1)
+        torsion_records2 = _openmm_periodic_torsion_records(force2)
         terms = _openmm_compare_keyed_records(
-            _openmm_periodic_torsion_records(force1),
-            _openmm_periodic_torsion_records(force2),
+            torsion_records1,
+            torsion_records2,
             ("phase_rad", "k_kj_per_mol")
         )
         result["terms"] = terms
+        result["torsion_orientation_diagnostic"] = _openmm_torsion_orientation_diagnostic(
+            torsion_records1, torsion_records2
+        )
         if not terms["match"]:
             result["physics_differences"] += 1
 
@@ -2923,6 +3042,86 @@ def _print_openmm_unique_key_summary(result: dict) -> None:
     )
 
 
+def _print_openmm_torsion_orientation_summary(
+    title: str,
+    diagnostic: dict,
+    topology1=None,
+    topology2=None,
+    limit: int = 3,
+) -> None:
+    """Print a diagnostic-only forward/reverse torsion-key comparison."""
+    print("      torsion orientation diagnostic (forward/reverse only; strict comparison unchanged):")
+    print(
+        f"        orientation-normalized unique keys: "
+        f"{diagnostic['orientation_normalized_unique_key_count_input1']} vs "
+        f"{diagnostic['orientation_normalized_unique_key_count_input2']}  "
+        f"common={diagnostic['orientation_normalized_common_unique_key_count']}  "
+        f"only1={diagnostic['orientation_normalized_only_input1_count']} "
+        f"only2={diagnostic['orientation_normalized_only_input2_count']}"
+    )
+    print(
+        f"        exact-only keys with reverse in other input: "
+        f"input1={diagnostic['input1_only_with_reverse_in_input2_count']} "
+        f"input2={diagnostic['input2_only_with_reverse_in_input1_count']}"
+    )
+    print(
+        f"        exact-only keys still unmatched after reverse check: "
+        f"input1={diagnostic['input1_only_without_reverse_in_input2_count']} "
+        f"input2={diagnostic['input2_only_without_reverse_in_input1_count']}"
+    )
+    print(
+        f"        canonical keys represented in both directions within one XML: "
+        f"{diagnostic['bidirectional_key_pair_count_input1']} vs "
+        f"{diagnostic['bidirectional_key_pair_count_input2']}"
+    )
+    print(
+        f"        reverse candidates with different stored phase/k or multiplicity: "
+        f"input1->input2={diagnostic['reversed_parameter_mismatch_count_input1_to_input2']} "
+        f"input2->input1={diagnostic['reversed_parameter_mismatch_count_input2_to_input1']}"
+    )
+
+    shown = 0
+    for item in diagnostic.get("reversed_examples_input1_to_input2", []):
+        if shown >= limit:
+            break
+        key1 = item["key_input1"]
+        key2 = item["reverse_key_input2"]
+        annotation1 = _openmm_key_annotation(key1, topology1, 4)
+        annotation2 = _openmm_key_annotation(key2, topology2, 4)
+        annotations = []
+        if annotation1:
+            annotations.append(f"input1={annotation1}")
+        if annotation2:
+            annotations.append(f"input2={annotation2}")
+        suffix = f"  [{' ; '.join(annotations)}]" if annotations else ""
+        print(
+            f"        reverse candidate input1 key={key1} -> input2 key={key2}{suffix}; "
+            f"multiplicity={item['count_input1']} vs {item['count_input2']}; "
+            f"stored phase/k match={item['stored_parameters_match']}"
+        )
+        shown += 1
+
+    for item in diagnostic.get("reversed_examples_input2_to_input1", []):
+        if shown >= limit:
+            break
+        key2 = item["key_input2"]
+        key1 = item["reverse_key_input1"]
+        annotation2 = _openmm_key_annotation(key2, topology2, 4)
+        annotation1 = _openmm_key_annotation(key1, topology1, 4)
+        annotations = []
+        if annotation2:
+            annotations.append(f"input2={annotation2}")
+        if annotation1:
+            annotations.append(f"input1={annotation1}")
+        suffix = f"  [{' ; '.join(annotations)}]" if annotations else ""
+        print(
+            f"        reverse candidate input2 key={key2} -> input1 key={key1}{suffix}; "
+            f"multiplicity={item['count_input2']} vs {item['count_input1']}; "
+            f"stored phase/k match={item['stored_parameters_match']}"
+        )
+        shown += 1
+
+
 def _print_openmm_field_statistics(title: str, result: dict) -> None:
     for field, stats in result.get("field_statistics", {}).items():
         if stats["mismatch_count"] == 0:
@@ -3043,6 +3242,16 @@ def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison:
                         "PeriodicTorsionForce",
                     ):
                         _print_openmm_unique_key_summary(force_result["terms"])
+                    if (
+                        force_type == "PeriodicTorsionForce"
+                        and "torsion_orientation_diagnostic" in force_result
+                    ):
+                        _print_openmm_torsion_orientation_summary(
+                            prefix,
+                            force_result["torsion_orientation_diagnostic"],
+                            topology1=topology1,
+                            topology2=topology2,
+                        )
                     _print_openmm_field_statistics(prefix, force_result["terms"])
                     if force_type == "HarmonicBondForce" and "constraint_overlap" in force_result:
                         overlap = force_result["constraint_overlap"]
