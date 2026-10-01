@@ -1834,6 +1834,11 @@ def _openmm_compare_keyed_records(records1: list, records2: list, field_names: t
         "count_input1": len(records1),
         "count_input2": len(records2),
         "count_match": len(records1) == len(records2),
+        "unique_key_count_input1": len(keys1),
+        "unique_key_count_input2": len(keys2),
+        "common_unique_key_count": len(keys1 & keys2),
+        "repeated_key_record_count_input1": len(records1) - len(keys1),
+        "repeated_key_record_count_input2": len(records2) - len(keys2),
         "keys_only_input1_count": len(only1),
         "keys_only_input2_count": len(only2),
         "keys_only_input1": [list(key) for key in only1[:top_n]],
@@ -2906,6 +2911,18 @@ def _print_openmm_record_summary(title: str, result: dict) -> None:
     )
 
 
+def _print_openmm_unique_key_summary(result: dict) -> None:
+    """Report distinct interaction keys and repeated-key records."""
+    print(
+        f"      unique keys: {result['unique_key_count_input1']} vs "
+        f"{result['unique_key_count_input2']}  "
+        f"common={result['common_unique_key_count']}  "
+        f"repeated-key excess={result['repeated_key_record_count_input1']} vs "
+        f"{result['repeated_key_record_count_input2']}  "
+        f"multiplicity_diff={result['multiplicity_mismatch_count']}"
+    )
+
+
 def _print_openmm_field_statistics(title: str, result: dict) -> None:
     for field, stats in result.get("field_statistics", {}).items():
         if stats["mismatch_count"] == 0:
@@ -3020,6 +3037,12 @@ def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison:
                 prefix = f"{force_type}[{occurrence}]"
                 if "terms" in force_result:
                     _print_openmm_record_summary(prefix, force_result["terms"])
+                    if force_type in (
+                        "HarmonicBondForce",
+                        "HarmonicAngleForce",
+                        "PeriodicTorsionForce",
+                    ):
+                        _print_openmm_unique_key_summary(force_result["terms"])
                     _print_openmm_field_statistics(prefix, force_result["terms"])
                     if force_type == "HarmonicBondForce" and "constraint_overlap" in force_result:
                         overlap = force_result["constraint_overlap"]
