@@ -92,8 +92,24 @@ parser.add_argument(
     help="Override the production trajectory/metrics reporting interval in MD steps",
 )
 parser.add_argument("--skip-waterbox", action="store_true", help="Skip adding the water box")
+parser.add_argument(
+    "--platform",
+    choices=("CUDA", "CPU"),
+    default="CUDA",
+    help="OpenMM platform to use (default: CUDA; falls back to CPU if CUDA is unavailable)",
+)
+parser.add_argument(
+    "--threads",
+    type=int,
+    default=2,
+    metavar="N",
+    help="Number of CPU threads to use when running on the CPU platform (default: 2)",
+)
 
 args = parser.parse_args()
+
+if args.threads <= 0:
+    parser.error("--threads must be greater than zero")
 prmtopFile = args.prmtop
 inpcrdFile = args.inpcrd
 test_run = args.test_run
@@ -792,8 +808,36 @@ with open("openmm_integrator.xml", "w") as xml_file:
 print("Serialized OpenMM Integrator to openmm_integrator.xml", flush=True)
 
 # Set up the simulation
-simulation = app.Simulation(modeller.topology, system, integrator)
-#simulation = app.Simulation(prmtop.topology, system, integrator)
+requested_platform = args.platform
+
+if requested_platform == "CUDA":
+    try:
+     platform = mm.Platform.getPlatformByName("CUDA")
+     platform_properties = {
+     "DeviceIndex": "0",
+     "Precision": "double",
+     "DeterministicForces": "true",
+      }
+     print("Using OpenMM platform: CUDA", flush=True)
+     print("CUDA properties:", list(platform.getPropertyNames()), flush=True)
+     simulation = app.Simulation(
+            modeller.topology, system, integrator, platform, platform_properties
+        )
+    except Exception as exc:
+        print(f"CUDA is unavailable ({exc}); falling back to CPU.", flush=True)
+        platform = mm.Platform.getPlatformByName("CPU")
+        platform_properties = {"Threads": str(args.threads)}
+        print(f"Using OpenMM platform: CPU ({args.threads} threads)", flush=True)
+        simulation = app.Simulation(
+            modeller.topology, system, integrator, platform, platform_properties
+        )
+else:
+    platform = mm.Platform.getPlatformByName("CPU")
+    platform_properties = {"Threads": str(args.threads)}
+    print(f"Using OpenMM platform: CPU ({args.threads} threads)", flush=True)
+    simulation = app.Simulation(
+        modeller.topology, system, integrator, platform, platform_properties
+    )
 
 # Set initial positions from Amber coordinates
 simulation.context.setPositions(modeller.positions)
@@ -876,7 +920,18 @@ mm.LocalEnergyMinimizer.minimize(
     minimization_tolerance,
     minimize_nsteps,
 )
-minimized_state = simulation.context.getState(getEnergy=True)
+minimized_state = simulation.context.getState(
+    getPositions=True,
+    getEnergy=True,
+    getParameters=True,
+    enforcePeriodicBox=False,
+)
+
+with open("openmm_post_min_state.xml", "w") as xml_file:
+    xml_file.write(mm.XmlSerializer.serialize(minimized_state))
+
+print("Serialized post-minimization OpenMM State to openmm_post_min_state.xml")
+
 print(
     "Post-minimization Potential Energy: "
     f"{minimized_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole):.2f} kJ/mol"
@@ -1130,11 +1185,9 @@ simulation.reporters.append(app.StateDataReporter(
     density=True,
     elapsedTime=True,
 ))
-# Keep a handle to the DCD reporter so the equilibrated production starting
-# structure can be written explicitly as frame 0.  Subsequent frames are still
-# written automatically at preport_interval (for example 0, 500, 1000, ...).
+# Create the DCD reporter, but do not register it yet.  First write the
+# equilibrated production starting structure explicitly as frame 0.
 dcd_reporter = app.DCDReporter('output.dcd', preport_interval)
-simulation.reporters.append(dcd_reporter)
 print (f'Running Production NPT Simulation - {production_nsteps * 0.002} ps ....', flush=True)
 
 # Capture the production reference before taking any production MD steps.  Use
@@ -1144,6 +1197,10 @@ production_reference_state = simulation.context.getState(getPositions=True, enfo
 production_reference_positions = production_reference_state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
 dcd_reporter.report(simulation, production_reference_state)
 print("Saved production step 0 frame to output.dcd", flush=True)
+
+# Now register the reporter.  Subsequent frames are written automatically at
+# preport_interval (for example 1000, 2000, 3000, ...).
+simulation.reporters.append(dcd_reporter)
 production_dof = compute_degrees_of_freedom(system)
 instantaneous_pressure_supported = hasattr(mm.MonteCarloBarostat, "computeCurrentPressure")
 
@@ -1175,6 +1232,84 @@ with open("production_metrics.csv", "w", newline="") as metrics_csv:
         "rg_nm",
         "wall_time_s",
     ])
+
+    # ------------------------------------------------------------
+    # Production step 0 metrics
+    # ------------------------------------------------------------
+    report_state = simulation.context.getState(
+        getEnergy=True,
+        enforcePeriodicBox=True
+    )
+
+    pe_kj_per_mol = report_state.getPotentialEnergy().value_in_unit(
+        unit.kilojoule_per_mole
+    )
+
+    ke_quantity = report_state.getKineticEnergy()
+
+    ke_kj_per_mol = ke_quantity.value_in_unit(
+        unit.kilojoule_per_mole
+    )
+
+    temp_k = compute_temperature_k(
+        ke_quantity,
+        production_dof
+    )
+
+    volume_nm3 = report_state.getPeriodicBoxVolume().value_in_unit(
+        unit.nanometer**3
+    )
+
+    density_g_per_ml = compute_density_g_per_ml(
+        simulation,
+        report_state
+    )
+
+    target_pressure_bar = compute_target_pressure_bar(
+        barostat
+    )
+
+    instantaneous_pressure_bar = compute_instantaneous_pressure_bar(
+        simulation
+    )
+
+    pressure_source = (
+        "instantaneous"
+        if not np.isnan(instantaneous_pressure_bar)
+        else "target_only"
+    )
+
+    rmsd_nm, rg_nm = compute_structural_metrics(
+        simulation,
+        production_reference_positions,
+        equilibration_atom_indices,
+    )
+
+    wall_time_s = time.time() - start_time
+
+    writer.writerow([
+        0,
+        pe_kj_per_mol,
+        ke_kj_per_mol,
+        temp_k,
+        volume_nm3,
+        density_g_per_ml,
+        target_pressure_bar,
+        instantaneous_pressure_bar,
+        pressure_source,
+        rmsd_nm,
+        rg_nm,
+        wall_time_s,
+    ])
+
+    print(
+        f"  0, {pe_kj_per_mol:.6f}, {ke_kj_per_mol:.6f}, "
+        f"{temp_k:.3f}, {volume_nm3:.6f}, "
+        f"{density_g_per_ml:.6f}, {target_pressure_bar:.6f}, "
+        f"{instantaneous_pressure_bar:.6f}, "
+        f"{rmsd_nm:.6f}, {rg_nm:.6f}, {wall_time_s:.3f}",
+        flush=True,
+    )
 
     while steps_remaining > 0:
         try:

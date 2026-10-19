@@ -243,11 +243,11 @@ echo "======================================================================"
 
     "${DIVCON}/bin/qmechanic" "${PDBID}+wb.inpcrd" \
         -h "${PDBID}+wb.parm7" \
-        --np 20 -v 3 \
+        --np 8 -v 3 \
         -O \
         --symmetry off \
         --nb-cutoff 10 \
-        --opt all 1 \
+        --opt off \
         --moleculardynamics \
             "${EQUILIBRATION_STEPS},${PRODUCTION_STEPS}" \
         -p "${PDBID}_md.pdb"
