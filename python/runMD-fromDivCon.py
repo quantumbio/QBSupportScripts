@@ -67,14 +67,74 @@ parser.add_argument("prmtop", help="Path to AMBER prmtop file")
 parser.add_argument("inpcrd", help="Path to AMBER inpcrd file")
 parser.add_argument("--test-run", action="store_true", help="Run a short test simulation")
 parser.add_argument("--medium-run", action="store_true", help="Run a medium simulation")
+parser.add_argument(
+    "--minimization-steps",
+    type=int,
+    metavar="N",
+    help="Override the maximum number of OpenMM minimization iterations",
+)
+parser.add_argument(
+    "--equilibration-steps",
+    type=int,
+    metavar="N",
+    help="Override the number of steps used for each NVT and NPT equilibration stage",
+)
+parser.add_argument(
+    "--production-steps",
+    type=int,
+    metavar="N",
+    help="Override the number of production MD steps",
+)
+parser.add_argument(
+    "--report-interval",
+    type=int,
+    metavar="N",
+    help="Override the production trajectory/metrics reporting interval in MD steps",
+)
 parser.add_argument("--skip-waterbox", action="store_true", help="Skip adding the water box")
+parser.add_argument(
+    "--platform",
+    choices=("CUDA", "CPU"),
+    default="CUDA",
+    help="OpenMM platform to use (default: CUDA; falls back to CPU if CUDA is unavailable)",
+)
+parser.add_argument(
+    "--threads",
+    type=int,
+    default=2,
+    metavar="N",
+    help="Number of CPU threads to use when running on the CPU platform (default: 2)",
+)
 
 args = parser.parse_args()
+
+if args.threads <= 0:
+    parser.error("--threads must be greater than zero")
 prmtopFile = args.prmtop
 inpcrdFile = args.inpcrd
 test_run = args.test_run
 medium_run = args.medium_run
 skip_waterbox = args.skip_waterbox
+
+# Mirror MDDriver.cpp's DEV_MD_SEED convention.  When set, the base seed is
+# applied to the Langevin integrator, base+1 initializes velocities, and
+# base+2 seeds the MonteCarloBarostat.  When unset, preserve OpenMM's automatic
+# stochastic seeding while still initializing velocities before equilibration.
+md_seed_env = os.getenv("DEV_MD_SEED")
+md_seed = None
+if md_seed_env is not None:
+    try:
+        md_seed = int(md_seed_env)
+    except ValueError:
+        parser.error("DEV_MD_SEED must be an integer")
+
+    print("[MD] Random seed mode: deterministic")
+    print(f"[MD] Random seed: {md_seed}")
+    print(f"[MD] Langevin integrator seed: {md_seed}")
+    print(f"[MD] Velocity initialization seed: {md_seed + 1}")
+    print(f"[MD] MonteCarloBarostat seed: {md_seed + 2}")
+else:
+    print("[MD] Random seed mode: automatic")
 
 if test_run:
     minimize_nsteps   = 500  # ~quick minimization
@@ -97,23 +157,85 @@ else:
     production_nsteps = 25000000  # 50 ns for 0.002 ps timestep
     preport_interval  = 25000
 
+# Explicit step counts override the preset selected above.  A single
+# equilibration value is intentionally applied to both NVT and NPT so this
+# interface mirrors qmechanic's --moleculardynamics EQUIL,PRODUCTION settings.
+if args.minimization_steps is not None:
+    if args.minimization_steps <= 0:
+        parser.error("--minimization-steps must be greater than zero")
+    minimize_nsteps = args.minimization_steps
+    print(f"Minimization step override: {args.minimization_steps} maximum iterations.")
+
+if args.equilibration_steps is not None:
+    if args.equilibration_steps <= 0:
+        parser.error("--equilibration-steps must be greater than zero")
+    nvt_equil_nsteps = args.equilibration_steps
+    ntp_equil_nsteps = args.equilibration_steps
+    print(f"Equilibration step override: {args.equilibration_steps} steps for both NVT and NPT.")
+
+if args.production_steps is not None:
+    if args.production_steps <= 0:
+        parser.error("--production-steps must be greater than zero")
+    production_nsteps = args.production_steps
+    print(f"Production step override: {args.production_steps} steps.")
+
+if args.report_interval is not None:
+    if args.report_interval <= 0:
+        parser.error("--report-interval must be greater than zero")
+    preport_interval = args.report_interval
+    print(f"Production report interval override: {args.report_interval} steps.")
+
+# Never configure a reporter interval beyond the whole production run.
+# This guarantees at least one trajectory/report frame for short validation runs.
+if preport_interval > production_nsteps:
+    print(
+        f"Production report interval {preport_interval} exceeds production length "
+        f"{production_nsteps}; using {production_nsteps} steps."
+    )
+    preport_interval = production_nsteps
+
 # Load the Amber topology and coordinate files
 prmtop = pmd.load_file(prmtopFile, inpcrdFile)
 
-# Identify and modify HOH residues
-for residue in prmtop.residues:
-    if residue.name == "HOH":
-        # Identify H1 and H2
-        h1 = residue.atoms[0]  # Adjust index if necessary
-        h2 = residue.atoms[1]  # Adjust index if necessary
-        
-        # Find and remove the bond between H1 and H2
-        for bond in h1.bonds:
-            if bond.atom2 == h2 or bond.atom1 == h2:
-                # Remove the bond from both atoms
-                h1.bonds.remove(bond)
-                h2.bonds.remove(bond)
-                break  # Exit loop after removing the bond
+WATER_RESIDUE_NAMES = {"HOH", "WAT"}
+
+# Identify water residues and remove the artificial H-H connectivity used by
+# the DivCon/AMBER topology representation.  Identify the two hydrogens by
+# atomic number rather than assuming any particular atom ordering.
+for residue in (() if skip_waterbox else prmtop.residues):
+    if residue.name not in WATER_RESIDUE_NAMES:
+        continue
+
+    hydrogens = [atom for atom in residue.atoms if atom.atomic_number == 1]
+
+    if len(hydrogens) != 2:
+        raise RuntimeError(
+            f"Water residue {residue.name} index {residue.idx} contains "
+            f"{len(hydrogens)} hydrogen atoms; expected exactly 2."
+        )
+
+    h1, h2 = hydrogens
+
+    # Locate the H-H bond explicitly rather than relying on atom ordering.
+    hh_bond = next(
+        (
+            bond
+            for bond in h1.bonds
+            if (bond.atom1 is h1 and bond.atom2 is h2)
+            or (bond.atom1 is h2 and bond.atom2 is h1)
+        ),
+        None,
+    )
+
+    if hh_bond is not None:
+        # Keep the ParmEd topology internally consistent by removing the same
+        # Bond object from the per-atom bond lists and the Structure bond list.
+        if hh_bond in h1.bonds:
+            h1.bonds.remove(hh_bond)
+        if hh_bond in h2.bonds:
+            h2.bonds.remove(hh_bond)
+        if hh_bond in prmtop.bonds:
+            prmtop.bonds.remove(hh_bond)
 
 #prmtop.save('initial.pdb')
 from openmm.app import PDBFile
@@ -150,7 +272,7 @@ original_residue_names = {}
 counter = 0
 
 # Loop through all residues and analyze their bonding patterns for all residue types
-for residue in prmtop.residues:
+for residue in (() if skip_waterbox else prmtop.residues):
     residue_type = residue.name
 
     # Generate the bond fingerprint for this residue
@@ -182,23 +304,38 @@ for residue in prmtop.residues:
         # This bonding pattern has been seen before for this residue type, assign the same name
         new_residue_names[residue] = unique_bond_fingerprints[(residue_type, bond_fingerprint)]
 
-# Extract defined residues from the forcefield using XML parsing
+# Use the same TIP3P water family as the DivCon waterbox builder.  Keep the
+# filename in one place so residue-template discovery and final ForceField
+# construction can not silently drift to different water models.
+WATER_MODEL_XML = 'amber14/tip3p.xml'
+GENERATED_FORCEFIELD_XML = 'complete_forcefield_with_unique_residues.xml'
+
+# Preserve the atom-indexed DivCon/AMBER parameters before residue renaming and
+# OpenMM template assignment.  Atom ordering is unchanged by the preparation
+# performed below, so these provide an independent congruence reference.
+divcon_input_atom_charges = [float(atom.charge) for atom in prmtop.atoms]
+divcon_input_atom_types = [str(atom.type) for atom in prmtop.atoms]
+
+# Extract defined residues from the selected OpenMM water/ion force field.
+# This is only needed by the legacy Python-owned solvation path.
 defined_residues = set()
-forcefield_xml_file = importlib.resources.files('openmm.app.data') / 'amber14/tip3pfb.xml'
+if not skip_waterbox:
+    forcefield_xml_file = importlib.resources.files('openmm.app.data') / WATER_MODEL_XML
+    print(f"OpenMM water/ion template force field: {WATER_MODEL_XML}")
 
-# Parse the XML to find all residue names
-tree = ET.parse(forcefield_xml_file)
-root = tree.getroot()
+    # Parse the XML to find all residue names
+    tree = ET.parse(forcefield_xml_file)
+    root = tree.getroot()
 
-# Look for <Residue> elements in the XML
-for residue in root.findall(".//Residue"):
-    defined_residues.add(residue.get('name'))
+    # Look for <Residue> elements in the XML
+    for residue in root.findall(".//Residue"):
+        defined_residues.add(residue.get('name'))
 
 # Initialize skip_residues with the defined residues from the forcefield
 skip_residues = {"WAT", "HOH"}.union(defined_residues)
 
 # Rename residues in the topology based on unique bonding patterns
-for residue in prmtop.residues:
+for residue in (() if skip_waterbox else prmtop.residues):
     residue_name = residue.name
     
     # Skip renaming for residues in the skip_residues set
@@ -210,93 +347,115 @@ for residue in prmtop.residues:
         original_residue_names[new_residue_names[residue]] = residue.name
         residue.name = new_residue_names[residue]
 
-# Save the modified topology to check
-prmtop.save('modified_with_unique_residues.prmtop')
-prmtop.save('modified_with_unique_residues.pdb')
-prmtop.save('modified_with_unique_residues.inpcrd')
+if not skip_waterbox:
+    # Save the modified topology to check
+    prmtop.save('modified_with_unique_residues.prmtop')
+    prmtop.save('modified_with_unique_residues.pdb')
+    prmtop.save('modified_with_unique_residues.inpcrd')
 
-# Now create the XML force field with the unique residues
-param_set = pmd.openmm.OpenMMParameterSet.from_structure(prmtop)
-param_set.write('complete_forcefield_with_unique_residues.xml')
+    # Now create the XML force field with the unique residues
+    param_set = pmd.openmm.OpenMMParameterSet.from_structure(prmtop)
+    param_set.write(GENERATED_FORCEFIELD_XML)
 
-# Load the force field XML file
-tree = ET.parse('complete_forcefield_with_unique_residues.xml')
-root = tree.getroot()
+    # Load the force field XML file
+    tree = ET.parse(GENERATED_FORCEFIELD_XML)
+    root = tree.getroot()
 
-# Create a set to track unique residue names already added to XML
-written_residues = set()
+    # Create a set to track unique residue names already added to XML
+    written_residues = set()
 
-# Create a new <Residues> section
-residues_element = ET.Element("Residues")
+    # Create a new <Residues> section
+    residues_element = ET.Element("Residues")
 
-# Loop over the unique residues and their parameters
-for residue in prmtop.residues:
-    residue_name = residue.name
+    # Loop over the unique residues and their parameters
+    for residue in prmtop.residues:
+        residue_name = residue.name
     
-    # Skip writing residue information for residues in the skip_residues set
-    if residue_name in skip_residues:
-        continue  # Skip this residue if it's in the skip set
+        # Skip writing residue information for residues in the skip_residues set
+        if residue_name in skip_residues:
+            continue  # Skip this residue if it's in the skip set
     
-    # Check if this residue has already been added to the XML
-    if residue_name in written_residues:
-        continue  # Skip this residue if it has already been processed
+        # Check if this residue has already been added to the XML
+        if residue_name in written_residues:
+            continue  # Skip this residue if it has already been processed
 
-    residue_element = ET.Element("Residue", name=residue_name)
+        residue_element = ET.Element("Residue", name=residue_name)
 
-    # Add atoms
-    for atom in residue.atoms:
-        atom_element = ET.SubElement(residue_element, "Atom", name=atom.name, type=atom.type, charge=str(atom.charge))
+        # Add atoms
+        for atom in residue.atoms:
+            atom_element = ET.SubElement(residue_element, "Atom", name=atom.name, type=atom.type, charge=str(atom.charge))
     
-    # Add bonds and external bonds
-    bonded_atoms = set()
-    for atom in residue.atoms:
-        for bond in atom.bonds:
-            other_atom = bond.atom2 if bond.atom1 == atom else bond.atom1
+        # Add bonds and external bonds
+        bonded_atoms = set()
+        for atom in residue.atoms:
+            for bond in atom.bonds:
+                other_atom = bond.atom2 if bond.atom1 == atom else bond.atom1
             
-            if other_atom.residue == atom.residue:
-                # Internal bond: atoms belong to the same residue
-                bond_tuple = tuple(sorted([bond.atom1.name, bond.atom2.name]))
-                if bond_tuple not in bonded_atoms:
-                    bond_element = ET.SubElement(residue_element, "Bond", atomName1=bond.atom1.name, atomName2=bond.atom2.name)
-                    bonded_atoms.add(bond_tuple)
-            else:
-                # External bond: atoms belong to different residues
-                external_bond_element = ET.SubElement(residue_element, "ExternalBond", atomName=atom.name)
+                if other_atom.residue == atom.residue:
+                    # Internal bond: atoms belong to the same residue
+                    bond_tuple = tuple(sorted([bond.atom1.name, bond.atom2.name]))
+                    if bond_tuple not in bonded_atoms:
+                        bond_element = ET.SubElement(residue_element, "Bond", atomName1=bond.atom1.name, atomName2=bond.atom2.name)
+                        bonded_atoms.add(bond_tuple)
+                else:
+                    # External bond: atoms belong to different residues
+                    external_bond_element = ET.SubElement(residue_element, "ExternalBond", atomName=atom.name)
 
-    # Append residue to the <Residues> section
-    residues_element.append(residue_element)
+        # Append residue to the <Residues> section
+        residues_element.append(residue_element)
     
-    # Add the residue name to the written set
-    written_residues.add(residue_name)
+        # Add the residue name to the written set
+        written_residues.add(residue_name)
 
-# Append <Residues> section to the root of the force field XML
-root.append(residues_element)
+    # Append <Residues> section to the root of the force field XML
+    root.append(residues_element)
 
-# Function to indent XML for pretty printing
-def indent(elem, level=0):
-    i = "\n" + level * "  "  # Use two spaces for indentation
-    if len(elem):
-        if not elem.text or not elem.text.strip():
-            elem.text = i + "  "
-        if not elem.tail or not elem.tail.strip():
-            elem.tail = i
-        for subelem in elem:
-            indent(subelem, level + 1)
-        if not elem.tail or not elem.tail.strip():
-            elem.tail = i
-    else:
-        if level and (not elem.tail or not elem.tail.strip()):
-            elem.tail = i
+    # Function to indent XML for pretty printing
+    def indent(elem, level=0):
+        i = "\n" + level * "  "  # Use two spaces for indentation
+        if len(elem):
+            if not elem.text or not elem.text.strip():
+                elem.text = i + "  "
+            if not elem.tail or not elem.tail.strip():
+                elem.tail = i
+            for subelem in elem:
+                indent(subelem, level + 1)
+            if not elem.tail or not elem.tail.strip():
+                elem.tail = i
+        else:
+            if level and (not elem.tail or not elem.tail.strip()):
+                elem.tail = i
 
-# Indent the root for pretty printing
-indent(root)
+    # Indent the root for pretty printing
+    indent(root)
 
-# Write the modified and indented XML to a file
-tree.write('complete_forcefield_with_unique_residues.xml', xml_declaration=True, encoding='utf-8', method="xml")
+    # Write the modified and indented XML to a file
+    tree.write(GENERATED_FORCEFIELD_XML, xml_declaration=True, encoding='utf-8', method="xml")
 
-# Load the modified prmtop and forcefield XML for simulation
-prmtop = app.AmberPrmtopFile('modified_with_unique_residues.prmtop')
-inpcrd = app.AmberInpcrdFile('modified_with_unique_residues.inpcrd')
+# Load the modified topology, but retain coordinates/box information from the
+# original supplied inpcrd.  The residue-renaming/topology preparation above
+# does not change atom count/order or coordinates, and rewriting an inpcrd via
+# ParmEd may omit optional periodic box records.
+if skip_waterbox:
+    print("OpenMM System construction: direct ParmEd AMBER structure")
+    # Keep the concrete ParmEd structure loaded directly from the supplied
+    # parm7/inpcrd pair.  This avoids both the generated FFXML/template path
+    # and AmberPrmtopFile's version-dependent requirement that periodic box
+    # metadata be present in the parm7 before PME System construction.
+    inpcrd = app.AmberInpcrdFile(inpcrdFile)
+else:
+    print("OpenMM System construction: generated ForceField (Python solvation path)")
+    prmtop = app.AmberPrmtopFile('modified_with_unique_residues.prmtop')
+    inpcrd = app.AmberInpcrdFile(inpcrdFile)
+
+# Prefer the box carried by the authoritative input coordinate file.  If that
+# file does not carry box vectors, fall back to the box retained in the
+# prepared prmtop topology (AMBER prmtop files can also contain box data).
+input_box_vectors = inpcrd.boxVectors
+input_box_source = "input inpcrd"
+if input_box_vectors is None:
+    input_box_vectors = prmtop.topology.getPeriodicBoxVectors()
+    input_box_source = "input prmtop" if skip_waterbox else "prepared prmtop"
 
 # Extract positions from inpcrd
 positions = inpcrd.getPositions()
@@ -306,7 +465,8 @@ positions_array = np.array([[pos[0].value_in_unit(unit.nanometers),
                               pos[1].value_in_unit(unit.nanometers),
                               pos[2].value_in_unit(unit.nanometers)] for pos in positions])
 
-# Calculate bounding box dimensions based on XYZ coordinates
+# Calculate coordinate bounds.  These are only needed when this script is
+# responsible for creating a new solvent box.
 x_coords = positions_array[:, 0]
 y_coords = positions_array[:, 1]
 z_coords = positions_array[:, 2]
@@ -315,64 +475,324 @@ min_x, max_x = min(x_coords), max(x_coords)
 min_y, max_y = min(y_coords), max(y_coords)
 min_z, max_z = min(z_coords), max(z_coords)
 
-# Create box dimensions with padding
-padding = 10.0 * unit.nanometers  # Example padding
-box_size_x = (max_x - min_x) + 2 * padding.value_in_unit(unit.nanometers)
-box_size_y = (max_y - min_y) + 2 * padding.value_in_unit(unit.nanometers)
-box_size_z = (max_z - min_z) + 2 * padding.value_in_unit(unit.nanometers)
+# The generated ForceField is only needed when Python owns solvation.  The
+# --skip-waterbox validation path constructs its System directly from parm7.
+forcefield = None
+if not skip_waterbox:
+    forcefield = app.ForceField(WATER_MODEL_XML, GENERATED_FORCEFIELD_XML)
 
-# Create box vectors
-box_vectors = [
-    mm.Vec3(box_size_x, 0.0, 0.0),
-    mm.Vec3(0.0, box_size_y, 0.0),
-    mm.Vec3(0.0, 0.0, box_size_z),
-]
-
-# Set periodic box vectors for the topology
-prmtop.topology.setPeriodicBoxVectors(box_vectors)
-
-# Get the periodic box vectors
-box_vectors = prmtop.topology.getPeriodicBoxVectors()
-
-# Check if the box vectors are defined
-if box_vectors is not None:
-    # Calculate the box dimensions
-    box_dimensions = [
-        box_vectors[0][0].value_in_unit(unit.nanometers),
-        box_vectors[1][1].value_in_unit(unit.nanometers),
-        box_vectors[2][2].value_in_unit(unit.nanometers)
-    ]
-
-    print("Box Dimensions (nm):", box_dimensions)
-else:
-    print("No periodic box dimensions are defined in the topology.")
-
-forcefield = app.ForceField('amber14/tip3pfb.xml','complete_forcefield_with_unique_residues.xml')
-
-# Use Modeller to create a waterbox
+# Use Modeller for the final topology/positions passed to OpenMM.
 modeller = app.Modeller(prmtop.topology, inpcrd.positions)
 
-# Create box dimensions with padding
-padding = 1.0 * unit.nanometers  # Example padding
-box_size_x = (max_x - min_x) + 2 * padding.value_in_unit(unit.nanometers)
-box_size_y = (max_y - min_y) + 2 * padding.value_in_unit(unit.nanometers)
-box_size_z = (max_z - min_z) + 2 * padding.value_in_unit(unit.nanometers)
+if skip_waterbox:
+    # Preserve an explicit periodic cell when the AMBER inputs carry one.
+    # Some DivCon-generated parm7/inpcrd pairs do not currently serialize box
+    # metadata.  In that case, mirror MDDriver's fallback: build an
+    # orthorhombic box from the coordinate extrema with 1.0 A padding on each
+    # side.  This replaces the old (and erroneous) 10 nm padding.
+    if input_box_vectors is None:
+        fallback_padding_angstrom = 1.0
+        fallback_padding_nm = fallback_padding_angstrom * 0.1
+        box_size_x = (max_x - min_x) + 2.0 * fallback_padding_nm
+        box_size_y = (max_y - min_y) + 2.0 * fallback_padding_nm
+        box_size_z = (max_z - min_z) + 2.0 * fallback_padding_nm
+        input_box_vectors = (
+            mm.Vec3(box_size_x, 0.0, 0.0) * unit.nanometer,
+            mm.Vec3(0.0, box_size_y, 0.0) * unit.nanometer,
+            mm.Vec3(0.0, 0.0, box_size_z) * unit.nanometer,
+        )
+        input_box_source = (
+            f"coordinate bounds + {fallback_padding_angstrom:.1f} A padding/side"
+        )
 
-# Create box vector for solvent addition
-box_vector = mm.Vec3(box_size_x, box_size_y, box_size_z)
+        # ParmEd stores box lengths in Angstrom and angles in degrees.
+        # Setting the Structure box makes the synthesized periodic cell part
+        # of the direct createSystem() call even when the input AMBER files do
+        # not contain periodic box metadata.
+        prmtop.box = [
+            box_size_x * 10.0,
+            box_size_y * 10.0,
+            box_size_z * 10.0,
+            90.0,
+            90.0,
+            90.0,
+        ]
 
-if not skip_waterbox:
-    # Add a water box and neutralize the system with counterions
-    modeller.addSolvent(forcefield, model='tip3p', boxSize=box_vector, ionicStrength=0.15*unit.molar)
+    modeller.topology.setPeriodicBoxVectors(input_box_vectors)
+    box_dimensions = [
+        input_box_vectors[0][0].value_in_unit(unit.nanometers),
+        input_box_vectors[1][1].value_in_unit(unit.nanometers),
+        input_box_vectors[2][2].value_in_unit(unit.nanometers),
+    ]
+    print(
+        f"Skipping water box addition; using {input_box_source} periodic box (nm):",
+        box_dimensions,
+    )
 else:
-    print("Skipping water box addition.")
-# Now create the system again after modifying the topology
-system = forcefield.createSystem(
-    modeller.topology,
-    nonbondedMethod=app.PME,
-    nonbondedCutoff=1.0 * unit.nanometers,
-    constraints=app.HBonds
-)
+    # When Python creates the solvent box, retain the established 1 nm padding
+    # behavior.  Modeller.addSolvent() sets the resulting periodic box.
+    padding = 1.0 * unit.nanometers
+    box_size_x = (max_x - min_x) + 2 * padding.value_in_unit(unit.nanometers)
+    box_size_y = (max_y - min_y) + 2 * padding.value_in_unit(unit.nanometers)
+    box_size_z = (max_z - min_z) + 2 * padding.value_in_unit(unit.nanometers)
+    box_vector = mm.Vec3(box_size_x, box_size_y, box_size_z)
+    modeller.addSolvent(
+        forcefield,
+        model='tip3p',
+        boxSize=box_vector,
+        ionicStrength=0.15*unit.molar,
+    )
+    final_box_vectors = modeller.topology.getPeriodicBoxVectors()
+    if final_box_vectors is not None:
+        print(
+            "Generated periodic box (nm):",
+            [
+                final_box_vectors[0][0].value_in_unit(unit.nanometers),
+                final_box_vectors[1][1].value_in_unit(unit.nanometers),
+                final_box_vectors[2][2].value_in_unit(unit.nanometers),
+            ],
+        )
+# Construct the validation System directly from the supplied parm7.  This
+# preserves the concrete AMBER term inventory and avoids the ParmEd -> FFXML ->
+# ForceField reconstruction used by the legacy Python solvation path.
+if skip_waterbox:
+    system = prmtop.createSystem(
+        nonbondedMethod=app.PME,
+        nonbondedCutoff=1.0 * unit.nanometers,
+        constraints=app.HBonds,
+        rigidWater=True,
+        removeCMMotion=True,
+        ewaldErrorTolerance=1.0e-4,
+        flexibleConstraints=False,
+    )
+    system.setDefaultPeriodicBoxVectors(*input_box_vectors)
+else:
+    system = forcefield.createSystem(
+        modeller.topology,
+        nonbondedMethod=app.PME,
+        nonbondedCutoff=1.0 * unit.nanometers,
+        constraints=app.HBonds,
+        rigidWater=True,
+        removeCMMotion=True,
+        ewaldErrorTolerance=1.0e-4,
+    )
+
+def _find_nonbonded_force(openmm_system):
+    forces = [
+        openmm_system.getForce(i)
+        for i in range(openmm_system.getNumForces())
+        if isinstance(openmm_system.getForce(i), mm.NonbondedForce)
+    ]
+    if len(forces) != 1:
+        raise RuntimeError(
+            f"Expected exactly one OpenMM NonbondedForce, found {len(forces)}"
+        )
+    return forces[0]
+
+def _generated_nonbonded_class_parameters(xml_filename, wanted_classes):
+    """Read sigma/epsilon (OpenMM XML units) for selected transferred classes."""
+    xml_root = ET.parse(xml_filename).getroot()
+    nb_element = xml_root.find("NonbondedForce")
+    if nb_element is None:
+        raise RuntimeError(f"No NonbondedForce found in {xml_filename}")
+
+    parameters = {}
+    for atom_element in nb_element.findall("Atom"):
+        atom_class = atom_element.get("class")
+        if atom_class in wanted_classes:
+            parameters[atom_class] = (
+                float(atom_element.get("sigma")),
+                float(atom_element.get("epsilon")),
+            )
+    missing = set(wanted_classes) - set(parameters)
+    if missing:
+        raise RuntimeError(
+            f"Missing transferred nonbonded classes in {xml_filename}: "
+            + ", ".join(sorted(missing))
+        )
+    return parameters
+
+def report_nonbonded_parameters(openmm_system, topology):
+    """Report the effective OpenMM nonbonded setup and direct-AMBER charge audit."""
+    nonbonded = _find_nonbonded_force(openmm_system)
+    topology_atoms = list(topology.atoms())
+
+    transferred_water_lj = None
+    if skip_waterbox:
+        can_map_to_input = (
+            len(topology_atoms) == len(divcon_input_atom_charges)
+            and openmm_system.getNumParticles() == len(divcon_input_atom_charges)
+        )
+        if not can_map_to_input:
+            raise RuntimeError(
+                "Direct AMBER topology atom count/order no longer matches the supplied "
+                "parm7; can not validate particle parameters by index."
+            )
+
+        charge_mismatch_count = 0
+        charge_max_abs_delta = 0.0
+        for particle_index, input_charge in enumerate(divcon_input_atom_charges):
+            charge, _, _ = nonbonded.getParticleParameters(particle_index)
+            openmm_charge = charge.value_in_unit(unit.elementary_charge)
+            delta = abs(openmm_charge - input_charge)
+            if delta > 1.0e-10:
+                charge_mismatch_count += 1
+            charge_max_abs_delta = max(charge_max_abs_delta, delta)
+
+        print("Direct AMBER particle charge audit:")
+        print(
+            f"  mismatches (>1e-10 e): {charge_mismatch_count}/"
+            f"{len(divcon_input_atom_charges)}"
+        )
+        print(f"  max |delta q| (e)       : {charge_max_abs_delta:.12g}")
+    else:
+        transferred_water_lj = _generated_nonbonded_class_parameters(
+            GENERATED_FORCEFIELD_XML, {"OW", "HW"}
+        )
+
+    method_names = {
+        mm.NonbondedForce.NoCutoff: "NoCutoff",
+        mm.NonbondedForce.CutoffNonPeriodic: "CutoffNonPeriodic",
+        mm.NonbondedForce.CutoffPeriodic: "CutoffPeriodic",
+        mm.NonbondedForce.Ewald: "Ewald",
+        mm.NonbondedForce.PME: "PME",
+        mm.NonbondedForce.LJPME: "LJPME",
+    }
+    print("OpenMM nonbonded configuration:")
+    if skip_waterbox:
+        print("  parameter source          : direct AMBER prmtop")
+    else:
+        print(f"  water template XML       : {WATER_MODEL_XML}")
+        print(f"  transferred parameter XML: {GENERATED_FORCEFIELD_XML}")
+    print(f"  method                   : {method_names.get(nonbonded.getNonbondedMethod(), nonbonded.getNonbondedMethod())}")
+    print(f"  cutoff (nm)              : {nonbonded.getCutoffDistance().value_in_unit(unit.nanometer):.8f}")
+    print(f"  Ewald error tolerance    : {nonbonded.getEwaldErrorTolerance():.8g}")
+    print(f"  dispersion correction    : {nonbonded.getUseDispersionCorrection()}")
+    print(f"  switching function       : {nonbonded.getUseSwitchingFunction()}")
+    if nonbonded.getUseSwitchingFunction():
+        print(f"  switching distance (nm)  : {nonbonded.getSwitchingDistance().value_in_unit(unit.nanometer):.8f}")
+    print(f"  nonbonded particles      : {nonbonded.getNumParticles()}")
+    print(f"  nonbonded exceptions     : {nonbonded.getNumExceptions()}")
+
+    total_charge_e = 0.0
+    for particle_index in range(nonbonded.getNumParticles()):
+        charge, _, _ = nonbonded.getParticleParameters(particle_index)
+        total_charge_e += charge.value_in_unit(unit.elementary_charge)
+    print(f"  total particle charge (e): {total_charge_e:.10f}")
+
+    if transferred_water_lj is not None:
+        print("DivCon-transferred OW/HW LJ parameters:")
+        for atom_class in ("OW", "HW"):
+            sigma_nm, epsilon_kj = transferred_water_lj[atom_class]
+            print(
+                f"  {atom_class}: sigma={sigma_nm:.12f} nm  "
+                f"epsilon={epsilon_kj:.12f} kJ/mol"
+            )
+
+    # Report actual parameters on one representative water and the first Na/Cl
+    # ions, if present.  This reports the final values OpenMM will actually use.
+    representative_atoms = []
+    first_water_residue = next(
+        (r for r in topology.residues() if r.name in WATER_RESIDUE_NAMES), None
+    )
+    if first_water_residue is not None:
+        representative_atoms.extend(list(first_water_residue.atoms()))
+
+    seen_ion_residues = set()
+    for atom in topology_atoms:
+        residue_name = atom.residue.name.upper()
+        if residue_name in {"NA", "CL"} and residue_name not in seen_ion_residues:
+            representative_atoms.append(atom)
+            seen_ion_residues.add(residue_name)
+        if len(seen_ion_residues) == 2:
+            break
+
+    if representative_atoms:
+        print("Representative effective OpenMM particle parameters:")
+        for atom in representative_atoms:
+            charge, sigma, epsilon = nonbonded.getParticleParameters(atom.index)
+            input_type = (
+                divcon_input_atom_types[atom.index]
+                if atom.index < len(divcon_input_atom_types)
+                else "<generated>"
+            )
+            input_charge = (
+                divcon_input_atom_charges[atom.index]
+                if atom.index < len(divcon_input_atom_charges)
+                else float("nan")
+            )
+            print(
+                f"  index={atom.index:5d} {atom.residue.name}:{atom.name:<4s} "
+                f"DivConType={input_type:<8s} "
+                f"DivConQ={input_charge:+.8f} "
+                f"OpenMMQ={charge.value_in_unit(unit.elementary_charge):+.8f} "
+                f"sigma={sigma.value_in_unit(unit.nanometer):.12f} nm "
+                f"epsilon={epsilon.value_in_unit(unit.kilojoule_per_mole):.12f} kJ/mol"
+            )
+
+    if first_water_residue is not None:
+        water_indices = {atom.index for atom in first_water_residue.atoms()}
+        print("Representative water constraints:")
+        for constraint_index in range(openmm_system.getNumConstraints()):
+            atom1, atom2, distance = openmm_system.getConstraintParameters(constraint_index)
+            if atom1 in water_indices and atom2 in water_indices:
+                print(
+                    f"  {atom1}-{atom2}: "
+                    f"{distance.value_in_unit(unit.nanometer):.12f} nm"
+                )
+
+    return nonbonded
+
+nonbonded_force = report_nonbonded_parameters(system, modeller.topology)
+
+# Match the C++ MDDriver force-group layout so that OpenMM energies can be
+# compared component-by-component without changing the Hamiltonian.  Any force
+# type outside these four expected AMBER/OpenMM terms is isolated in group 4
+# and reported separately as a diagnostic.
+for force_index in range(system.getNumForces()):
+    force = system.getForce(force_index)
+    if isinstance(force, mm.HarmonicBondForce):
+        force.setForceGroup(0)
+    elif isinstance(force, mm.HarmonicAngleForce):
+        force.setForceGroup(1)
+    elif isinstance(force, mm.PeriodicTorsionForce):
+        force.setForceGroup(2)
+    elif isinstance(force, mm.NonbondedForce):
+        force.setForceGroup(3)
+    else:
+        force.setForceGroup(4)
+
+with open("openmm_system.xml", "w") as xml_file:
+    xml_file.write(mm.XmlSerializer.serialize(system))
+print("Serialized OpenMM System to openmm_system.xml", flush=True)
+
+def report_openmm_energy_components(simulation, label):
+    """Report OpenMM potential-energy components using the C++ force groups."""
+    component_groups = (
+        ("Bond", 0),
+        ("Angle", 1),
+        ("Torsion", 2),
+        ("Nonbonded", 3),
+    )
+
+    print(f"OpenMM energy decomposition - {label} (kJ/mol):")
+    component_sum = 0.0
+    for component_name, group in component_groups:
+        state = simulation.context.getState(getEnergy=True, groups=(1 << group))
+        energy = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+        component_sum += energy
+        print(f"  {component_name:<12}: {energy:.6f}")
+
+    other_state = simulation.context.getState(getEnergy=True, groups=(1 << 4))
+    other_energy = other_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+    total_state = simulation.context.getState(getEnergy=True)
+    total_energy = total_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
+
+    if abs(other_energy) > 1.0e-8:
+        print(f"  {'Other':<12}: {other_energy:.6f}")
+    print(f"  {'4-part sum':<12}: {component_sum:.6f}")
+    print(f"  {'Total':<12}: {total_energy:.6f}")
+    print(f"  {'Residual':<12}: {(total_energy - component_sum - other_energy):.6e}")
 
 # Set up the integrator
 integrator = mm.LangevinIntegrator(
@@ -380,14 +800,74 @@ integrator = mm.LangevinIntegrator(
     1.0/unit.picoseconds,
     0.002*unit.picoseconds
 )
+if md_seed is not None:
+    integrator.setRandomNumberSeed(md_seed)
+
+with open("openmm_integrator.xml", "w") as xml_file:
+    xml_file.write(mm.XmlSerializer.serialize(integrator))
+print("Serialized OpenMM Integrator to openmm_integrator.xml", flush=True)
 
 # Set up the simulation
-simulation = app.Simulation(modeller.topology, system, integrator)
-#simulation = app.Simulation(prmtop.topology, system, integrator)
+requested_platform = args.platform
+
+if requested_platform == "CUDA":
+    try:
+     platform = mm.Platform.getPlatformByName("CUDA")
+     platform_properties = {
+     "DeviceIndex": "0",
+     "Precision": "double",
+     "DeterministicForces": "true",
+      }
+     print("Using OpenMM platform: CUDA", flush=True)
+     print("CUDA properties:", list(platform.getPropertyNames()), flush=True)
+     simulation = app.Simulation(
+            modeller.topology, system, integrator, platform, platform_properties
+        )
+    except Exception as exc:
+        print(f"CUDA is unavailable ({exc}); falling back to CPU.", flush=True)
+        platform = mm.Platform.getPlatformByName("CPU")
+        platform_properties = {"Threads": str(args.threads)}
+        print(f"Using OpenMM platform: CPU ({args.threads} threads)", flush=True)
+        simulation = app.Simulation(
+            modeller.topology, system, integrator, platform, platform_properties
+        )
+else:
+    platform = mm.Platform.getPlatformByName("CPU")
+    platform_properties = {"Threads": str(args.threads)}
+    print(f"Using OpenMM platform: CPU ({args.threads} threads)", flush=True)
+    simulation = app.Simulation(
+        modeller.topology, system, integrator, platform, platform_properties
+    )
 
 # Set initial positions from Amber coordinates
 simulation.context.setPositions(modeller.positions)
 
+# Record the actual OpenMM execution platform and the authoritative starting
+# periodic box used by this Context.  These are high-value congruence checks.
+platform = simulation.context.getPlatform()
+print(f"OpenMM execution platform: {platform.getName()}")
+print(f"OpenMM particles: {system.getNumParticles()}")
+print(f"OpenMM constraints: {system.getNumConstraints()}")
+initial_state = simulation.context.getState(
+    getEnergy=True,
+    getPositions=True,
+    getParameters=True,
+    enforcePeriodicBox=False,
+)
+with open("openmm_initial_state.xml", "w") as xml_file:
+    xml_file.write(mm.XmlSerializer.serialize(initial_state))
+print("Serialized OpenMM initial State to openmm_initial_state.xml", flush=True)
+
+initial_box = initial_state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(unit.nanometers)
+print(
+    "OpenMM initial box (nm):",
+    [float(initial_box[0][0]), float(initial_box[1][1]), float(initial_box[2][2])],
+)
+print(
+    "OpenMM initial potential energy (kJ/mol):",
+    initial_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole),
+)
+report_openmm_energy_components(simulation, "initial")
 
 # Double check system
 # Extract the system from the simulation
@@ -426,24 +906,47 @@ else:
 
 
 
-# Minimize energy
-print(f'Minimizing {minimize_nsteps} steps ...', flush=True)
+# Minimize energy using the same OpenMM LocalEnergyMinimizer semantics as the
+# C++ driver: 10 kJ/mol/nm RMS-force tolerance and a maximum iteration count.
+minimization_tolerance = 10.0
+print(
+    f'Minimizing with OpenMM: tolerance={minimization_tolerance:.2f} kJ/mol/nm, '
+    f'maxIterations={minimize_nsteps} ...',
+    flush=True,
+)
 start_time = time.time()
+mm.LocalEnergyMinimizer.minimize(
+    simulation.context,
+    minimization_tolerance,
+    minimize_nsteps,
+)
+minimized_state = simulation.context.getState(
+    getPositions=True,
+    getEnergy=True,
+    getParameters=True,
+    enforcePeriodicBox=False,
+)
 
-# Minimize until energy convergence
-prev_energy = float('inf')
-tolerance = 10.0  # kJ/mol threshold for convergence
-for i in range(0, minimize_nsteps, 500):
-    simulation.minimizeEnergy(maxIterations=500)
-    state = simulation.context.getState(getEnergy=True)
-    energy = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
-    print(f"Step {i} Current Potential Energy: {energy:.2f} kJ/mol")
-    if abs(prev_energy - energy) < tolerance:
-        print(f'Converged (tolerance: {tolerance:.2f} kJ/mol) at step: {i}')
-        break
-    prev_energy = energy
+with open("openmm_post_min_state.xml", "w") as xml_file:
+    xml_file.write(mm.XmlSerializer.serialize(minimized_state))
+
+print("Serialized post-minimization OpenMM State to openmm_post_min_state.xml")
+
+print(
+    "Post-minimization Potential Energy: "
+    f"{minimized_state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole):.2f} kJ/mol"
+)
+report_openmm_energy_components(simulation, "post-minimization")
 elapsed_time = time.time() - start_time
 print(f"Elapsed time: {elapsed_time:.6f} seconds")
+
+# Match the C++ protocol: initialize velocities once after minimization and
+# carry them continuously through NVT, NPT, and production.  Use the same
+# DEV_MD_SEED+1 convention when deterministic seeding is requested.
+if md_seed is not None:
+    simulation.context.setVelocitiesToTemperature(298*unit.kelvin, md_seed + 1)
+else:
+    simulation.context.setVelocitiesToTemperature(298*unit.kelvin)
 
 def save_imaged_pdb(simulation, filename):
     """
@@ -509,9 +1012,9 @@ def get_equilibration_atom_indices(simulation):
 
 
 def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_steps=100000, report_interval=1000, atom_indices=None):
-    """Monitor aligned RMSD on a meaningful atom subset to determine equilibration convergence."""
+    """Run exactly max_steps while monitoring aligned RMSD on a meaningful atom subset."""
     rmsd_values = []
-    converged = False
+    convergence_reported = False
 
     md_topology = md.Topology.from_openmm(simulation.topology)
     if atom_indices is None:
@@ -523,8 +1026,11 @@ def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_st
     ref_positions = reference_state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
     ref_traj = md.Trajectory(np.array(ref_positions)[np.newaxis, :, :], md_topology)
 
-    for step in range(0, max_steps, report_interval):
-        simulation.step(report_interval)
+    completed_steps = 0
+    while completed_steps < max_steps:
+        chunk = min(report_interval, max_steps - completed_steps)
+        simulation.step(chunk)
+        completed_steps += chunk
 
         # Extract current positions and compute aligned RMSD against the fixed reference.
         state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
@@ -534,15 +1040,24 @@ def monitor_rmsd_equilibration(simulation, reference_xml, threshold=0.05, max_st
         rmsd = md.rmsd(cur_traj, ref_traj, atom_indices=atom_indices)[0]
         rmsd_values.append(rmsd)
 
-        print(f"Step {step + report_interval}: RMSD = {rmsd:.3f} nm", flush=True)
+        print(f"Step {completed_steps}: RMSD = {rmsd:.3f} nm", flush=True)
 
-        if len(rmsd_values) > 5 and all(r < threshold for r in rmsd_values[-5:]):
-            print(f'Equilibration converged at step {step + report_interval} with RMSD {rmsd:.3f} nm')
-            converged = True
-            break
+        if (
+            not convergence_reported
+            and len(rmsd_values) > 5
+            and all(r < threshold for r in rmsd_values[-5:])
+        ):
+            print(
+                f'RMSD convergence criterion satisfied at step {completed_steps} '
+                f'with RMSD {rmsd:.3f} nm; continuing to requested equilibration length.'
+            )
+            convergence_reported = True
 
-    if not converged:
-        print(f"Maximum equilibration steps {max_steps} reached without full convergence.")
+    if not convergence_reported:
+        print(
+            f"Completed requested equilibration length of {max_steps} steps; "
+            "RMSD convergence criterion was not reached."
+        )
 
 
 def compute_target_pressure_bar(barostat=None):
@@ -643,6 +1158,8 @@ with open("nvt_equilibrated.xml", "w") as f:
 # NPT Equilibration with RMSD monitoring
 print('Equilibrating (NPT) with RMSD monitoring...', flush=True)
 barostat = mm.MonteCarloBarostat(1 * unit.bar, 298 * unit.kelvin, 25)
+if md_seed is not None:
+    barostat.setRandomNumberSeed(md_seed + 2)
 system.addForce(barostat)
 simulation.context.reinitialize(preserveState=True)
 start_time = time.time()
@@ -653,7 +1170,7 @@ print(f"Elapsed time: {elapsed_time:.6f} seconds")
 # Save final equilibrated positions
 save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
-simulation.context.setVelocitiesToTemperature(298*unit.kelvin)
+# Continue directly from the equilibrated NPT velocities into production.
 # Reset step count so production logs/reporters are production-relative.
 simulation.currentStep = 0
 #simulation.reporters.append(app.PDBReporter('output.pdb', preport_interval))
@@ -668,12 +1185,22 @@ simulation.reporters.append(app.StateDataReporter(
     density=True,
     elapsedTime=True,
 ))
-simulation.reporters.append(app.DCDReporter('output.dcd', preport_interval))
+# Create the DCD reporter, but do not register it yet.  First write the
+# equilibrated production starting structure explicitly as frame 0.
+dcd_reporter = app.DCDReporter('output.dcd', preport_interval)
 print (f'Running Production NPT Simulation - {production_nsteps * 0.002} ps ....', flush=True)
 
-# Capture a production reference to report meaningful structural drift.
+# Capture the production reference before taking any production MD steps.  Use
+# this exact same State both as the structural RMSD reference and as DCD frame 0
+# so the first trajectory frame is the authoritative production starting point.
 production_reference_state = simulation.context.getState(getPositions=True, enforcePeriodicBox=True)
 production_reference_positions = production_reference_state.getPositions(asNumpy=True).value_in_unit(unit.nanometers)
+dcd_reporter.report(simulation, production_reference_state)
+print("Saved production step 0 frame to output.dcd", flush=True)
+
+# Now register the reporter.  Subsequent frames are written automatically at
+# preport_interval (for example 1000, 2000, 3000, ...).
+simulation.reporters.append(dcd_reporter)
 production_dof = compute_degrees_of_freedom(system)
 instantaneous_pressure_supported = hasattr(mm.MonteCarloBarostat, "computeCurrentPressure")
 
@@ -705,6 +1232,84 @@ with open("production_metrics.csv", "w", newline="") as metrics_csv:
         "rg_nm",
         "wall_time_s",
     ])
+
+    # ------------------------------------------------------------
+    # Production step 0 metrics
+    # ------------------------------------------------------------
+    report_state = simulation.context.getState(
+        getEnergy=True,
+        enforcePeriodicBox=True
+    )
+
+    pe_kj_per_mol = report_state.getPotentialEnergy().value_in_unit(
+        unit.kilojoule_per_mole
+    )
+
+    ke_quantity = report_state.getKineticEnergy()
+
+    ke_kj_per_mol = ke_quantity.value_in_unit(
+        unit.kilojoule_per_mole
+    )
+
+    temp_k = compute_temperature_k(
+        ke_quantity,
+        production_dof
+    )
+
+    volume_nm3 = report_state.getPeriodicBoxVolume().value_in_unit(
+        unit.nanometer**3
+    )
+
+    density_g_per_ml = compute_density_g_per_ml(
+        simulation,
+        report_state
+    )
+
+    target_pressure_bar = compute_target_pressure_bar(
+        barostat
+    )
+
+    instantaneous_pressure_bar = compute_instantaneous_pressure_bar(
+        simulation
+    )
+
+    pressure_source = (
+        "instantaneous"
+        if not np.isnan(instantaneous_pressure_bar)
+        else "target_only"
+    )
+
+    rmsd_nm, rg_nm = compute_structural_metrics(
+        simulation,
+        production_reference_positions,
+        equilibration_atom_indices,
+    )
+
+    wall_time_s = time.time() - start_time
+
+    writer.writerow([
+        0,
+        pe_kj_per_mol,
+        ke_kj_per_mol,
+        temp_k,
+        volume_nm3,
+        density_g_per_ml,
+        target_pressure_bar,
+        instantaneous_pressure_bar,
+        pressure_source,
+        rmsd_nm,
+        rg_nm,
+        wall_time_s,
+    ])
+
+    print(
+        f"  0, {pe_kj_per_mol:.6f}, {ke_kj_per_mol:.6f}, "
+        f"{temp_k:.3f}, {volume_nm3:.6f}, "
+        f"{density_g_per_ml:.6f}, {target_pressure_bar:.6f}, "
+        f"{instantaneous_pressure_bar:.6f}, "
+        f"{rmsd_nm:.6f}, {rg_nm:.6f}, {wall_time_s:.3f}",
+        flush=True,
+    )
 
     while steps_remaining > 0:
         try:
@@ -761,14 +1366,49 @@ print(f"Elapsed time: {elapsed_time:.6f} seconds")
 filename = f'final-{production_nsteps * 0.002}ps.pdb'  # Format to one decimal place
 save_imaged_pdb(simulation,"equilibrated_with_NVT+NPT.pdb")
 
-# Note: to ouput a parmtop file, use ParMed - which requires a conversion to non-rigid Water
-#       Reason: PDB files are often used to provide a topology file to MDTraj.
-#           However, it would seem that when the list of residues is long (e.g. water box) PDB file limits imprede.
-tmpSystem = forcefield.createSystem (simulation.topology, rigidWater=False)
-positions = simulation.context.getState(getPositions=True).getPositions()   # update to remove enforcePeriodicBox=True
-structure = pmd.openmm.topsystem.load_topology(simulation.topology, system=tmpSystem, xyz=positions)
-structure.save("output.prmtop", format="amber") 
-structure.save("output.inpcrd", format="rst7") 
+# Write a companion AMBER topology/restart for the final coordinates.  For the
+# direct parm7 path, preserve the original concrete AMBER parameterization
+# instead of round-tripping the OpenMM System back through ParmEd.
+if skip_waterbox:
+    final_output_state = simulation.context.getState(
+        getPositions=True,
+        enforcePeriodicBox=False,
+    )
+    prmtop.coordinates = final_output_state.getPositions(asNumpy=True).value_in_unit(
+        unit.angstrom
+    )
+
+    final_box_nm = final_output_state.getPeriodicBoxVectors(
+        asNumpy=True
+    ).value_in_unit(unit.nanometer)
+    box_lengths_nm = [np.linalg.norm(vector) for vector in final_box_nm]
+
+    def box_angle_degrees(vector1, vector2):
+        cosine = np.dot(vector1, vector2) / (
+            np.linalg.norm(vector1) * np.linalg.norm(vector2)
+        )
+        return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
+
+    prmtop.box = [
+        10.0 * box_lengths_nm[0],
+        10.0 * box_lengths_nm[1],
+        10.0 * box_lengths_nm[2],
+        box_angle_degrees(final_box_nm[1], final_box_nm[2]),
+        box_angle_degrees(final_box_nm[0], final_box_nm[2]),
+        box_angle_degrees(final_box_nm[0], final_box_nm[1]),
+    ]
+    prmtop.write_parm("output.prmtop")
+    prmtop.write_rst7("output.inpcrd", netcdf=False)
+else:
+    tmpSystem = forcefield.createSystem(simulation.topology, rigidWater=False)
+    positions = simulation.context.getState(getPositions=True).getPositions()
+    structure = pmd.openmm.topsystem.load_topology(
+        simulation.topology,
+        system=tmpSystem,
+        xyz=positions,
+    )
+    structure.save("output.prmtop", format="amber")
+    structure.save("output.inpcrd", format="rst7")
 
 summary_state = simulation.context.getState(getEnergy=True, enforcePeriodicBox=True)
 summary_values = {

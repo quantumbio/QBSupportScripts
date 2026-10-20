@@ -24,8 +24,11 @@ Analyses Performed
 11. DCCM heatmaps (Cα-only) for each structure            → *_dccm_ca_LABEL.pdf
 12. Differential DCCM (Δ-correlation matrix)              → *_dccm_delta.pdf
 13. Ligand–loop DCCM correlation summary                  → *_dccm_ligand_loop_residue.pdf
-14. OUT.gz trajectory summaries (if provided)             → printed to screen
-    - Includes: number of steps, simulated ps, average energy & temperature, drift
+14. MD output/screenout validation (if provided)            → printed / PDFs / JSON
+    - Auto-detects Python/OpenMM, DivCon/C++/OpenMM, or legacy three-column output
+    - Compares system construction, energy decomposition, protocol, and thermodynamics
+    - If OpenMM XmlSerializer files are beside the MD logs, compares the serialized
+      System, Integrator, and initial State semantically
 15. Ligand Analyses (if `--ligand` is specified):
     a. Ligand RMSD vs. time                               → *_ligand_rmsd.pdf
     b. Ligand SASA vs. time                               → *_ligand_sasa.pdf
@@ -64,16 +67,18 @@ Top-level fields include:
   - dssp_diff: residue-wise secondary structure disagreements (>50% occupancy)
   - dccm_overall: DCCM correlations and Δ-correlation highlights
   - ligand: (if applicable) ligand RMSD, RMSF, SASA, H-bonds, contact fingerprint, and DCCM
-  - out1_summary / out2_summary: thermodynamic summaries parsed from OUT.gz logs
+  - out1_summary / out2_summary: backwards-compatible thermodynamic summaries
+  - openmm_validation: normalized MD-log data plus system, energy, protocol, production, and
+    optional serialized OpenMM System/Integrator/State comparisons
 
 Usage Examples
 --------------
 Basic:
     python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz
 
-With OUT.gz simulation logs:
+With MD screenout/log files (plain text or gzip-compressed):
     python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz \
-        --out1 OUT1.gz --out2 OUT2.gz
+        --out1 run1/md.screenout.gz --out2 run2/md.screenout
 
 With ligand analysis (resname e.g. CBN):
     python analysisMD.py traj1.dcd.gz top1.prmtop.gz traj2.dcd.gz top2.prmtop.gz \
@@ -118,11 +123,14 @@ from __future__ import annotations
 # ─── Standard Library ────────────────────────────────────────────────────────
 import argparse
 import gzip
+import heapq
+import hashlib
 import shutil
 import csv
 import logging
 import re
 import tempfile
+from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple
 import json
@@ -138,6 +146,13 @@ from Bio.Align import PairwiseAligner
 from Bio.Data import IUPACData
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
+
+try:
+    import openmm as mm
+    from openmm import unit as openmm_unit
+except ImportError:
+    mm = None
+    openmm_unit = None
 
 # ─────────────────────────────  CONFIG  ──────────────────────────────────────
 residue_mapping = {             # standard 3‑letter + Amber variants
@@ -173,13 +188,26 @@ CONFIG = {
 
     # Additional trajectory-only validation.  These metrics compare structural
     # behavior derived from the trajectories themselves; they do not depend on
-    # OUT.gz/screen output and therefore remain useful when the two simulations
+    # MD output/screen output and therefore remain useful when the two simulations
     # were run with different hardware, random seeds, or solvent realizations.
     "trajectory_validation": {
         "stability_fraction": 0.25,        # compare first/last 25% of each trajectory
         "top_n_rmsf_differences": 10,
         "top_n_distance_differences": 10,
         "distance_pair_chunk_size": 5000   # bound temporary memory for large proteins
+    },
+
+    # Semantic comparison of OpenMM XmlSerializer output.  These tolerances are
+    # intentionally tight: the XML files describe the actual OpenMM objects, not
+    # noisy trajectory observables.  Larger differences should be surfaced for
+    # inspection rather than silently accepted.
+    "openmm_xml_validation": {
+        "absolute_tolerance": 1.0e-10,
+        "relative_tolerance": 1.0e-10,
+        "position_tolerance_nm": 1.0e-7,
+        "energy_tolerance_kj_per_mol": 1.0e-6,
+        "constraint_geometry_thresholds_nm": (1.0e-6, 1.0e-5, 1.0e-4),
+        "top_n_differences": 10
     },
 
     "plot": {
@@ -341,63 +369,3060 @@ def res_label(res_or_atom):
     chain = chr(65 + res.chain.index)
     return f"{chain}:{res.name}{res.resSeq}"
     
-def parse_out_file(out_gz_path: Path):
-    """
-    Parse OUT.gz file for energy and temperature summary.
-    """
-    steps, energies, temps = [], [], []
+_FLOAT_RE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 
+
+def open_text_auto(path: Path):
+    """Open a plain-text or gzip-compressed log by inspecting its file signature."""
+    path = Path(path)
+    with open(path, "rb") as probe:
+        is_gzip = probe.read(2) == b"\x1f\x8b"
+    if is_gzip:
+        return gzip.open(path, "rt", errors="replace")
+    return open(path, "rt", errors="replace")
+
+
+def _finite_float(value):
+    """Convert a numeric token to float, representing NaN/Inf as None for valid JSON."""
     try:
-        with gzip.open(out_gz_path, 'rt') as fh:
-            for line in fh:
-                if line.strip().startswith('#') or not line.strip():
-                    continue
-                parts = line.strip().split(',')
-                if len(parts) == 3 and parts[0].strip().isdigit():
-                    try:
-                        steps.append(int(parts[0]))
-                        energies.append(float(parts[1]))
-                        temps.append(float(parts[2]))
-                    except ValueError:
-                        continue
-    except Exception as e:
-        logging.warning("Failed to parse OUT.gz: %s", e)
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if np.isfinite(parsed) else None
+
+
+def _parse_bool(value: str):
+    value = value.strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
+def _first_match(text: str, pattern: str, cast=float, flags=0):
+    match = re.search(pattern, text, flags)
+    if not match:
+        return None
+    try:
+        return cast(match.group(1))
+    except (TypeError, ValueError):
         return None
 
-    if not steps:
+
+def _first_box(text: str, pattern: str):
+    match = re.search(pattern, text)
+    if not match:
         return None
+    values = re.findall(_FLOAT_RE, match.group(1))
+    if len(values) < 3:
+        return None
+    return [float(v) for v in values[:3]]
 
-    interval = steps[1] - steps[0] if len(steps) > 1 else 1000
-    total_ps = steps[-1] * (interval / 1000)
 
-    return {
-        "n_steps": len(steps),
-        "total_ps": total_ps,
-        "avg_energy": np.mean(energies),
-        "std_energy": np.std(energies),
-        "avg_temp": np.mean(temps),
-        "std_temp": np.std(temps)
+def _parse_energy_decompositions(lines: list[str]) -> dict:
+    sections = {}
+    key_map = {
+        "Bond": "bond",
+        "Angle": "angle",
+        "Torsion": "torsion",
+        "Nonbonded": "nonbonded",
+        "4-part sum": "four_part_sum",
+        "Total": "total",
+        "Residual": "residual"
     }
 
-def print_sim_summary(label: str, data: dict):
+    for i, line in enumerate(lines):
+        header = re.search(
+            r"OpenMM energy decomposition - (initial|post-minimization) \(kJ/mol\):",
+            line,
+            re.IGNORECASE
+        )
+        if not header:
+            continue
+
+        section_name = header.group(1).lower().replace("-", "_")
+        values = {}
+        for candidate in lines[i + 1:i + 10]:
+            cleaned = re.sub(r"^\s*\[DEBUG\]\s*", "", candidate).strip()
+            match = re.match(
+                rf"(Bond|Angle|Torsion|Nonbonded|4-part sum|Total|Residual)\s*:\s*({_FLOAT_RE})",
+                cleaned
+            )
+            if match:
+                values[key_map[match.group(1)]] = float(match.group(2))
+        if values:
+            sections[section_name] = values
+
+    return sections
+
+
+def _parse_representative_particles(text: str) -> dict:
+    particles = {}
+    pattern = re.compile(
+        rf"index=\s*(\d+)\s+(\S+)\s+DivConType=(\S+)\s+"
+        rf"DivConQ=({_FLOAT_RE})\s+OpenMMQ=({_FLOAT_RE})\s+"
+        rf"sigma=({_FLOAT_RE})\s+nm\s+epsilon=({_FLOAT_RE})\s+kJ/mol"
+    )
+
+    for match in pattern.finditer(text):
+        index, identity, divcon_type, divcon_q, openmm_q, sigma, epsilon = match.groups()
+        identity_upper = identity.upper()
+        type_upper = divcon_type.upper()
+
+        if identity_upper in {"HOH:O", "WAT:O"}:
+            role = "water_o"
+        elif identity_upper in {"HOH:H1", "WAT:H1"}:
+            role = "water_h1"
+        elif identity_upper in {"HOH:H2", "WAT:H2"}:
+            role = "water_h2"
+        elif identity_upper.startswith("NA:") or type_upper == "NA+":
+            role = "sodium"
+        elif identity_upper.startswith("CL:") or type_upper == "CL-":
+            role = "chloride"
+        else:
+            continue
+
+        particles[role] = {
+            "index": int(index),
+            "identity": identity,
+            "divcon_type": divcon_type,
+            "divcon_charge_e": float(divcon_q),
+            "openmm_charge_e": float(openmm_q),
+            "sigma_nm": float(sigma),
+            "epsilon_kj_per_mol": float(epsilon)
+        }
+
+    return particles
+
+
+def _parse_water_constraints(lines: list[str]) -> list[dict]:
+    constraints = []
+    in_section = False
+    for line in lines:
+        if "Representative water constraints:" in line:
+            in_section = True
+            continue
+        if not in_section:
+            continue
+
+        cleaned = re.sub(r"^\s*\[DEBUG\]\s*", "", line).strip()
+        match = re.match(rf"(\d+)-(\d+)\s*:\s*({_FLOAT_RE})\s+nm$", cleaned)
+        if match:
+            constraints.append({
+                "particle1": int(match.group(1)),
+                "particle2": int(match.group(2)),
+                "distance_nm": float(match.group(3))
+            })
+            continue
+
+        if constraints:
+            break
+
+    return constraints
+
+
+def _parse_python_production(lines: list[str]) -> list[dict]:
+    rows = []
+    in_table = False
+
+    for line in lines:
+        if line.startswith("Production metrics (step,"):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if rows and (line.startswith("Elapsed time:") or line.startswith("Simulation summary:")):
+            break
+
+        parts = [part.strip() for part in line.strip().split(",")]
+        if len(parts) != 11 or not parts[0].isdigit():
+            continue
+
+        rows.append({
+            "step": int(parts[0]),
+            "time_ps": None,
+            "potential_energy_kj_per_mol": _finite_float(parts[1]),
+            "kinetic_energy_kj_per_mol": _finite_float(parts[2]),
+            "temperature_k": _finite_float(parts[3]),
+            "volume_nm3": _finite_float(parts[4]),
+            "density_g_per_ml": _finite_float(parts[5]),
+            "target_pressure_bar": _finite_float(parts[6]),
+            "instantaneous_pressure_bar": _finite_float(parts[7]),
+            "wall_time_s": _finite_float(parts[10])
+        })
+
+    return rows
+
+
+def _parse_cpp_production(lines: list[str]) -> list[dict]:
+    rows = []
+    in_table = False
+
+    for line in lines:
+        if "Steps" in line and "PE(kcal/mol)" in line and "Vol(A^3)" in line:
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if "OpenMM Molecular Dynamics Summary" in line:
+            break
+
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) < 9 or not parts[0].isdigit():
+            continue
+
+        pe_kcal = _finite_float(parts[2])
+        ke_kcal = _finite_float(parts[3])
+        volume_a3 = _finite_float(parts[5])
+        rows.append({
+            "step": int(parts[0]),
+            "time_ps": _finite_float(parts[1]),
+            "potential_energy_kj_per_mol": pe_kcal * 4.184 if pe_kcal is not None else None,
+            "kinetic_energy_kj_per_mol": ke_kcal * 4.184 if ke_kcal is not None else None,
+            "temperature_k": _finite_float(parts[4]),
+            "volume_nm3": volume_a3 / 1000.0 if volume_a3 is not None else None,
+            "density_g_per_ml": _finite_float(parts[6]),
+            "target_pressure_bar": None,
+            "instantaneous_pressure_bar": None,
+            "wall_time_s": None
+        })
+
+    return rows
+
+
+def _parse_legacy_production(lines: list[str]) -> list[dict]:
+    """Retain support for the older three-column step,energy,temp OUT format."""
+    rows = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = [part.strip() for part in stripped.split(",")]
+        if len(parts) != 3 or not parts[0].isdigit():
+            continue
+
+        energy = _finite_float(parts[1])
+        temperature = _finite_float(parts[2])
+        if energy is None or temperature is None:
+            continue
+        rows.append({
+            "step": int(parts[0]),
+            "time_ps": None,
+            "potential_energy_kj_per_mol": energy,
+            "kinetic_energy_kj_per_mol": None,
+            "temperature_k": temperature,
+            "volume_nm3": None,
+            "density_g_per_ml": None,
+            "target_pressure_bar": None,
+            "instantaneous_pressure_bar": None,
+            "wall_time_s": None
+        })
+    return rows
+
+
+def _parse_wall_time_hms(value: str):
+    """Convert HH:MM:SS wall-time text to seconds."""
+    match = re.fullmatch(r"\s*(\d+):(\d+):(\d+(?:\.\d+)?)\s*", value)
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return 3600.0 * int(hours) + 60.0 * int(minutes) + float(seconds)
+
+
+def _finalize_timing(timing: dict) -> None:
+    """Add derived timing fields without inventing missing stage timings."""
+    stage_fields = (
+        "minimization_wall_time_s",
+        "nvt_equilibration_wall_time_s",
+        "npt_equilibration_wall_time_s",
+        "production_wall_time_s",
+    )
+    stage_values = [timing.get(field) for field in stage_fields]
+    if all(value is not None for value in stage_values):
+        timing["timed_md_stages_wall_time_s"] = float(sum(stage_values))
+
+    production = timing.get("production_wall_time_s")
+    total = timing.get("total_execution_wall_time_s")
+    if production is not None and total is not None and total > 0.0:
+        timing["non_production_execution_wall_time_s"] = float(total - production)
+        timing["production_fraction_of_total_percent"] = float(100.0 * production / total)
+
+    timed_md = timing.get("timed_md_stages_wall_time_s")
+    if timed_md is not None and total is not None and total > 0.0:
+        timing["non_timed_md_execution_wall_time_s"] = float(total - timed_md)
+        timing["timed_md_fraction_of_total_percent"] = float(100.0 * timed_md / total)
+
+
+def _parse_python_timing(text: str) -> dict:
+    """Parse wall-clock timings emitted by runMD-fromDivCon.py."""
+    timing = {}
+    stage_patterns = {
+        "minimization_wall_time_s": (
+            rf"Minimizing with OpenMM:.*?Post-minimization Potential Energy:.*?"
+            rf"Elapsed time:\s*({_FLOAT_RE})\s+seconds"
+        ),
+        "nvt_equilibration_wall_time_s": (
+            rf"Equilibrating \(NVT\).*?Elapsed time:\s*({_FLOAT_RE})\s+seconds"
+        ),
+        "npt_equilibration_wall_time_s": (
+            rf"Equilibrating \(NPT\).*?Elapsed time:\s*({_FLOAT_RE})\s+seconds"
+        ),
+        "production_wall_time_s": (
+            rf"Running Production NPT Simulation.*?Elapsed time:\s*({_FLOAT_RE})\s+seconds"
+        ),
+    }
+    for field, pattern in stage_patterns.items():
+        value = _first_match(text, pattern, float, re.DOTALL)
+        if value is not None:
+            timing[field] = value
+
+    # Prefer the explicit production summary if present.  It is the same timer
+    # used for the production table and is not the total Python process runtime.
+    summary_wall_time = _first_match(text, rf"^\s*wall_time_s:\s*({_FLOAT_RE})", float, re.MULTILINE)
+    if summary_wall_time is not None:
+        timing["production_wall_time_s"] = summary_wall_time
+
+    # Current Python logs do not emit a whole-process timer, but accept one if
+    # future versions add it.  Do not substitute the sum of stage timers: that
+    # would omit setup, force-field construction, and output work.
+    total = _first_match(
+        text,
+        rf"(?:Total Computation Time \(Seconds\):|Total execution time(?: \(seconds\))?:)\s*({_FLOAT_RE})",
+        float,
+        re.IGNORECASE,
+    )
+    if total is not None:
+        timing["total_execution_wall_time_s"] = total
+
+    _finalize_timing(timing)
+    return timing
+
+
+def _parse_cpp_timing(text: str) -> dict:
+    """Parse wall-clock timings emitted by the DivCon/OpenMM MD path."""
+    timing = {}
+
+    minimization = _first_match(
+        text, rf"\[MD\]\s+Minimization time:\s*({_FLOAT_RE})\s+seconds", float
+    )
+    if minimization is not None:
+        timing["minimization_wall_time_s"] = minimization
+
+    nvt_time = _first_match(
+        text, rf"\[MD\]\s+NVT equilibration time:\s*({_FLOAT_RE})\s+seconds", float
+    )
+    if nvt_time is not None:
+        timing["nvt_equilibration_wall_time_s"] = nvt_time
+
+    npt_time = _first_match(
+        text, rf"\[MD\]\s+NPT equilibration time:\s*({_FLOAT_RE})\s+seconds", float
+    )
+    if npt_time is None:
+        npt_time = _first_match(text, rf"NPT time:\s*({_FLOAT_RE})", float)
+    if npt_time is not None:
+        timing["npt_equilibration_wall_time_s"] = npt_time
+
+    production = _first_match(
+        text, rf"Production total time:\s*({_FLOAT_RE})\s+seconds", float
+    )
+    if production is None:
+        formatted = _first_match(
+            text, r"Elapsed wall time\s*:\s*(\d+:\d+:\d+(?:\.\d+)?)", str
+        )
+        if formatted is not None:
+            production = _parse_wall_time_hms(formatted)
+    if production is not None:
+        timing["production_wall_time_s"] = production
+
+    timed_stages = _first_match(
+        text, rf"\[MD\]\s+Timed MD stages total:\s*({_FLOAT_RE})\s+seconds", float
+    )
+    if timed_stages is not None:
+        timing["timed_md_stages_wall_time_s"] = timed_stages
+
+    total = _first_match(
+        text, rf"Total Computation Time \(Seconds\):\s*({_FLOAT_RE})", float
+    )
+    if total is not None:
+        timing["total_execution_wall_time_s"] = total
+
+    _finalize_timing(timing)
+    return timing
+
+
+def _parse_md_seed_protocol(text: str) -> dict:
+    """Parse deterministic/automatic OpenMM random-seed reporting."""
+    protocol = {}
+
+    seed_mode = _first_match(
+        text, r"\[MD\]\s+Random seed mode:\s*(deterministic|automatic)", str, re.IGNORECASE
+    )
+    if seed_mode is not None:
+        protocol["random_seed_mode"] = seed_mode.lower()
+
+    for field, pattern in (
+        ("random_seed", r"\[MD\]\s+Random seed:\s*(-?\d+)"),
+        ("integrator_random_seed", r"\[MD\]\s+Langevin integrator seed:\s*(-?\d+)"),
+        ("velocity_random_seed", r"\[MD\]\s+Velocity initialization seed:\s*(-?\d+)"),
+        ("barostat_random_seed", r"\[MD\]\s+MonteCarloBarostat seed:\s*(-?\d+)"),
+    ):
+        value = _first_match(text, pattern, int)
+        if value is not None:
+            protocol[field] = value
+
+    return protocol
+
+
+def _infer_production_timing(protocol: dict, production: list[dict]) -> None:
+    steps = sorted({row["step"] for row in production})
+    positive_diffs = [b - a for a, b in zip(steps, steps[1:]) if b > a]
+    if positive_diffs and len(set(positive_diffs)) == 1 and "production_report_interval_steps" not in protocol:
+        protocol["production_report_interval_steps"] = positive_diffs[0]
+        protocol["production_report_interval_source"] = "inferred_from_production_rows"
+
+    duration = protocol.get("production_duration_ps")
+    nsteps = protocol.get("production_steps")
+    if duration is not None and nsteps:
+        protocol["timestep_ps"] = float(duration) / float(nsteps)
+        protocol["timestep_source"] = "inferred_from_reported_production_duration"
+        for row in production:
+            if row.get("time_ps") is None:
+                row["time_ps"] = float(row["step"]) * protocol["timestep_ps"]
+
+
+def parse_out_file(out_path: Path):
+    """
+    Parse a Python/OpenMM, DivCon/C++/OpenMM, or legacy MD output file.
+
+    Input may be plain text or gzip-compressed. Returned values use a normalized
+    representation so output 1 and output 2 can be compared independent of which
+    implementation produced them.
+    """
+    try:
+        with open_text_auto(out_path) as fh:
+            text = fh.read()
+    except Exception as exc:
+        logging.warning("Failed to read MD output %s: %s", out_path, exc)
+        return None
+
+    lines = text.splitlines()
+    if "Production metrics (step," in text or "OpenMM execution platform:" in text:
+        implementation = "python_openmm"
+    elif "[DEBUG] OpenMM force/nonbonded configuration:" in text or "OpenMM Molecular Dynamics Summary" in text:
+        implementation = "cpp_openmm"
+    else:
+        implementation = "legacy_or_unknown"
+
+    data = {
+        "source": str(out_path),
+        "implementation": implementation,
+        "system": {},
+        "protocol": {},
+        "representative_particles": _parse_representative_particles(text),
+        "representative_water_constraints": _parse_water_constraints(lines),
+        "energy_decomposition_kj_per_mol": _parse_energy_decompositions(lines),
+        "equilibration": {},
+        "production": [],
+        "timing": {}
+    }
+    system = data["system"]
+    protocol = data["protocol"]
+
+    if implementation == "python_openmm":
+        system["platform"] = _first_match(text, r"OpenMM execution platform:\s*(\S+)", str)
+        system["particles"] = _first_match(text, r"OpenMM particles:\s*(\d+)", int)
+        system["constraints"] = _first_match(text, r"OpenMM constraints:\s*(\d+)", int)
+        system["nonbonded_particles"] = _first_match(text, r"nonbonded particles\s*:\s*(\d+)", int)
+        system["nonbonded_exceptions"] = _first_match(text, r"nonbonded exceptions\s*:\s*(\d+)", int)
+        system["water_particles"] = _first_match(text, r"DivCon water particles aligned:\s*(\d+)", int)
+        system["total_particle_charge_e"] = _first_match(
+            text, rf"total particle charge \(e\):\s*({_FLOAT_RE})"
+        )
+        system["nonbonded_method"] = _first_match(text, r"^\s*method\s*:\s*(\S+)", str, re.MULTILINE)
+        system["cutoff_nm"] = _first_match(text, rf"cutoff \(nm\)\s*:\s*({_FLOAT_RE})")
+        system["ewald_error_tolerance"] = _first_match(
+            text, rf"Ewald error tolerance\s*:\s*({_FLOAT_RE})"
+        )
+        dispersion = _first_match(text, r"dispersion correction\s*:\s*(True|False)", str, re.IGNORECASE)
+        switching = _first_match(text, r"switching function\s*:\s*(True|False)", str, re.IGNORECASE)
+        system["dispersion_correction"] = _parse_bool(dispersion) if dispersion is not None else None
+        system["switching_function"] = _parse_bool(switching) if switching is not None else None
+        system["initial_box_nm"] = _first_box(text, r"OpenMM initial box \(nm\):\s*\[([^\]]+)\]")
+
+        protocol["minimization_limit"] = _first_match(
+            text, r"Minimization step override:\s*(\d+)\s+maximum iterations", int
+        )
+        if protocol["minimization_limit"] is not None:
+            protocol["minimization_limit_kind"] = "max_iterations"
+        equil_steps = _first_match(
+            text, r"Equilibration step override:\s*(\d+)\s+steps for both NVT and NPT", int
+        )
+        if equil_steps is not None:
+            protocol["nvt_steps"] = equil_steps
+            protocol["npt_steps"] = equil_steps
+        protocol["production_steps"] = _first_match(
+            text, r"Production step override:\s*(\d+)\s+steps", int
+        )
+        protocol["production_report_interval_steps"] = _first_match(
+            text, r"Production report interval override:\s*(\d+)\s+steps", int
+        )
+        if protocol["production_report_interval_steps"] is not None:
+            protocol["production_report_interval_source"] = "reported"
+        protocol["production_duration_ps"] = _first_match(
+            text, rf"Running Production NPT Simulation -\s*({_FLOAT_RE})\s+ps"
+        )
+        protocol.update(_parse_md_seed_protocol(text))
+
+        data["production"] = _parse_python_production(lines)
+        pressures = {
+            row["target_pressure_bar"] for row in data["production"]
+            if row["target_pressure_bar"] is not None
+        }
+        if len(pressures) == 1:
+            protocol["target_pressure_bar"] = next(iter(pressures))
+        data["timing"] = _parse_python_timing(text)
+
+    elif implementation == "cpp_openmm":
+        system["particles"] = _first_match(
+            text, r"^\[DEBUG\]\s+particles\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["constraints"] = _first_match(
+            text, r"^\[DEBUG\]\s+constraints\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["harmonic_bonds"] = _first_match(
+            text, r"^\[DEBUG\]\s+harmonic bonds\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["harmonic_angles"] = _first_match(
+            text, r"^\[DEBUG\]\s+harmonic angles\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["periodic_torsions"] = _first_match(
+            text, r"^\[DEBUG\]\s+periodic torsions\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["nonbonded_particles"] = _first_match(
+            text, r"^\[DEBUG\]\s+nonbonded particles\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["nonbonded_exceptions"] = _first_match(
+            text, r"^\[DEBUG\]\s+nonbonded exceptions\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["zero_energy_exceptions"] = _first_match(
+            text, r"^\[DEBUG\]\s+zero-energy\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["nonzero_energy_exceptions"] = _first_match(
+            text, r"^\[DEBUG\]\s+nonzero-energy\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["water_molecules"] = _first_match(
+            text, r"^\[DEBUG\]\s+water molecules\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["water_particles"] = _first_match(
+            text, r"^\[DEBUG\]\s+water particles\s*:\s*(\d+)", int, re.MULTILINE
+        )
+        system["total_particle_charge_e"] = _first_match(
+            text, rf"^\[DEBUG\]\s+total particle charge\s*:\s*({_FLOAT_RE})\s+e", float, re.MULTILINE
+        )
+        system["nonbonded_method"] = _first_match(
+            text, r"^\[DEBUG\]\s+nonbonded method\s*:\s*([^\s(]+)", str, re.MULTILINE
+        )
+        system["cutoff_nm"] = _first_match(
+            text, rf"^\[DEBUG\]\s+cutoff \(nm\)\s*:\s*({_FLOAT_RE})", float, re.MULTILINE
+        )
+        system["ewald_error_tolerance"] = _first_match(
+            text, rf"^\[DEBUG\]\s+Ewald error tolerance\s*:\s*({_FLOAT_RE})", float, re.MULTILINE
+        )
+        dispersion = _first_match(
+            text, r"^\[DEBUG\]\s+dispersion correction\s*:\s*(true|false)", str,
+            re.MULTILINE | re.IGNORECASE
+        )
+        switching = _first_match(
+            text, r"^\[DEBUG\]\s+switching function\s*:\s*(true|false)", str,
+            re.MULTILINE | re.IGNORECASE
+        )
+        system["dispersion_correction"] = _parse_bool(dispersion) if dispersion is not None else None
+        system["switching_function"] = _parse_bool(switching) if switching is not None else None
+        system["initial_box_nm"] = _first_box(text, r"mdSwitches\.periodicBox:\s*([^\n]+)")
+
+        protocol["minimization_limit"] = _first_match(
+            text, r"\[MD\] Minimizing before equilibration for\s*(\d+)\s+steps", int
+        )
+        if protocol["minimization_limit"] is not None:
+            protocol["minimization_limit_kind"] = "reported_steps"
+        nvt_match = re.search(
+            rf"\[MD\] Starting NVT equilibration for\s*(\d+)\s+steps at\s*({_FLOAT_RE})\s+K",
+            text
+        )
+        if nvt_match:
+            protocol["nvt_steps"] = int(nvt_match.group(1))
+            protocol["target_temperature_k"] = float(nvt_match.group(2))
+        npt_match = re.search(
+            rf"\[MD\] Starting NPT equilibration for\s*(\d+)\s+steps at\s*({_FLOAT_RE})\s+K "
+            rf"and\s*({_FLOAT_RE})\s+bar",
+            text
+        )
+        if npt_match:
+            protocol["npt_steps"] = int(npt_match.group(1))
+            protocol["target_temperature_k"] = float(npt_match.group(2))
+            protocol["target_pressure_bar"] = float(npt_match.group(3))
+        production_match = re.search(
+            rf"\[MD\] Starting production MD for\s*(\d+)\s+steps\s*\(({_FLOAT_RE})\s+ps\)",
+            text
+        )
+        if production_match:
+            protocol["production_steps"] = int(production_match.group(1))
+            protocol["production_duration_ps"] = float(production_match.group(2))
+        protocol.update(_parse_md_seed_protocol(text))
+
+        nvt_energy = _first_match(
+            text, rf"\[MD\] NVT equilibration done\. Potential Energy:\s*({_FLOAT_RE})"
+        )
+        if nvt_energy is not None:
+            data["equilibration"]["nvt"] = {"potential_energy_kj_per_mol": nvt_energy}
+        npt_done = re.search(
+            rf"\[MD\] NPT equilibration done\. Potential Energy:\s*({_FLOAT_RE}).*?"
+            rf"\[MD\] Final box after NPT equilibration \(nm\):\s*"
+            rf"({_FLOAT_RE})\s+({_FLOAT_RE})\s+({_FLOAT_RE})\s+"
+            rf"Volume\(nm\^3\):\s*({_FLOAT_RE})\s+density \(g/ml\):\s*({_FLOAT_RE})\s+T:\s*({_FLOAT_RE})",
+            text,
+            re.DOTALL
+        )
+        if npt_done:
+            data["equilibration"]["npt"] = {
+                "potential_energy_kj_per_mol": float(npt_done.group(1)),
+                "box_nm": [float(npt_done.group(i)) for i in (2, 3, 4)],
+                "volume_nm3": float(npt_done.group(5)),
+                "density_g_per_ml": float(npt_done.group(6)),
+                "temperature_k": float(npt_done.group(7))
+            }
+
+        data["production"] = _parse_cpp_production(lines)
+        data["timing"] = _parse_cpp_timing(text)
+
+    else:
+        data["production"] = _parse_legacy_production(lines)
+        if data["production"]:
+            data["implementation"] = "legacy_three_column"
+        else:
+            logging.warning("No recognized MD data found in %s", out_path)
+            return None
+
+    initial_pe = _first_match(
+        text, rf"(?:OpenMM initial potential energy \(kJ/mol\):|\[DEBUG\] Initial Potential Energy:)\s*({_FLOAT_RE})",
+        float,
+        re.IGNORECASE
+    )
+    if initial_pe is not None:
+        data["initial_potential_energy_kj_per_mol"] = initial_pe
+
+    post_min_pe = _first_match(
+        text, rf"(?:Post-minimization Potential Energy:|\[MD\] Post-minimization Potential Energy:)\s*({_FLOAT_RE})",
+        float
+    )
+    if post_min_pe is not None:
+        data["post_minimization_potential_energy_kj_per_mol"] = post_min_pe
+
+    _infer_production_timing(protocol, data["production"])
+    return data
+
+
+def _symmetric_relative_difference_percent(value1, value2, signed=False):
+    """Symmetric percentage difference; unlike percent-vs-input2 it is invariant to input order."""
+    if value1 is None or value2 is None:
+        return None
+    denominator = abs(value1) + abs(value2)
+    if denominator <= 1.0e-15:
+        return 0.0 if value1 == value2 else None
+    numerator = 2.0 * (value1 - value2)
+    result = 100.0 * numerator / denominator
+    return result if signed else abs(result)
+
+
+def _numeric_comparison(value1, value2) -> dict:
+    delta = float(value1 - value2)
+    return {
+        "input1": float(value1),
+        "input2": float(value2),
+        "delta_input1_minus_input2": delta,
+        "absolute_difference": abs(delta),
+        "symmetric_relative_difference_percent": _symmetric_relative_difference_percent(value1, value2)
+    }
+
+
+def _compare_mapping(mapping1: dict, mapping2: dict, fields: list[str]) -> dict:
+    comparison = {}
+    for field in fields:
+        value1 = mapping1.get(field)
+        value2 = mapping2.get(field)
+        if value1 is None or value2 is None:
+            continue
+
+        if isinstance(value1, bool) or isinstance(value1, str) or isinstance(value1, int):
+            comparison[field] = {
+                "input1": value1,
+                "input2": value2,
+                "match": value1 == value2
+            }
+        elif isinstance(value1, (float, np.floating)) and isinstance(value2, (float, np.floating)):
+            comparison[field] = _numeric_comparison(value1, value2)
+        elif isinstance(value1, list) and isinstance(value2, list) and len(value1) == len(value2):
+            array1 = np.asarray(value1, dtype=float)
+            array2 = np.asarray(value2, dtype=float)
+            delta = array1 - array2
+            comparison[field] = {
+                "input1": [float(v) for v in array1],
+                "input2": [float(v) for v in array2],
+                "delta_input1_minus_input2": [float(v) for v in delta],
+                "max_absolute_difference": float(np.max(np.abs(delta))),
+                "rmse_difference": float(np.sqrt(np.mean(delta * delta)))
+            }
+
+    return comparison
+
+
+def _compare_energy_sections(data1: dict, data2: dict) -> dict:
+    result = {}
+    sections1 = data1.get("energy_decomposition_kj_per_mol", {})
+    sections2 = data2.get("energy_decomposition_kj_per_mol", {})
+
+    for section_name in ("initial", "post_minimization"):
+        values1 = sections1.get(section_name)
+        values2 = sections2.get(section_name)
+        if not values1 or not values2:
+            continue
+
+        section = {}
+        for component in ("bond", "angle", "torsion", "nonbonded", "four_part_sum", "total", "residual"):
+            if component in values1 and component in values2:
+                section[component] = _numeric_comparison(values1[component], values2[component])
+        result[section_name] = section
+
+    return result
+
+
+def _compare_representative_particles(data1: dict, data2: dict) -> dict:
+    result = {}
+    particles1 = data1.get("representative_particles", {})
+    particles2 = data2.get("representative_particles", {})
+
+    for role in ("water_o", "water_h1", "water_h2", "sodium", "chloride"):
+        p1 = particles1.get(role)
+        p2 = particles2.get(role)
+        if not p1 or not p2:
+            continue
+
+        result[role] = {
+            "index": {"input1": p1["index"], "input2": p2["index"], "match": p1["index"] == p2["index"]},
+            "divcon_type": {
+                "input1": p1["divcon_type"],
+                "input2": p2["divcon_type"],
+                "match": p1["divcon_type"] == p2["divcon_type"]
+            },
+            "openmm_charge_e": _numeric_comparison(p1["openmm_charge_e"], p2["openmm_charge_e"]),
+            "sigma_nm": _numeric_comparison(p1["sigma_nm"], p2["sigma_nm"]),
+            "epsilon_kj_per_mol": _numeric_comparison(
+                p1["epsilon_kj_per_mol"], p2["epsilon_kj_per_mol"]
+            )
+        }
+
+    return result
+
+
+def _compare_water_constraints(data1: dict, data2: dict) -> dict:
+    distances1 = sorted(
+        item["distance_nm"] for item in data1.get("representative_water_constraints", [])
+    )
+    distances2 = sorted(
+        item["distance_nm"] for item in data2.get("representative_water_constraints", [])
+    )
+    if not distances1 or len(distances1) != len(distances2):
+        return {}
+
+    return {
+        "n_constraints": len(distances1),
+        "sorted_distance_comparisons_nm": [
+            _numeric_comparison(value1, value2)
+            for value1, value2 in zip(distances1, distances2)
+        ],
+        "max_absolute_distance_difference_nm": float(
+            np.max(np.abs(np.asarray(distances1) - np.asarray(distances2)))
+        )
+    }
+
+
+def _production_rows_by_step(data: dict) -> dict[int, dict]:
+    return {int(row["step"]): row for row in data.get("production", [])}
+
+
+def _production_observable_stats(values1: np.ndarray, values2: np.ndarray) -> dict:
+    delta = values1 - values2
+    relative = np.array([
+        _symmetric_relative_difference_percent(a, b) for a, b in zip(values1, values2)
+    ], dtype=float)
+    return {
+        "n": int(len(delta)),
+        "mean_input1": float(np.mean(values1)),
+        "mean_input2": float(np.mean(values2)),
+        "mean_signed_difference": float(np.mean(delta)),
+        "mean_absolute_difference": float(np.mean(np.abs(delta))),
+        "rmse_difference": float(np.sqrt(np.mean(delta * delta))),
+        "max_absolute_difference": float(np.max(np.abs(delta))),
+        "mean_absolute_symmetric_relative_difference_percent": float(np.mean(relative)),
+        "max_absolute_symmetric_relative_difference_percent": float(np.max(relative))
+    }
+
+
+def compare_production(data1: dict, data2: dict) -> dict:
+    rows1 = _production_rows_by_step(data1)
+    rows2 = _production_rows_by_step(data2)
+    common_steps = sorted(set(rows1) & set(rows2))
+    observables = (
+        "potential_energy_kj_per_mol",
+        "kinetic_energy_kj_per_mol",
+        "temperature_k",
+        "volume_nm3",
+        "density_g_per_ml"
+    )
+
+    result = {
+        "matched_steps": common_steps,
+        "n_matched_steps": len(common_steps),
+        "observables": {},
+        "matched_rows": []
+    }
+
+    for observable in observables:
+        paired = [
+            (rows1[step].get(observable), rows2[step].get(observable))
+            for step in common_steps
+        ]
+        paired = [(a, b) for a, b in paired if a is not None and b is not None]
+        if not paired:
+            continue
+        values1 = np.asarray([a for a, _ in paired], dtype=float)
+        values2 = np.asarray([b for _, b in paired], dtype=float)
+        result["observables"][observable] = _production_observable_stats(values1, values2)
+
+    for step in common_steps:
+        row = {"step": step}
+        for observable in observables:
+            value1 = rows1[step].get(observable)
+            value2 = rows2[step].get(observable)
+            if value1 is not None and value2 is not None:
+                row[observable] = _numeric_comparison(value1, value2)
+        result["matched_rows"].append(row)
+
+    return result
+
+
+def compare_timing(data1: dict, data2: dict) -> dict:
+    """Compare available wall-clock timings while preserving missing values."""
+    fields = (
+        "minimization_wall_time_s",
+        "nvt_equilibration_wall_time_s",
+        "npt_equilibration_wall_time_s",
+        "production_wall_time_s",
+        "timed_md_stages_wall_time_s",
+        "total_execution_wall_time_s",
+        "non_timed_md_execution_wall_time_s",
+        "timed_md_fraction_of_total_percent",
+        "non_production_execution_wall_time_s",
+        "production_fraction_of_total_percent",
+    )
+    timing1 = data1.get("timing", {})
+    timing2 = data2.get("timing", {})
+    result = {}
+
+    for field in fields:
+        value1 = timing1.get(field)
+        value2 = timing2.get(field)
+        if value1 is None and value2 is None:
+            continue
+
+        values = {
+            "input1": float(value1) if value1 is not None else None,
+            "input2": float(value2) if value2 is not None else None,
+        }
+        if value1 is not None and value2 is not None:
+            values.update(_numeric_comparison(value1, value2))
+        result[field] = values
+
+    return result
+
+
+def compare_openmm_outputs(data1: dict, data2: dict) -> dict:
+    system_fields = [
+        "particles", "constraints", "nonbonded_particles", "nonbonded_exceptions",
+        "water_particles", "total_particle_charge_e", "nonbonded_method", "cutoff_nm",
+        "ewald_error_tolerance", "dispersion_correction", "switching_function", "initial_box_nm"
+    ]
+    protocol_fields = [
+        "minimization_limit", "nvt_steps", "npt_steps", "production_steps",
+        "production_report_interval_steps", "target_temperature_k", "target_pressure_bar",
+        "production_duration_ps", "timestep_ps", "random_seed_mode", "random_seed",
+        "integrator_random_seed", "velocity_random_seed", "barostat_random_seed"
+    ]
+
+    return {
+        "system": _compare_mapping(data1.get("system", {}), data2.get("system", {}), system_fields),
+        "protocol": _compare_mapping(data1.get("protocol", {}), data2.get("protocol", {}), protocol_fields),
+        "representative_particles": _compare_representative_particles(data1, data2),
+        "representative_water_constraints": _compare_water_constraints(data1, data2),
+        "energy_decomposition_kj_per_mol": _compare_energy_sections(data1, data2),
+        "timing": compare_timing(data1, data2),
+        "production": compare_production(data1, data2)
+    }
+
+
+def compatibility_out_summary(data: dict):
+    """Return the historical OUT-summary fields for existing JSON consumers."""
+    if not data or not data.get("production"):
+        return None
+
+    rows = data["production"]
+    energies = [
+        row["potential_energy_kj_per_mol"]
+        for row in rows
+        if row["potential_energy_kj_per_mol"] is not None
+    ]
+    temps = [row["temperature_k"] for row in rows if row["temperature_k"] is not None]
+    if not energies or not temps:
+        return None
+
+    times = [row["time_ps"] for row in rows if row.get("time_ps") is not None]
+    total_ps = max(times) if times else data.get("protocol", {}).get("production_duration_ps")
+    if total_ps is None and len(rows) > 1:
+        steps = [row["step"] for row in rows]
+        interval = steps[1] - steps[0]
+        total_ps = steps[-1] * (interval / 1000.0)
+
+    return {
+        "n_steps": int(len(rows)),
+        "total_ps": float(total_ps) if total_ps is not None else 0.0,
+        "avg_energy": float(np.mean(energies)),
+        "std_energy": float(np.std(energies)),
+        "avg_temp": float(np.mean(temps)),
+        "std_temp": float(np.std(temps))
+    }
+
+
+def _format_implementation(value: str) -> str:
+    return {
+        "python_openmm": "Python/OpenMM",
+        "cpp_openmm": "DivCon/C++/OpenMM",
+        "legacy_three_column": "Legacy three-column OUT"
+    }.get(value, value)
+
+
+def print_single_output_summary(label: str, data: dict) -> None:
+    print(f"\nMD output summary: {label}")
     if not data:
-        print(f"\nSimulation Summary: {label}")
-        print("  No valid OUT.gz data found.")
+        print("  No recognized MD output data found.")
         return
 
-    print(f"\nSimulation Summary: {label}")
-    print(f"  Total simulated time     : {data['total_ps']:.1f} ps ({data['total_ps'] / 1000:.2f} ns)")
-    print(f"  Number of steps reported : {data['n_steps']}")
-    print(f"  Avg. potential energy    : {data['avg_energy']:.1f} ± {data['std_energy']:.1f} kJ/mol")
-    print(f"  Avg. temperature         : {data['avg_temp']:.1f} ± {data['std_temp']:.1f} K")
+    print(f"  Detected format            : {_format_implementation(data['implementation'])}")
+    system = data.get("system", {})
+    protocol = data.get("protocol", {})
+    for field, title in (
+        ("platform", "OpenMM platform"),
+        ("particles", "Particles"),
+        ("constraints", "Constraints"),
+        ("nonbonded_exceptions", "Nonbonded exceptions"),
+        ("water_particles", "Water particles")
+    ):
+        if system.get(field) is not None:
+            print(f"  {title:<27}: {system[field]}")
 
-    drift_ratio = data['std_energy'] / abs(data['avg_energy'])
-    if drift_ratio < 0.01:
-        print("  Energy drift             : Stable (std dev < 1%)")
-    elif drift_ratio < 0.03:
-        print("  Energy drift             : Mild instability (std dev ~2%)")
+    if protocol.get("production_steps") is not None:
+        print(f"  {'Production steps':<27}: {protocol['production_steps']}")
+    if protocol.get("production_duration_ps") is not None:
+        print(f"  {'Production duration':<27}: {protocol['production_duration_ps']:.3f} ps")
+    print(f"  {'Production rows':<27}: {len(data.get('production', []))}")
+
+    for field, title in (
+        ("random_seed_mode", "Random seed mode"),
+        ("random_seed", "Random seed"),
+        ("integrator_random_seed", "Integrator random seed"),
+        ("velocity_random_seed", "Velocity random seed"),
+        ("barostat_random_seed", "Barostat random seed"),
+    ):
+        if protocol.get(field) is not None:
+            print(f"  {title:<27}: {protocol[field]}")
+
+    timing = data.get("timing", {})
+    for field, title in (
+        ("minimization_wall_time_s", "Minimization wall time"),
+        ("nvt_equilibration_wall_time_s", "NVT equilibration wall time"),
+        ("npt_equilibration_wall_time_s", "NPT equilibration wall time"),
+        ("production_wall_time_s", "Production wall time"),
+        ("timed_md_stages_wall_time_s", "Timed MD stages wall time"),
+        ("total_execution_wall_time_s", "Total execution wall time"),
+        ("non_timed_md_execution_wall_time_s", "Total minus timed MD"),
+    ):
+        if timing.get(field) is not None:
+            print(f"  {title:<27}: {timing[field]:.6f} s")
+    for field, title in (
+        ("timed_md_fraction_of_total_percent", "Timed MD / total"),
+        ("production_fraction_of_total_percent", "Production / total"),
+    ):
+        if timing.get(field) is not None:
+            print(f"  {title:<27}: {timing[field]:.3f}%")
+
+
+def print_system_comparison(label1: str, label2: str, comparison: dict) -> None:
+    print("\nOpenMM System / Hamiltonian Validation")
+    print("=" * 72)
+    system = comparison.get("system", {})
+    if not system:
+        print("  No common system-configuration fields were available for comparison.")
+        return
+
+    for field, values in system.items():
+        name = field.replace("_", " ")
+        if "match" in values:
+            status = "MATCH" if values["match"] else "DIFFER"
+            print(f"  {name:<30}: {status:<6}  {values['input1']}  vs  {values['input2']}")
+        elif "max_absolute_difference" in values:
+            print(f"  {name:<30}: max |Δ|={values['max_absolute_difference']:.6g}")
+        else:
+            print(
+                f"  {name:<30}: Δ({label1}-{label2})="
+                f"{values['delta_input1_minus_input2']:+.6g}"
+            )
+
+
+def print_representative_parameter_comparison(comparison: dict) -> None:
+    particles = comparison.get("representative_particles", {})
+    constraints = comparison.get("representative_water_constraints", {})
+    if not particles and not constraints:
+        return
+
+    print("\nRepresentative Effective Parameter Validation")
+    print("=" * 72)
+    for role, values in particles.items():
+        charge = values["openmm_charge_e"]
+        sigma = values["sigma_nm"]
+        epsilon = values["epsilon_kj_per_mol"]
+        index_status = "MATCH" if values["index"]["match"] else "DIFFER"
+        type_status = "MATCH" if values["divcon_type"]["match"] else "DIFFER"
+        print(
+            f"  {role:<10} index={index_status:<6} type={type_status:<6} "
+            f"Δq={charge['delta_input1_minus_input2']:+.3e} e  "
+            f"Δsigma={sigma['delta_input1_minus_input2']:+.3e} nm  "
+            f"Δepsilon={epsilon['delta_input1_minus_input2']:+.3e} kJ/mol"
+        )
+
+    if constraints:
+        print(
+            f"  water constraints: n={constraints['n_constraints']}  "
+            f"max |Δdistance|={constraints['max_absolute_distance_difference_nm']:.3e} nm"
+        )
+
+
+def print_energy_comparison(label1: str, label2: str, comparison: dict) -> None:
+    energy = comparison.get("energy_decomposition_kj_per_mol", {})
+    component_labels = {
+        "bond": "Bond",
+        "angle": "Angle",
+        "torsion": "Torsion",
+        "nonbonded": "Nonbonded",
+        "four_part_sum": "4-part sum",
+        "total": "Total",
+        "residual": "Residual"
+    }
+
+    for section_name, title in (
+        ("initial", "OpenMM Energy Validation — Initial (diagnostic)"),
+        ("post_minimization", "OpenMM Energy Validation — Post-minimization")
+    ):
+        section = energy.get(section_name)
+        if not section:
+            continue
+
+        print(f"\n{title}")
+        print("=" * len(title))
+        print(
+            f"  {'Component':<14} {label1[:18]:>18} {label2[:18]:>18} "
+            f"{'Δ (1-2)':>14} {'sym |Δ| %':>11}"
+        )
+        print("  " + "-" * 79)
+        for component, display_name in component_labels.items():
+            if component not in section:
+                continue
+            values = section[component]
+            relative = values["symmetric_relative_difference_percent"]
+            relative_text = f"{relative:.4f}" if relative is not None else "n/a"
+            print(
+                f"  {display_name:<14} {values['input1']:>18.4f} {values['input2']:>18.4f} "
+                f"{values['delta_input1_minus_input2']:>+14.4f} {relative_text:>11}"
+            )
+
+
+def print_protocol_comparison(label1: str, label2: str, comparison: dict) -> None:
+    protocol = comparison.get("protocol", {})
+    if not protocol:
+        return
+
+    print("\nMD Protocol Validation")
+    print("=" * 72)
+    for field, values in protocol.items():
+        name = field.replace("_", " ")
+        if "match" in values:
+            status = "MATCH" if values["match"] else "DIFFER"
+            print(f"  {name:<34}: {status:<6}  {values['input1']}  vs  {values['input2']}")
+        else:
+            print(
+                f"  {name:<34}: {values['input1']:.6g} vs {values['input2']:.6g} "
+                f"(Δ {values['delta_input1_minus_input2']:+.6g})"
+            )
+
+
+def print_timing_comparison(label1: str, label2: str, comparison: dict) -> None:
+    timing = comparison.get("timing", {})
+    if not timing:
+        return
+
+    print("\nTiming Analysis")
+    print("=" * 72)
+    print(
+        f"  {'Timing metric':<31} {label1[:16]:>16} {label2[:16]:>16} "
+        f"{'Delta (1-2)':>14} {'sym |Delta| %':>13}"
+    )
+    print("  " + "-" * 94)
+
+    labels = (
+        ("minimization_wall_time_s", "Minimization wall time", "s"),
+        ("nvt_equilibration_wall_time_s", "NVT equilibration wall time", "s"),
+        ("npt_equilibration_wall_time_s", "NPT equilibration wall time", "s"),
+        ("production_wall_time_s", "Production MD wall time", "s"),
+        ("timed_md_stages_wall_time_s", "Timed MD stages (complete sum)", "s"),
+        ("total_execution_wall_time_s", "Total execution wall time", "s"),
+        ("non_timed_md_execution_wall_time_s", "Total minus timed MD stages", "s"),
+        ("timed_md_fraction_of_total_percent", "Timed MD stages / total execution", "%"),
+        ("non_production_execution_wall_time_s", "Total minus production MD", "s"),
+        ("production_fraction_of_total_percent", "Production MD / total execution", "%"),
+    )
+
+    def fmt(value, unit):
+        if value is None:
+            return "n/a"
+        if unit == "%":
+            return f"{value:.3f}%"
+        return f"{value:.6f}"
+
+    for field, title, unit in labels:
+        values = timing.get(field)
+        if not values:
+            continue
+        value1 = values.get("input1")
+        value2 = values.get("input2")
+        delta = values.get("delta_input1_minus_input2")
+        relative = values.get("symmetric_relative_difference_percent")
+        delta_text = "n/a" if delta is None else f"{delta:+.6f}"
+        relative_text = "n/a" if relative is None else f"{relative:.3f}"
+        print(
+            f"  {title:<31} {fmt(value1, unit):>16} {fmt(value2, unit):>16} "
+            f"{delta_text:>14} {relative_text:>13}"
+        )
+
+    print(f"  Differences are defined as {label1} - {label2}.")
+    print(
+        "  Timed MD stages / total execution sums minimization, NVT, NPT, and production timers "
+        "when all four are available."
+    )
+    print(
+        "  Production MD / total execution uses the production timer alone divided by the whole-process timer."
+    )
+    if any(
+        timing.get(field, {}).get("input1") is None or timing.get(field, {}).get("input2") is None
+        for field in ("total_execution_wall_time_s", "production_fraction_of_total_percent")
+        if field in timing
+    ):
+        print(
+            "  n/a means that the corresponding screenout does not report the required whole-process timing; "
+            "stage sums are not substituted for total execution time."
+        )
+
+
+def print_production_comparison(label1: str, label2: str, comparison: dict) -> None:
+    production = comparison.get("production", {})
+    print("\nProduction Thermodynamic Validation")
+    print("=" * 72)
+    if not production or not production.get("matched_steps"):
+        print("  No common production steps with thermodynamic data were found.")
+        return
+
+    steps = production["matched_steps"]
+    print(f"  Matched production checkpoints: {len(steps)} ({steps[0]} through {steps[-1]})")
+    print(f"  Differences are defined as {label1} - {label2}.")
+    print("  Relative values use symmetric percent difference: 200*|x1-x2|/(|x1|+|x2|).")
+    print()
+    print(f"  {'Observable':<22} {'mean |Δ|':>14} {'RMSE Δ':>14} {'mean sym %':>12} {'max sym %':>12}")
+    print("  " + "-" * 78)
+
+    names = {
+        "potential_energy_kj_per_mol": "Potential energy",
+        "kinetic_energy_kj_per_mol": "Kinetic energy",
+        "temperature_k": "Temperature",
+        "volume_nm3": "Volume",
+        "density_g_per_ml": "Density"
+    }
+    for key, title in names.items():
+        stats = production.get("observables", {}).get(key)
+        if not stats:
+            continue
+        print(
+            f"  {title:<22} {stats['mean_absolute_difference']:>14.6g} "
+            f"{stats['rmse_difference']:>14.6g} "
+            f"{stats['mean_absolute_symmetric_relative_difference_percent']:>12.4f} "
+            f"{stats['max_absolute_symmetric_relative_difference_percent']:>12.4f}"
+        )
+
+
+def plot_production_validation(
+    data1: dict, data2: dict, comparison: dict, label1: str, label2: str, out_prefix: str
+) -> None:
+    production = comparison.get("production", {})
+    common_steps = production.get("matched_steps", [])
+    if not common_steps:
+        return
+
+    rows1 = _production_rows_by_step(data1)
+    rows2 = _production_rows_by_step(data2)
+    plot_specs = (
+        ("potential_energy_kj_per_mol", "Potential energy (kJ/mol)", "potential_energy_validation"),
+        ("temperature_k", "Temperature (K)", "temperature_validation"),
+        ("volume_nm3", "Volume (nm³)", "volume_validation"),
+        ("density_g_per_ml", "Density (g/mL)", "density_validation")
+    )
+
+    for key, ylabel, suffix in plot_specs:
+        points = [
+            (step, rows1[step].get(key), rows2[step].get(key))
+            for step in common_steps
+            if rows1[step].get(key) is not None and rows2[step].get(key) is not None
+        ]
+        if not points:
+            continue
+
+        x = np.asarray([point[0] for point in points], dtype=int)
+        values1 = np.asarray([point[1] for point in points], dtype=float)
+        values2 = np.asarray([point[2] for point in points], dtype=float)
+        plt.figure()
+        plt.plot(x, values1, marker="o", label=label1)
+        plt.plot(x, values2, marker="o", label=label2)
+        plt.xlabel("Production step")
+        plt.ylabel(ylabel)
+        plt.title(ylabel.split(" (")[0] + " validation")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{out_prefix}_{suffix}.pdf", dpi=CONFIG["plot"]["dpi"])
+        plt.close()
+
+    pe_points = [
+        (
+            step,
+            rows1[step].get("potential_energy_kj_per_mol"),
+            rows2[step].get("potential_energy_kj_per_mol")
+        )
+        for step in common_steps
+        if rows1[step].get("potential_energy_kj_per_mol") is not None
+        and rows2[step].get("potential_energy_kj_per_mol") is not None
+    ]
+    if pe_points:
+        x = np.asarray([point[0] for point in pe_points], dtype=int)
+        signed_relative = np.asarray([
+            _symmetric_relative_difference_percent(point[1], point[2], signed=True)
+            for point in pe_points
+        ])
+        plt.figure()
+        plt.axhline(0.0, linewidth=0.8)
+        plt.plot(x, signed_relative, marker="o")
+        plt.xlabel("Production step")
+        plt.ylabel(f"Signed symmetric ΔPE (%) [{label1} - {label2}]")
+        plt.title("Potential-energy difference")
+        plt.tight_layout()
+        plt.savefig(f"{out_prefix}_potential_energy_delta.pdf", dpi=CONFIG["plot"]["dpi"])
+        plt.close()
+
+
+# ───────── SERIALIZED OPENMM XML VALIDATION ───────────────────────────────────
+_OPENMM_SERIALIZED_FILENAMES = {
+    "system": "openmm_system.xml",
+    "integrator": "openmm_integrator.xml",
+    "initial_state": "openmm_initial_state.xml",
+}
+
+
+def _openmm_float(value, target_unit=None) -> float:
+    """Convert an OpenMM scalar/Quantity to a plain float in a documented unit."""
+    if target_unit is not None and hasattr(value, "value_in_unit"):
+        return float(value.value_in_unit(target_unit))
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        if hasattr(value, "_value"):
+            return float(value._value)
+        raise
+
+
+def _openmm_numbers_match(value1: float, value2: float, absolute_tolerance=None,
+                           relative_tolerance=None) -> bool:
+    cfg = CONFIG["openmm_xml_validation"]
+    atol = cfg["absolute_tolerance"] if absolute_tolerance is None else absolute_tolerance
+    rtol = cfg["relative_tolerance"] if relative_tolerance is None else relative_tolerance
+    return abs(value1 - value2) <= atol + rtol * max(abs(value1), abs(value2))
+
+
+def _openmm_scalar_comparison(value1, value2, absolute_tolerance=None,
+                              relative_tolerance=None) -> dict:
+    if isinstance(value1, (bool, str, int)) or isinstance(value2, (bool, str, int)):
+        return {"input1": value1, "input2": value2, "match": value1 == value2}
+
+    value1 = float(value1)
+    value2 = float(value2)
+    return {
+        "input1": value1,
+        "input2": value2,
+        "delta_input1_minus_input2": value1 - value2,
+        "absolute_difference": abs(value1 - value2),
+        "match": _openmm_numbers_match(
+            value1, value2, absolute_tolerance, relative_tolerance
+        )
+    }
+
+
+def _openmm_compare_settings(settings1: dict, settings2: dict) -> dict:
+    fields = {}
+    missing1 = []
+    missing2 = []
+    n_different = 0
+
+    for field in sorted(set(settings1) | set(settings2)):
+        if field not in settings1:
+            missing1.append(field)
+            n_different += 1
+            continue
+        if field not in settings2:
+            missing2.append(field)
+            n_different += 1
+            continue
+        comparison = _openmm_scalar_comparison(settings1[field], settings2[field])
+        fields[field] = comparison
+        if not comparison["match"]:
+            n_different += 1
+
+    return {
+        "fields": fields,
+        "missing_from_input1": missing1,
+        "missing_from_input2": missing2,
+        "n_different": n_different,
+        "match": n_different == 0
+    }
+
+
+def _openmm_compare_keyed_records(records1: list, records2: list, field_names: tuple[str, ...]) -> dict:
+    """Compare parameter records as keyed multisets, independent of record order."""
+    grouped1 = defaultdict(list)
+    grouped2 = defaultdict(list)
+    for key, values in records1:
+        grouped1[tuple(key)].append(tuple(float(v) for v in values))
+    for key, values in records2:
+        grouped2[tuple(key)].append(tuple(float(v) for v in values))
+
+    keys1 = set(grouped1)
+    keys2 = set(grouped2)
+    only1 = sorted(keys1 - keys2)
+    only2 = sorted(keys2 - keys1)
+    multiplicity_mismatches = []
+    parameter_mismatches = []
+    max_abs = {name: 0.0 for name in field_names}
+    field_accumulators = {
+        name: {
+            "compared_count": 0,
+            "mismatch_count": 0,
+            "sum_signed": 0.0,
+            "sum_absolute": 0.0,
+            "sum_squared": 0.0,
+            "max_absolute": 0.0,
+        }
+        for name in field_names
+    }
+
+    cfg = CONFIG["openmm_xml_validation"]
+    atol = cfg["absolute_tolerance"]
+    rtol = cfg["relative_tolerance"]
+
+    for key in sorted(keys1 & keys2):
+        values1 = sorted(grouped1[key])
+        values2 = sorted(grouped2[key])
+        if len(values1) != len(values2):
+            multiplicity_mismatches.append({
+                "key": list(key),
+                "count_input1": len(values1),
+                "count_input2": len(values2)
+            })
+
+        for params1, params2 in zip(values1, values2):
+            differences = {}
+            mismatch = False
+            tolerance_score = 0.0
+            for field, value1, value2 in zip(field_names, params1, params2):
+                delta = value1 - value2
+                absolute = abs(delta)
+                max_abs[field] = max(max_abs[field], absolute)
+                allowed = atol + rtol * max(abs(value1), abs(value2))
+                score = absolute / allowed if allowed > 0.0 else (0.0 if absolute == 0.0 else float("inf"))
+                tolerance_score = max(tolerance_score, score)
+                match = absolute <= allowed
+                if not match:
+                    mismatch = True
+
+                acc = field_accumulators[field]
+                acc["compared_count"] += 1
+                acc["sum_signed"] += delta
+                acc["sum_absolute"] += absolute
+                acc["sum_squared"] += delta * delta
+                acc["max_absolute"] = max(acc["max_absolute"], absolute)
+                if not match:
+                    acc["mismatch_count"] += 1
+
+                differences[field] = {
+                    "input1": value1,
+                    "input2": value2,
+                    "delta_input1_minus_input2": delta,
+                    "absolute_difference": absolute,
+                    "match": match
+                }
+
+            if mismatch:
+                parameter_mismatches.append({
+                    "key": list(key),
+                    "fields": differences,
+                    "tolerance_score": tolerance_score
+                })
+
+    parameter_mismatches.sort(key=lambda item: item["tolerance_score"], reverse=True)
+    top_n = CONFIG["openmm_xml_validation"]["top_n_differences"]
+
+    field_statistics = {}
+    top_parameter_mismatches_by_field = {}
+    for field, acc in field_accumulators.items():
+        count = acc["compared_count"]
+        field_statistics[field] = {
+            "compared_count": count,
+            "mismatch_count": acc["mismatch_count"],
+            "mean_signed_difference": acc["sum_signed"] / count if count else 0.0,
+            "mean_absolute_difference": acc["sum_absolute"] / count if count else 0.0,
+            "rms_difference": float(np.sqrt(acc["sum_squared"] / count)) if count else 0.0,
+            "max_absolute_difference": acc["max_absolute"],
+        }
+
+        field_differences = []
+        for mismatch in parameter_mismatches:
+            values = mismatch["fields"][field]
+            if values["match"]:
+                continue
+            field_differences.append({
+                "key": mismatch["key"],
+                "input1": values["input1"],
+                "input2": values["input2"],
+                "delta_input1_minus_input2": values["delta_input1_minus_input2"],
+                "absolute_difference": values["absolute_difference"],
+            })
+        field_differences.sort(key=lambda item: item["absolute_difference"], reverse=True)
+        top_parameter_mismatches_by_field[field] = field_differences[:top_n]
+
+    return {
+        "count_input1": len(records1),
+        "count_input2": len(records2),
+        "count_match": len(records1) == len(records2),
+        "unique_key_count_input1": len(keys1),
+        "unique_key_count_input2": len(keys2),
+        "common_unique_key_count": len(keys1 & keys2),
+        "repeated_key_record_count_input1": len(records1) - len(keys1),
+        "repeated_key_record_count_input2": len(records2) - len(keys2),
+        "keys_only_input1_count": len(only1),
+        "keys_only_input2_count": len(only2),
+        "keys_only_input1": [list(key) for key in only1[:top_n]],
+        "keys_only_input2": [list(key) for key in only2[:top_n]],
+        "multiplicity_mismatch_count": len(multiplicity_mismatches),
+        "multiplicity_mismatches": multiplicity_mismatches[:top_n],
+        "parameter_mismatch_count": len(parameter_mismatches),
+        "top_parameter_mismatches": parameter_mismatches[:top_n],
+        "top_parameter_mismatches_by_field": top_parameter_mismatches_by_field,
+        "field_statistics": field_statistics,
+        "max_absolute_difference_by_field": max_abs,
+        "match": (
+            len(records1) == len(records2)
+            and not only1
+            and not only2
+            and not multiplicity_mismatches
+            and not parameter_mismatches
+        )
+    }
+
+
+def _openmm_path_metadata(path: Path | None) -> dict:
+    if path is None:
+        return {"path": None, "exists": False}
+    path = Path(path)
+    result = {"path": str(path), "exists": path.is_file()}
+    if path.is_file():
+        payload = path.read_bytes()
+        result["size_bytes"] = len(payload)
+        result["sha256"] = hashlib.sha256(payload).hexdigest()
+    return result
+
+
+def _discover_openmm_serialized_paths(out_path: Path | None) -> dict[str, Path | None]:
+    if out_path is None:
+        return {key: None for key in _OPENMM_SERIALIZED_FILENAMES}
+    base = Path(out_path).parent
+    return {key: base / filename for key, filename in _OPENMM_SERIALIZED_FILENAMES.items()}
+
+
+def _load_openmm_serialized_object(path: Path):
+    with open(path, "r") as handle:
+        return mm.XmlSerializer.deserialize(handle.read())
+
+
+def _openmm_force_inventory(system) -> dict[str, list]:
+    inventory = defaultdict(list)
+    for force_index in range(system.getNumForces()):
+        force = system.getForce(force_index)
+        inventory[type(force).__name__].append((force_index, force))
+    return dict(inventory)
+
+
+def _openmm_force_metadata(force1, force2) -> dict:
+    metadata = {
+        "force_group": _openmm_scalar_comparison(
+            int(force1.getForceGroup()), int(force2.getForceGroup())
+        ),
+        "name": _openmm_scalar_comparison(str(force1.getName()), str(force2.getName()))
+    }
+    if hasattr(force1, "usesPeriodicBoundaryConditions") and hasattr(force2, "usesPeriodicBoundaryConditions"):
+        metadata["uses_periodic_boundary_conditions"] = _openmm_scalar_comparison(
+            bool(force1.usesPeriodicBoundaryConditions()),
+            bool(force2.usesPeriodicBoundaryConditions())
+        )
+    return metadata
+
+
+def _openmm_force_metadata_difference_count(metadata: dict) -> int:
+    # Force group/name differences are useful diagnostics but do not by themselves
+    # alter the Hamiltonian.  PBC usage is physics-affecting and is counted by the
+    # force-specific comparison where applicable.
+    return sum(
+        1 for key in ("force_group", "name")
+        if key in metadata and not metadata[key]["match"]
+    )
+
+
+def _openmm_harmonic_bond_records(force) -> list:
+    records = []
+    k_unit = openmm_unit.kilojoule_per_mole / openmm_unit.nanometer**2
+    for index in range(force.getNumBonds()):
+        p1, p2, length, k = force.getBondParameters(index)
+        key = tuple(sorted((int(p1), int(p2))))
+        records.append((key, (
+            _openmm_float(length, openmm_unit.nanometer),
+            _openmm_float(k, k_unit)
+        )))
+    return records
+
+
+def _openmm_harmonic_angle_records(force) -> list:
+    records = []
+    k_unit = openmm_unit.kilojoule_per_mole / openmm_unit.radian**2
+    for index in range(force.getNumAngles()):
+        p1, p2, p3, theta, k = force.getAngleParameters(index)
+        forward = (int(p1), int(p2), int(p3))
+        reverse = (int(p3), int(p2), int(p1))
+        key = min(forward, reverse)
+        records.append((key, (
+            _openmm_float(theta, openmm_unit.radian),
+            _openmm_float(k, k_unit)
+        )))
+    return records
+
+
+def _openmm_periodic_torsion_records(force) -> list:
+    records = []
+    for index in range(force.getNumTorsions()):
+        p1, p2, p3, p4, periodicity, phase, k = force.getTorsionParameters(index)
+        # Keep atom order explicit.  Reversing a torsion can change the sign
+        # convention for its phase, so treating reversed tuples as identical can
+        # hide a real representation difference.
+        key = (int(p1), int(p2), int(p3), int(p4), int(periodicity))
+        records.append((key, (
+            _openmm_float(phase, openmm_unit.radian),
+            _openmm_float(k, openmm_unit.kilojoule_per_mole)
+        )))
+    return records
+
+
+def _openmm_reverse_torsion_key(key) -> tuple:
+    """Return the same torsion key with the four atom indices reversed."""
+    p1, p2, p3, p4, periodicity = tuple(key)
+    return (p4, p3, p2, p1, periodicity)
+
+
+def _openmm_canonical_torsion_orientation_key(key) -> tuple:
+    """Collapse forward/reverse atom order for diagnostic counting only."""
+    key = tuple(key)
+    reverse = _openmm_reverse_torsion_key(key)
+    return min(key, reverse)
+
+
+def _openmm_torsion_parameter_lists_match(values1: list, values2: list) -> bool:
+    """Compare stored (phase, k) lists without declaring reversal equivalent."""
+    values1 = sorted(tuple(float(value) for value in values) for values in values1)
+    values2 = sorted(tuple(float(value) for value in values) for values in values2)
+    if len(values1) != len(values2):
+        return False
+
+    return all(
+        all(_openmm_numbers_match(value1, value2) for value1, value2 in zip(params1, params2))
+        for params1, params2 in zip(values1, values2)
+    )
+
+
+def _openmm_torsion_orientation_diagnostic(records1: list, records2: list) -> dict:
+    """Diagnose whether strict torsion-key differences are simple reversals.
+
+    The primary torsion comparison remains order-sensitive.  This diagnostic
+    separately asks whether an exact-only key has the reversed atom order in the
+    other input, while preserving periodicity.  It also reports what the unique
+    key inventory would look like if forward/reverse order were collapsed.
+    """
+    grouped1 = defaultdict(list)
+    grouped2 = defaultdict(list)
+    for key, values in records1:
+        grouped1[tuple(key)].append(tuple(float(value) for value in values))
+    for key, values in records2:
+        grouped2[tuple(key)].append(tuple(float(value) for value in values))
+
+    keys1 = set(grouped1)
+    keys2 = set(grouped2)
+    only1 = keys1 - keys2
+    only2 = keys2 - keys1
+
+    normalized1 = {_openmm_canonical_torsion_orientation_key(key) for key in keys1}
+    normalized2 = {_openmm_canonical_torsion_orientation_key(key) for key in keys2}
+
+    reversed1 = []
+    for key in sorted(only1):
+        reverse_key = _openmm_reverse_torsion_key(key)
+        if reverse_key not in keys2:
+            continue
+        reversed1.append({
+            "key_input1": list(key),
+            "reverse_key_input2": list(reverse_key),
+            "count_input1": len(grouped1[key]),
+            "count_input2": len(grouped2[reverse_key]),
+            "stored_parameters_match": _openmm_torsion_parameter_lists_match(
+                grouped1[key], grouped2[reverse_key]
+            ),
+        })
+
+    reversed2 = []
+    for key in sorted(only2):
+        reverse_key = _openmm_reverse_torsion_key(key)
+        if reverse_key not in keys1:
+            continue
+        reversed2.append({
+            "key_input2": list(key),
+            "reverse_key_input1": list(reverse_key),
+            "count_input2": len(grouped2[key]),
+            "count_input1": len(grouped1[reverse_key]),
+            "stored_parameters_match": _openmm_torsion_parameter_lists_match(
+                grouped2[key], grouped1[reverse_key]
+            ),
+        })
+
+    def bidirectional_pair_count(keys: set) -> int:
+        return len({
+            _openmm_canonical_torsion_orientation_key(key)
+            for key in keys
+            if _openmm_reverse_torsion_key(key) in keys
+            and _openmm_reverse_torsion_key(key) != key
+        })
+
+    top_n = CONFIG["openmm_xml_validation"]["top_n_differences"]
+    reversed_keys1 = {tuple(item["key_input1"]) for item in reversed1}
+    reversed_keys2 = {tuple(item["key_input2"]) for item in reversed2}
+
+    return {
+        "orientation_normalized_unique_key_count_input1": len(normalized1),
+        "orientation_normalized_unique_key_count_input2": len(normalized2),
+        "orientation_normalized_common_unique_key_count": len(normalized1 & normalized2),
+        "orientation_normalized_only_input1_count": len(normalized1 - normalized2),
+        "orientation_normalized_only_input2_count": len(normalized2 - normalized1),
+        "input1_only_with_reverse_in_input2_count": len(reversed1),
+        "input2_only_with_reverse_in_input1_count": len(reversed2),
+        "input1_only_without_reverse_in_input2_count": len(only1 - reversed_keys1),
+        "input2_only_without_reverse_in_input1_count": len(only2 - reversed_keys2),
+        "bidirectional_key_pair_count_input1": bidirectional_pair_count(keys1),
+        "bidirectional_key_pair_count_input2": bidirectional_pair_count(keys2),
+        "reversed_parameter_mismatch_count_input1_to_input2": sum(
+            1 for item in reversed1 if not item["stored_parameters_match"]
+        ),
+        "reversed_parameter_mismatch_count_input2_to_input1": sum(
+            1 for item in reversed2 if not item["stored_parameters_match"]
+        ),
+        "reversed_examples_input1_to_input2": reversed1[:top_n],
+        "reversed_examples_input2_to_input1": reversed2[:top_n],
+    }
+
+
+def _openmm_nonbonded_method_name(value) -> str:
+    method_map = {
+        int(mm.NonbondedForce.NoCutoff): "NoCutoff",
+        int(mm.NonbondedForce.CutoffNonPeriodic): "CutoffNonPeriodic",
+        int(mm.NonbondedForce.CutoffPeriodic): "CutoffPeriodic",
+        int(mm.NonbondedForce.Ewald): "Ewald",
+        int(mm.NonbondedForce.PME): "PME",
+        int(mm.NonbondedForce.LJPME): "LJPME",
+    }
+    return method_map.get(int(value), str(int(value)))
+
+
+def _openmm_nonbonded_settings(force) -> dict:
+    settings = {
+        "method": _openmm_nonbonded_method_name(force.getNonbondedMethod()),
+        "cutoff_nm": _openmm_float(force.getCutoffDistance(), openmm_unit.nanometer),
+        "reaction_field_dielectric": float(force.getReactionFieldDielectric()),
+        "ewald_error_tolerance": float(force.getEwaldErrorTolerance()),
+        "use_dispersion_correction": bool(force.getUseDispersionCorrection()),
+        "use_switching_function": bool(force.getUseSwitchingFunction()),
+        "exceptions_use_periodic_boundary_conditions": bool(
+            force.getExceptionsUsePeriodicBoundaryConditions()
+        )
+    }
+    if force.getUseSwitchingFunction():
+        settings["switching_distance_nm"] = _openmm_float(
+            force.getSwitchingDistance(), openmm_unit.nanometer
+        )
+
+    alpha, nx, ny, nz = force.getPMEParameters()
+    settings.update({
+        "pme_alpha_per_nm": _openmm_float(alpha, openmm_unit.nanometer**-1),
+        "pme_grid_x": int(nx),
+        "pme_grid_y": int(ny),
+        "pme_grid_z": int(nz)
+    })
+    if hasattr(force, "getLJPMEParameters"):
+        alpha_lj, nx_lj, ny_lj, nz_lj = force.getLJPMEParameters()
+        settings.update({
+            "ljpme_alpha_per_nm": _openmm_float(alpha_lj, openmm_unit.nanometer**-1),
+            "ljpme_grid_x": int(nx_lj),
+            "ljpme_grid_y": int(ny_lj),
+            "ljpme_grid_z": int(nz_lj)
+        })
+    return settings
+
+
+def _openmm_nonbonded_particle_records(force) -> list:
+    records = []
+    for index in range(force.getNumParticles()):
+        charge, sigma, epsilon = force.getParticleParameters(index)
+        records.append(((index,), (
+            _openmm_float(charge, openmm_unit.elementary_charge),
+            _openmm_float(sigma, openmm_unit.nanometer),
+            _openmm_float(epsilon, openmm_unit.kilojoule_per_mole)
+        )))
+    return records
+
+
+def _openmm_nonbonded_exception_records(force) -> list:
+    records = []
+    charge_product_unit = openmm_unit.elementary_charge**2
+    for index in range(force.getNumExceptions()):
+        p1, p2, charge_product, sigma, epsilon = force.getExceptionParameters(index)
+        key = tuple(sorted((int(p1), int(p2))))
+        records.append((key, (
+            _openmm_float(charge_product, charge_product_unit),
+            _openmm_float(sigma, openmm_unit.nanometer),
+            _openmm_float(epsilon, openmm_unit.kilojoule_per_mole)
+        )))
+    return records
+
+
+def _openmm_nonbonded_global_parameter_records(force) -> list:
+    return [
+        ((str(force.getGlobalParameterName(index)),),
+         (float(force.getGlobalParameterDefaultValue(index)),))
+        for index in range(force.getNumGlobalParameters())
+    ]
+
+
+def _openmm_nonbonded_particle_offset_records(force) -> list:
+    records = []
+    for index in range(force.getNumParticleParameterOffsets()):
+        parameter, particle, charge_scale, sigma_scale, epsilon_scale = (
+            force.getParticleParameterOffset(index)
+        )
+        records.append(((str(parameter), int(particle)), (
+            _openmm_float(charge_scale, openmm_unit.elementary_charge),
+            _openmm_float(sigma_scale, openmm_unit.nanometer),
+            _openmm_float(epsilon_scale, openmm_unit.kilojoule_per_mole)
+        )))
+    return records
+
+
+def _openmm_nonbonded_exception_offset_records(force) -> list:
+    records = []
+    charge_product_unit = openmm_unit.elementary_charge**2
+    for index in range(force.getNumExceptionParameterOffsets()):
+        parameter, exception_index, charge_scale, sigma_scale, epsilon_scale = (
+            force.getExceptionParameterOffset(index)
+        )
+        p1, p2, _, _, _ = force.getExceptionParameters(int(exception_index))
+        pair = tuple(sorted((int(p1), int(p2))))
+        records.append(((str(parameter), *pair), (
+            _openmm_float(charge_scale, charge_product_unit),
+            _openmm_float(sigma_scale, openmm_unit.nanometer),
+            _openmm_float(epsilon_scale, openmm_unit.kilojoule_per_mole)
+        )))
+    return records
+
+
+def _openmm_atom_annotation(topology, particle_index: int) -> dict | None:
+    """Return a JSON-safe chemical identity for one OpenMM particle index."""
+    if topology is None:
+        return None
+    try:
+        atom = topology.atom(int(particle_index))
+    except Exception:
+        return None
+
+    residue = atom.residue
+    chain_index = int(residue.chain.index)
+    chain_label = chr(ord("A") + chain_index) if 0 <= chain_index < 26 else str(chain_index)
+    residue_label = f"{chain_label}:{residue.name}{residue.resSeq}"
+    return {
+        "particle_index": int(particle_index),
+        "atom_name": str(atom.name),
+        "residue_name": str(residue.name),
+        "residue_sequence": int(residue.resSeq),
+        "chain_index": chain_index,
+        "residue_label": residue_label,
+        "label": f"{residue_label}:{atom.name}",
+    }
+
+
+def _openmm_key_annotation(key, topology, atom_key_count: int | None) -> str | None:
+    if topology is None or atom_key_count is None:
+        return None
+    labels = []
+    for particle_index in list(key)[:atom_key_count]:
+        annotation = _openmm_atom_annotation(topology, particle_index)
+        labels.append(annotation["label"] if annotation else f"particle {particle_index}")
+    suffix = list(key)[atom_key_count:]
+    text = " / ".join(labels)
+    if suffix:
+        text += f" ; key-extra={suffix}"
+    return text
+
+
+def _openmm_finalize_delta_groups(groups: dict) -> list[dict]:
+    result = []
+    for name, values in groups.items():
+        count = values["count"]
+        result.append({
+            "name": name,
+            "count": count,
+            "mean_signed_delta_e": values["sum_signed"] / count if count else 0.0,
+            "mean_absolute_delta_e": values["sum_absolute"] / count if count else 0.0,
+            "rms_delta_e": float(np.sqrt(values["sum_squared"] / count)) if count else 0.0,
+            "max_absolute_delta_e": values["max_absolute"],
+        })
+    result.sort(key=lambda item: (item["max_absolute_delta_e"], item["count"]), reverse=True)
+    return result
+
+
+def _openmm_nonbonded_charge_residue_summary(records1: list, records2: list,
+                                               topology1, topology2) -> dict | None:
+    """Localize per-particle charge disagreements by residue type and instance."""
+    if topology1 is None or topology2 is None:
+        return None
+
+    by_type = defaultdict(lambda: {
+        "count": 0, "sum_signed": 0.0, "sum_absolute": 0.0,
+        "sum_squared": 0.0, "max_absolute": 0.0,
+    })
+    by_instance = defaultdict(lambda: {
+        "count": 0, "sum_signed": 0.0, "sum_absolute": 0.0,
+        "sum_squared": 0.0, "max_absolute": 0.0,
+    })
+    individual = []
+
+    for (key1, values1), (key2, values2) in zip(records1, records2):
+        if tuple(key1) != tuple(key2):
+            continue
+        q1 = float(values1[0])
+        q2 = float(values2[0])
+        if _openmm_numbers_match(q1, q2):
+            continue
+
+        particle_index = int(key1[0])
+        annotation1 = _openmm_atom_annotation(topology1, particle_index)
+        annotation2 = _openmm_atom_annotation(topology2, particle_index)
+        type1 = annotation1["residue_name"] if annotation1 else "<unknown>"
+        type2 = annotation2["residue_name"] if annotation2 else "<unknown>"
+        residue_type = type1 if type1 == type2 else f"{type1}/{type2}"
+        label1 = annotation1["residue_label"] if annotation1 else f"particle {particle_index}"
+        label2 = annotation2["residue_label"] if annotation2 else f"particle {particle_index}"
+        residue_instance = label1 if label1 == label2 else f"{label1}/{label2}"
+
+        delta = q1 - q2
+        absolute = abs(delta)
+        for groups, group_name in ((by_type, residue_type), (by_instance, residue_instance)):
+            acc = groups[group_name]
+            acc["count"] += 1
+            acc["sum_signed"] += delta
+            acc["sum_absolute"] += absolute
+            acc["sum_squared"] += delta * delta
+            acc["max_absolute"] = max(acc["max_absolute"], absolute)
+
+        individual.append({
+            "particle_index": particle_index,
+            "input1": annotation1,
+            "input2": annotation2,
+            "charge_input1_e": q1,
+            "charge_input2_e": q2,
+            "delta_input1_minus_input2_e": delta,
+            "absolute_difference_e": absolute,
+        })
+
+    individual.sort(key=lambda item: item["absolute_difference_e"], reverse=True)
+    top_n = CONFIG["openmm_xml_validation"]["top_n_differences"]
+    return {
+        "mismatch_count": len(individual),
+        "by_residue_type": _openmm_finalize_delta_groups(by_type),
+        "by_residue_instance": _openmm_finalize_delta_groups(by_instance),
+        "top_particle_mismatches": individual[:top_n],
+    }
+
+
+def _openmm_constraint_geometry(system, state, topology) -> dict:
+    """Measure how closely a serialized State satisfies its System constraints."""
+    positions = np.asarray(
+        state.getPositions(asNumpy=True).value_in_unit(openmm_unit.nanometer), dtype=float
+    )
+    box = np.asarray(
+        state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(openmm_unit.nanometer), dtype=float
+    )
+    inverse_box = None
+    try:
+        if abs(float(np.linalg.det(box))) > 1.0e-15:
+            inverse_box = np.linalg.inv(box)
+    except np.linalg.LinAlgError:
+        inverse_box = None
+
+    buckets = {"all": [], "water": [], "nonwater": []}
+    top_n = CONFIG["openmm_xml_validation"]["top_n_differences"]
+    top_heap = []
+    for constraint_index in range(system.getNumConstraints()):
+        p1, p2, target = system.getConstraintParameters(constraint_index)
+        p1 = int(p1)
+        p2 = int(p2)
+        target_nm = _openmm_float(target, openmm_unit.nanometer)
+        displacement = positions[p2] - positions[p1]
+        if inverse_box is not None:
+            fractional = displacement @ inverse_box
+            fractional -= np.round(fractional)
+            displacement = fractional @ box
+        actual_nm = float(np.linalg.norm(displacement))
+        delta_nm = actual_nm - target_nm
+        absolute_nm = abs(delta_nm)
+
+        is_water = False
+        annotation1 = _openmm_atom_annotation(topology, p1)
+        annotation2 = _openmm_atom_annotation(topology, p2)
+        if annotation1 and annotation2:
+            is_water = (
+                annotation1["residue_label"] == annotation2["residue_label"]
+                and annotation1["residue_name"].upper() in {"HOH", "WAT"}
+            )
+
+        buckets["all"].append(delta_nm)
+        buckets["water" if is_water else "nonwater"].append(delta_nm)
+        record = {
+            "constraint_index": int(constraint_index),
+            "particle1": p1,
+            "particle2": p2,
+            "input_atom1": annotation1,
+            "input_atom2": annotation2,
+            "is_water": bool(is_water),
+            "target_nm": target_nm,
+            "actual_nm": actual_nm,
+            "delta_actual_minus_target_nm": delta_nm,
+            "absolute_violation_nm": absolute_nm,
+        }
+        heap_item = (absolute_nm, int(constraint_index), record)
+        if len(top_heap) < top_n:
+            heapq.heappush(top_heap, heap_item)
+        elif absolute_nm > top_heap[0][0]:
+            heapq.heapreplace(top_heap, heap_item)
+
+    thresholds = CONFIG["openmm_xml_validation"]["constraint_geometry_thresholds_nm"]
+    summaries = {}
+    for name, values in buckets.items():
+        array = np.asarray(values, dtype=float)
+        absolute = np.abs(array)
+        summaries[name] = {
+            "count": int(array.size),
+            "mean_signed_violation_nm": float(array.mean()) if array.size else 0.0,
+            "mean_absolute_violation_nm": float(absolute.mean()) if array.size else 0.0,
+            "rms_violation_nm": float(np.sqrt(np.mean(array * array))) if array.size else 0.0,
+            "max_absolute_violation_nm": float(absolute.max()) if array.size else 0.0,
+            "counts_above_threshold_nm": {
+                f"{threshold:.1e}": int(np.count_nonzero(absolute > threshold))
+                for threshold in thresholds
+            },
+        }
+
+    top_records = [item[2] for item in sorted(top_heap, reverse=True)]
+    return {
+        "minimum_image_used": inverse_box is not None,
+        "summaries": summaries,
+        "top_violations": top_records,
+    }
+
+
+def _compare_openmm_force(force1, force2, constraint_pairs1=None, constraint_pairs2=None,
+                          topology1=None, topology2=None) -> dict:
+    force_type = type(force1).__name__
+    result = {
+        "type": force_type,
+        "metadata": _openmm_force_metadata(force1, force2),
+        "physics_differences": 0,
+        "metadata_differences": 0,
+        "fully_compared": True
+    }
+    result["metadata_differences"] = _openmm_force_metadata_difference_count(result["metadata"])
+
+    pbc = result["metadata"].get("uses_periodic_boundary_conditions")
+    if pbc is not None and not pbc["match"]:
+        result["physics_differences"] += 1
+
+    if isinstance(force1, mm.HarmonicBondForce) and isinstance(force2, mm.HarmonicBondForce):
+        bond_records1 = _openmm_harmonic_bond_records(force1)
+        bond_records2 = _openmm_harmonic_bond_records(force2)
+        terms = _openmm_compare_keyed_records(
+            bond_records1,
+            bond_records2,
+            ("length_nm", "k_kj_per_mol_nm2")
+        )
+        result["terms"] = terms
+
+        constraint_pairs1 = set() if constraint_pairs1 is None else set(constraint_pairs1)
+        constraint_pairs2 = set() if constraint_pairs2 is None else set(constraint_pairs2)
+        bond_keys1 = [tuple(key) for key, _ in bond_records1]
+        bond_keys2 = [tuple(key) for key, _ in bond_records2]
+        unique_keys1 = set(bond_keys1)
+        unique_keys2 = set(bond_keys2)
+        only1 = unique_keys1 - unique_keys2
+        only2 = unique_keys2 - unique_keys1
+        result["constraint_overlap"] = {
+            "harmonic_terms_on_constrained_pairs_input1": sum(
+                1 for key in bond_keys1 if key in constraint_pairs1
+            ),
+            "harmonic_terms_on_constrained_pairs_input2": sum(
+                1 for key in bond_keys2 if key in constraint_pairs2
+            ),
+            "input1_only_terms_on_constrained_pairs": sum(
+                1 for key in only1 if key in constraint_pairs1
+            ),
+            "input1_only_terms_not_constrained": sum(
+                1 for key in only1 if key not in constraint_pairs1
+            ),
+            "input2_only_terms_on_constrained_pairs": sum(
+                1 for key in only2 if key in constraint_pairs2
+            ),
+            "input2_only_terms_not_constrained": sum(
+                1 for key in only2 if key not in constraint_pairs2
+            ),
+        }
+        if not terms["match"]:
+            result["physics_differences"] += 1
+
+    elif isinstance(force1, mm.HarmonicAngleForce) and isinstance(force2, mm.HarmonicAngleForce):
+        terms = _openmm_compare_keyed_records(
+            _openmm_harmonic_angle_records(force1),
+            _openmm_harmonic_angle_records(force2),
+            ("theta_rad", "k_kj_per_mol_rad2")
+        )
+        result["terms"] = terms
+        if not terms["match"]:
+            result["physics_differences"] += 1
+
+    elif isinstance(force1, mm.PeriodicTorsionForce) and isinstance(force2, mm.PeriodicTorsionForce):
+        torsion_records1 = _openmm_periodic_torsion_records(force1)
+        torsion_records2 = _openmm_periodic_torsion_records(force2)
+        terms = _openmm_compare_keyed_records(
+            torsion_records1,
+            torsion_records2,
+            ("phase_rad", "k_kj_per_mol")
+        )
+        result["terms"] = terms
+        result["torsion_orientation_diagnostic"] = _openmm_torsion_orientation_diagnostic(
+            torsion_records1, torsion_records2
+        )
+        if not terms["match"]:
+            result["physics_differences"] += 1
+
+    elif isinstance(force1, mm.NonbondedForce) and isinstance(force2, mm.NonbondedForce):
+        settings = _openmm_compare_settings(
+            _openmm_nonbonded_settings(force1), _openmm_nonbonded_settings(force2)
+        )
+        particle_records1 = _openmm_nonbonded_particle_records(force1)
+        particle_records2 = _openmm_nonbonded_particle_records(force2)
+        particles = _openmm_compare_keyed_records(
+            particle_records1,
+            particle_records2,
+            ("charge_e", "sigma_nm", "epsilon_kj_per_mol")
+        )
+        exception_records1 = _openmm_nonbonded_exception_records(force1)
+        exception_records2 = _openmm_nonbonded_exception_records(force2)
+        exceptions = _openmm_compare_keyed_records(
+            exception_records1,
+            exception_records2,
+            ("charge_product_e2", "sigma_nm", "epsilon_kj_per_mol")
+        )
+        globals_result = _openmm_compare_keyed_records(
+            _openmm_nonbonded_global_parameter_records(force1),
+            _openmm_nonbonded_global_parameter_records(force2),
+            ("default_value",)
+        )
+        particle_offsets = _openmm_compare_keyed_records(
+            _openmm_nonbonded_particle_offset_records(force1),
+            _openmm_nonbonded_particle_offset_records(force2),
+            ("charge_scale_e", "sigma_scale_nm", "epsilon_scale_kj_per_mol")
+        )
+        exception_offsets = _openmm_compare_keyed_records(
+            _openmm_nonbonded_exception_offset_records(force1),
+            _openmm_nonbonded_exception_offset_records(force2),
+            ("charge_product_scale_e2", "sigma_scale_nm", "epsilon_scale_kj_per_mol")
+        )
+        charge1 = sum(values[0] for _, values in particle_records1)
+        charge2 = sum(values[0] for _, values in particle_records2)
+        result.update({
+            "settings": settings,
+            "particles": particles,
+            "particle_charge_totals_e": {
+                "input1": charge1,
+                "input2": charge2,
+                "delta_input1_minus_input2": charge1 - charge2,
+            },
+            "charge_residue_summary": _openmm_nonbonded_charge_residue_summary(
+                particle_records1, particle_records2, topology1, topology2
+            ),
+            "exceptions": exceptions,
+            "global_parameters": globals_result,
+            "particle_parameter_offsets": particle_offsets,
+            "exception_parameter_offsets": exception_offsets
+        })
+        for part in (settings, particles, exceptions, globals_result, particle_offsets, exception_offsets):
+            if not part["match"]:
+                result["physics_differences"] += 1
+
+    elif isinstance(force1, mm.CMMotionRemover) and isinstance(force2, mm.CMMotionRemover):
+        frequency = _openmm_scalar_comparison(
+            int(force1.getFrequency()), int(force2.getFrequency())
+        )
+        result["frequency"] = frequency
+        if not frequency["match"]:
+            result["physics_differences"] += 1
+
     else:
-        print("  Energy drift             : Significant (std dev > 3%)")
+        # Preserve visibility of an unexpected force type.  Raw serialization is
+        # still useful as a strict fallback, but do not claim semantic equivalence
+        # when we have not explicitly compared that Force API.
+        result["fully_compared"] = False
+        xml1 = mm.XmlSerializer.serialize(force1)
+        xml2 = mm.XmlSerializer.serialize(force2)
+        result["exact_force_xml_match"] = xml1 == xml2
+        if xml1 != xml2:
+            result["physics_differences"] += 1
+
+    return result
+
+
+def _compare_openmm_systems(system1, system2, topology1=None, topology2=None) -> dict:
+    problems = []
+    warnings = []
+    result = {}
+
+    n_particles1 = int(system1.getNumParticles())
+    n_particles2 = int(system2.getNumParticles())
+    result["particles"] = _openmm_scalar_comparison(n_particles1, n_particles2)
+    if n_particles1 != n_particles2:
+        problems.append(
+            f"particle count differs: {n_particles1} vs {n_particles2}"
+        )
+
+    mass_records1 = [
+        ((index,), (_openmm_float(system1.getParticleMass(index), openmm_unit.dalton),))
+        for index in range(n_particles1)
+    ]
+    mass_records2 = [
+        ((index,), (_openmm_float(system2.getParticleMass(index), openmm_unit.dalton),))
+        for index in range(n_particles2)
+    ]
+    masses = _openmm_compare_keyed_records(mass_records1, mass_records2, ("mass_dalton",))
+    result["particle_masses"] = masses
+    mass_total1 = sum(values[0] for _, values in mass_records1)
+    mass_total2 = sum(values[0] for _, values in mass_records2)
+    result["particle_mass_totals_dalton"] = {
+        "input1": mass_total1,
+        "input2": mass_total2,
+        "delta_input1_minus_input2": mass_total1 - mass_total2,
+    }
+    if not masses["match"]:
+        problems.append(
+            f"particle masses differ: {masses['parameter_mismatch_count']} parameter mismatches, "
+            f"{masses['keys_only_input1_count']} input1-only, {masses['keys_only_input2_count']} input2-only"
+        )
+
+    constraint_records1 = []
+    for index in range(system1.getNumConstraints()):
+        p1, p2, distance = system1.getConstraintParameters(index)
+        constraint_records1.append((
+            tuple(sorted((int(p1), int(p2)))),
+            (_openmm_float(distance, openmm_unit.nanometer),)
+        ))
+    constraint_records2 = []
+    for index in range(system2.getNumConstraints()):
+        p1, p2, distance = system2.getConstraintParameters(index)
+        constraint_records2.append((
+            tuple(sorted((int(p1), int(p2)))),
+            (_openmm_float(distance, openmm_unit.nanometer),)
+        ))
+    constraints = _openmm_compare_keyed_records(
+        constraint_records1, constraint_records2, ("distance_nm",)
+    )
+    result["constraints"] = constraints
+    constraint_pairs1 = {tuple(key) for key, _ in constraint_records1}
+    constraint_pairs2 = {tuple(key) for key, _ in constraint_records2}
+    if not constraints["match"]:
+        problems.append(
+            f"constraints differ: {constraints['count_input1']} vs {constraints['count_input2']} terms; "
+            f"{constraints['keys_only_input1_count']} input1-only, "
+            f"{constraints['keys_only_input2_count']} input2-only, "
+            f"{constraints['parameter_mismatch_count']} distance mismatches"
+        )
+
+    box1 = system1.getDefaultPeriodicBoxVectors()
+    box2 = system2.getDefaultPeriodicBoxVectors()
+    box_values1 = np.asarray([
+        [_openmm_float(component, openmm_unit.nanometer) for component in vector]
+        for vector in box1
+    ], dtype=float)
+    box_values2 = np.asarray([
+        [_openmm_float(component, openmm_unit.nanometer) for component in vector]
+        for vector in box2
+    ], dtype=float)
+    box_delta = box_values1 - box_values2
+    box_match = all(
+        _openmm_numbers_match(float(a), float(b))
+        for a, b in zip(box_values1.ravel(), box_values2.ravel())
+    )
+    result["default_periodic_box_nm"] = {
+        "input1": box_values1.tolist(),
+        "input2": box_values2.tolist(),
+        "delta_input1_minus_input2": box_delta.tolist(),
+        "max_absolute_difference_nm": float(np.max(np.abs(box_delta))),
+        "match": box_match
+    }
+    if not box_match:
+        problems.append(
+            "default periodic box differs: max |delta|="
+            f"{result['default_periodic_box_nm']['max_absolute_difference_nm']:.6g} nm"
+        )
+
+    virtual_sites1 = [index for index in range(n_particles1) if system1.isVirtualSite(index)]
+    virtual_sites2 = [index for index in range(n_particles2) if system2.isVirtualSite(index)]
+    result["virtual_sites"] = {
+        "indices_input1": virtual_sites1,
+        "indices_input2": virtual_sites2,
+        "match": virtual_sites1 == virtual_sites2,
+        "fully_compared": not virtual_sites1 and not virtual_sites2
+    }
+    if virtual_sites1 != virtual_sites2:
+        problems.append(
+            f"virtual-site particle indices differ: {len(virtual_sites1)} vs {len(virtual_sites2)}"
+        )
+    elif virtual_sites1:
+        warnings.append(
+            "virtual sites are present; indices/types should be inspected because their internal parameters "
+            "are not yet semantically expanded by this comparator"
+        )
+
+    inventory1 = _openmm_force_inventory(system1)
+    inventory2 = _openmm_force_inventory(system2)
+    inventory_result = {}
+    for force_type in sorted(set(inventory1) | set(inventory2)):
+        count1 = len(inventory1.get(force_type, []))
+        count2 = len(inventory2.get(force_type, []))
+        inventory_result[force_type] = {
+            "input1": count1,
+            "input2": count2,
+            "match": count1 == count2
+        }
+        if count1 != count2:
+            problems.append(
+                f"force inventory differs for {force_type}: {count1} vs {count2}"
+            )
+    result["force_inventory"] = inventory_result
+
+    forces_result = {}
+    metadata_difference_count = 0
+    fully_compared = True
+    for force_type in sorted(set(inventory1) | set(inventory2)):
+        forces_result[force_type] = []
+        list1 = inventory1.get(force_type, [])
+        list2 = inventory2.get(force_type, [])
+        for occurrence, ((index1, force1), (index2, force2)) in enumerate(zip(list1, list2)):
+            comparison = _compare_openmm_force(
+                force1, force2,
+                constraint_pairs1=constraint_pairs1, constraint_pairs2=constraint_pairs2,
+                topology1=topology1, topology2=topology2
+            )
+            comparison["force_index_input1"] = int(index1)
+            comparison["force_index_input2"] = int(index2)
+            forces_result[force_type].append(comparison)
+            metadata_difference_count += comparison["metadata_differences"]
+            fully_compared = fully_compared and comparison["fully_compared"]
+            if comparison["physics_differences"]:
+                problems.append(
+                    f"{force_type}[{occurrence}] differs in "
+                    f"{comparison['physics_differences']} physics-affecting section(s)"
+                )
+            if not comparison["fully_compared"]:
+                warnings.append(
+                    f"{force_type}[{occurrence}] used exact Force XML as a fallback; "
+                    "no force-specific semantic comparator is implemented"
+                )
+
+    result["forces"] = forces_result
+    result["metadata_difference_count"] = metadata_difference_count
+    result["fully_compared"] = fully_compared and result["virtual_sites"]["fully_compared"]
+    result["problems"] = problems
+    result["warnings"] = warnings
+    result["physics_match"] = len(problems) == 0 and result["fully_compared"]
+    return result
+
+
+def _compare_openmm_integrators(integrator1, integrator2) -> dict:
+    problems = []
+    type1 = type(integrator1).__name__
+    type2 = type(integrator2).__name__
+    result = {
+        "type": {"input1": type1, "input2": type2, "match": type1 == type2},
+        "settings": {}
+    }
+    if type1 != type2:
+        problems.append(f"integrator type differs: {type1} vs {type2}")
+
+    settings1 = {
+        "step_size_ps": _openmm_float(integrator1.getStepSize(), openmm_unit.picosecond),
+        "constraint_tolerance": float(integrator1.getConstraintTolerance()),
+        "integration_force_groups": int(integrator1.getIntegrationForceGroups())
+    }
+    settings2 = {
+        "step_size_ps": _openmm_float(integrator2.getStepSize(), openmm_unit.picosecond),
+        "constraint_tolerance": float(integrator2.getConstraintTolerance()),
+        "integration_force_groups": int(integrator2.getIntegrationForceGroups())
+    }
+
+    for name, getter, target_unit in (
+        ("temperature_k", "getTemperature", openmm_unit.kelvin),
+        ("friction_per_ps", "getFriction", openmm_unit.picosecond**-1),
+        ("random_number_seed", "getRandomNumberSeed", None),
+    ):
+        if hasattr(integrator1, getter) and hasattr(integrator2, getter):
+            value1 = getattr(integrator1, getter)()
+            value2 = getattr(integrator2, getter)()
+            if name == "random_number_seed":
+                settings1[name] = int(value1)
+                settings2[name] = int(value2)
+            else:
+                settings1[name] = _openmm_float(value1, target_unit)
+                settings2[name] = _openmm_float(value2, target_unit)
+
+    settings = _openmm_compare_settings(settings1, settings2)
+    result["settings"] = settings
+    if not settings["match"]:
+        problems.append(f"integrator settings differ in {settings['n_different']} field(s)")
+    result["problems"] = problems
+    result["match"] = len(problems) == 0
+    return result
+
+
+def _compare_openmm_states(state1, state2) -> dict:
+    problems = []
+    cfg = CONFIG["openmm_xml_validation"]
+    result = {}
+
+    positions1 = np.asarray(
+        state1.getPositions(asNumpy=True).value_in_unit(openmm_unit.nanometer), dtype=float
+    )
+    positions2 = np.asarray(
+        state2.getPositions(asNumpy=True).value_in_unit(openmm_unit.nanometer), dtype=float
+    )
+    position_summary = {
+        "shape_input1": list(positions1.shape),
+        "shape_input2": list(positions2.shape),
+        "match": False
+    }
+    if positions1.shape == positions2.shape:
+        delta = positions1 - positions2
+        per_atom = np.sqrt(np.sum(delta * delta, axis=1))
+        bad = per_atom > cfg["position_tolerance_nm"]
+        order = np.argsort(per_atom)[::-1]
+        top_n = cfg["top_n_differences"]
+        centroid1 = positions1.mean(axis=0)
+        centroid2 = positions2.mean(axis=0)
+        centered1 = positions1 - centroid1
+        centered2 = positions2 - centroid2
+        centered_delta = centered1 - centered2
+        centered_per_atom = np.sqrt(np.sum(centered_delta * centered_delta, axis=1))
+
+        covariance = centered1.T @ centered2
+        u_mat, _, v_t = np.linalg.svd(covariance)
+        rotation = u_mat @ v_t
+        if np.linalg.det(rotation) < 0.0:
+            u_mat[:, -1] *= -1.0
+            rotation = u_mat @ v_t
+        aligned1 = centered1 @ rotation
+        aligned_delta = aligned1 - centered2
+        aligned_per_atom = np.sqrt(np.sum(aligned_delta * aligned_delta, axis=1))
+
+        position_summary.update({
+            "n_atoms": int(positions1.shape[0]),
+            "position_tolerance_nm": cfg["position_tolerance_nm"],
+            "n_atoms_above_tolerance": int(np.count_nonzero(bad)),
+            "max_atom_displacement_nm": float(np.max(per_atom)) if len(per_atom) else 0.0,
+            "median_atom_displacement_nm": float(np.median(per_atom)) if len(per_atom) else 0.0,
+            "rms_atom_displacement_nm": float(np.sqrt(np.mean(per_atom * per_atom))) if len(per_atom) else 0.0,
+            "max_absolute_coordinate_difference_nm": float(np.max(np.abs(delta))) if delta.size else 0.0,
+            "centroid_delta_input1_minus_input2_nm": [float(v) for v in (centroid1 - centroid2)],
+            "centered_rms_atom_displacement_nm": (
+                float(np.sqrt(np.mean(centered_per_atom * centered_per_atom)))
+                if len(centered_per_atom) else 0.0
+            ),
+            "centered_max_atom_displacement_nm": (
+                float(np.max(centered_per_atom)) if len(centered_per_atom) else 0.0
+            ),
+            "kabsch_rms_atom_displacement_nm": (
+                float(np.sqrt(np.mean(aligned_per_atom * aligned_per_atom)))
+                if len(aligned_per_atom) else 0.0
+            ),
+            "kabsch_max_atom_displacement_nm": (
+                float(np.max(aligned_per_atom)) if len(aligned_per_atom) else 0.0
+            ),
+            "top_atom_displacements": [
+                {
+                    "particle_index": int(index),
+                    "displacement_nm": float(per_atom[index]),
+                    "delta_xyz_nm": [float(v) for v in delta[index]]
+                }
+                for index in order[:top_n]
+                if per_atom[index] > cfg["position_tolerance_nm"]
+            ],
+            "match": not np.any(bad)
+        })
+    result["positions"] = position_summary
+    if not position_summary["match"]:
+        problems.append(
+            "initial positions differ: "
+            f"{position_summary.get('n_atoms_above_tolerance', 'shape mismatch')} atoms above "
+            f"{cfg['position_tolerance_nm']:.1e} nm tolerance"
+        )
+
+    box1 = np.asarray(
+        state1.getPeriodicBoxVectors(asNumpy=True).value_in_unit(openmm_unit.nanometer), dtype=float
+    )
+    box2 = np.asarray(
+        state2.getPeriodicBoxVectors(asNumpy=True).value_in_unit(openmm_unit.nanometer), dtype=float
+    )
+    box_delta = box1 - box2
+    box_match = all(
+        _openmm_numbers_match(float(a), float(b))
+        for a, b in zip(box1.ravel(), box2.ravel())
+    )
+    result["periodic_box_nm"] = {
+        "input1": box1.tolist(),
+        "input2": box2.tolist(),
+        "delta_input1_minus_input2": box_delta.tolist(),
+        "max_absolute_difference_nm": float(np.max(np.abs(box_delta))),
+        "match": box_match
+    }
+    if not box_match:
+        problems.append(
+            "initial State periodic box differs: max |delta|="
+            f"{result['periodic_box_nm']['max_absolute_difference_nm']:.6g} nm"
+        )
+
+    potential1 = _openmm_float(state1.getPotentialEnergy(), openmm_unit.kilojoule_per_mole)
+    potential2 = _openmm_float(state2.getPotentialEnergy(), openmm_unit.kilojoule_per_mole)
+    result["potential_energy_kj_per_mol"] = _openmm_scalar_comparison(
+        potential1, potential2,
+        absolute_tolerance=cfg["energy_tolerance_kj_per_mol"],
+        relative_tolerance=0.0
+    )
+    if not result["potential_energy_kj_per_mol"]["match"]:
+        problems.append(
+            "initial State potential energy differs by "
+            f"{result['potential_energy_kj_per_mol']['absolute_difference']:.6g} kJ/mol"
+        )
+
+    kinetic1 = _openmm_float(state1.getKineticEnergy(), openmm_unit.kilojoule_per_mole)
+    kinetic2 = _openmm_float(state2.getKineticEnergy(), openmm_unit.kilojoule_per_mole)
+    result["kinetic_energy_kj_per_mol"] = _openmm_scalar_comparison(
+        kinetic1, kinetic2,
+        absolute_tolerance=cfg["energy_tolerance_kj_per_mol"],
+        relative_tolerance=0.0
+    )
+    result["kinetic_energy_kj_per_mol"]["diagnostic_only"] = True
+
+    result["time_ps"] = _openmm_scalar_comparison(
+        _openmm_float(state1.getTime(), openmm_unit.picosecond),
+        _openmm_float(state2.getTime(), openmm_unit.picosecond)
+    )
+    if not result["time_ps"]["match"]:
+        problems.append("initial State time differs")
+
+    if hasattr(state1, "getStepCount") and hasattr(state2, "getStepCount"):
+        result["step_count"] = _openmm_scalar_comparison(
+            int(state1.getStepCount()), int(state2.getStepCount())
+        )
+        if not result["step_count"]["match"]:
+            problems.append("initial State step count differs")
+
+    try:
+        parameters1 = {str(key): float(value) for key, value in state1.getParameters().items()}
+        parameters2 = {str(key): float(value) for key, value in state2.getParameters().items()}
+        result["context_parameters"] = _openmm_compare_settings(parameters1, parameters2)
+        if not result["context_parameters"]["match"]:
+            problems.append(
+                f"initial State Context parameters differ in "
+                f"{result['context_parameters']['n_different']} field(s)"
+            )
+    except Exception as exc:
+        result["context_parameters"] = {"available": False, "error": str(exc)}
+
+    result["problems"] = problems
+    result["match"] = len(problems) == 0
+    return result
+
+
+def compare_serialized_openmm_xml(out1: Path | None, out2: Path | None,
+                                  label1: str, label2: str,
+                                  topology1=None, topology2=None):
+    """Discover and semantically compare OpenMM XmlSerializer files beside MD logs."""
+    paths1 = _discover_openmm_serialized_paths(out1)
+    paths2 = _discover_openmm_serialized_paths(out2)
+    any_xml = any(
+        path is not None and Path(path).is_file()
+        for path in list(paths1.values()) + list(paths2.values())
+    )
+    if not any_xml:
+        return None
+
+    result = {
+        "comparison_version": 3,
+        "input1_label": label1,
+        "input2_label": label2,
+        "tolerances": dict(CONFIG["openmm_xml_validation"]),
+        "files": {"input1": {}, "input2": {}},
+        "problems": [],
+        "warnings": []
+    }
+    for key in _OPENMM_SERIALIZED_FILENAMES:
+        result["files"]["input1"][key] = _openmm_path_metadata(paths1[key])
+        result["files"]["input2"][key] = _openmm_path_metadata(paths2[key])
+
+    for key in _OPENMM_SERIALIZED_FILENAMES:
+        exists1 = result["files"]["input1"][key]["exists"]
+        exists2 = result["files"]["input2"][key]["exists"]
+        if exists1 != exists2:
+            missing_label = label2 if exists1 else label1
+            result["problems"].append(f"{key} XML is missing for {missing_label}")
+
+    if mm is None:
+        result["warnings"].append(
+            "OpenMM Python module is unavailable; serialized XML files were discovered but can not be deserialized."
+        )
+        result["fully_compared"] = False
+        return result
+
+    comparisons = (
+        ("system", lambda obj1, obj2: _compare_openmm_systems(
+            obj1, obj2, topology1=topology1, topology2=topology2
+        )),
+        ("integrator", _compare_openmm_integrators),
+        ("initial_state", _compare_openmm_states),
+    )
+    loaded_objects = {}
+    for key, comparator in comparisons:
+        path1 = paths1[key]
+        path2 = paths2[key]
+        exists1 = path1 is not None and Path(path1).is_file()
+        exists2 = path2 is not None and Path(path2).is_file()
+        if not exists1 or not exists2:
+            continue
+
+        result["files"]["input1"][key]["exact_bytes_match"] = (
+            Path(path1).read_bytes() == Path(path2).read_bytes()
+        )
+        result["files"]["input2"][key]["exact_bytes_match"] = (
+            result["files"]["input1"][key]["exact_bytes_match"]
+        )
+
+        try:
+            object1 = _load_openmm_serialized_object(Path(path1))
+            object2 = _load_openmm_serialized_object(Path(path2))
+            loaded_objects[key] = (object1, object2)
+            comparison = comparator(object1, object2)
+            result[key] = comparison
+            for problem in comparison.get("problems", []):
+                result["problems"].append(f"{key}: {problem}")
+            for warning in comparison.get("warnings", []):
+                result["warnings"].append(f"{key}: {warning}")
+        except Exception as exc:
+            result["problems"].append(
+                f"failed to compare {key} XML: {type(exc).__name__}: {exc}"
+            )
+            result[key] = {"comparison_error": f"{type(exc).__name__}: {exc}"}
+
+    if "system" in loaded_objects and "initial_state" in loaded_objects:
+        system1, system2 = loaded_objects["system"]
+        state1, state2 = loaded_objects["initial_state"]
+        try:
+            result["initial_constraint_geometry"] = {
+                "input1": _openmm_constraint_geometry(system1, state1, topology1),
+                "input2": _openmm_constraint_geometry(system2, state2, topology2),
+            }
+        except Exception as exc:
+            result["warnings"].append(
+                f"initial constraint geometry diagnostic failed: {type(exc).__name__}: {exc}"
+            )
+
+    result["fully_compared"] = all(
+        key in result
+        and "comparison_error" not in result[key]
+        and result[key].get("fully_compared", True)
+        for key, _ in comparisons
+        if result["files"]["input1"][key]["exists"]
+        or result["files"]["input2"][key]["exists"]
+    )
+    result["match"] = len(result["problems"]) == 0 and result["fully_compared"]
+    return result
+
+
+def _print_openmm_record_summary(title: str, result: dict) -> None:
+    print(
+        f"    {title:<28}: {result['count_input1']} vs {result['count_input2']}  "
+        f"only1={result['keys_only_input1_count']} only2={result['keys_only_input2_count']} "
+        f"param_diff={result['parameter_mismatch_count']}"
+    )
+
+
+def _print_openmm_unique_key_summary(result: dict) -> None:
+    """Report distinct interaction keys and repeated-key records."""
+    print(
+        f"      unique keys: {result['unique_key_count_input1']} vs "
+        f"{result['unique_key_count_input2']}  "
+        f"common={result['common_unique_key_count']}  "
+        f"repeated-key excess={result['repeated_key_record_count_input1']} vs "
+        f"{result['repeated_key_record_count_input2']}  "
+        f"multiplicity_diff={result['multiplicity_mismatch_count']}"
+    )
+
+
+def _print_openmm_torsion_orientation_summary(
+    title: str,
+    diagnostic: dict,
+    topology1=None,
+    topology2=None,
+    limit: int = 3,
+) -> None:
+    """Print a diagnostic-only forward/reverse torsion-key comparison."""
+    print("      torsion orientation diagnostic (forward/reverse only; strict comparison unchanged):")
+    print(
+        f"        orientation-normalized unique keys: "
+        f"{diagnostic['orientation_normalized_unique_key_count_input1']} vs "
+        f"{diagnostic['orientation_normalized_unique_key_count_input2']}  "
+        f"common={diagnostic['orientation_normalized_common_unique_key_count']}  "
+        f"only1={diagnostic['orientation_normalized_only_input1_count']} "
+        f"only2={diagnostic['orientation_normalized_only_input2_count']}"
+    )
+    print(
+        f"        exact-only keys with reverse in other input: "
+        f"input1={diagnostic['input1_only_with_reverse_in_input2_count']} "
+        f"input2={diagnostic['input2_only_with_reverse_in_input1_count']}"
+    )
+    print(
+        f"        exact-only keys still unmatched after reverse check: "
+        f"input1={diagnostic['input1_only_without_reverse_in_input2_count']} "
+        f"input2={diagnostic['input2_only_without_reverse_in_input1_count']}"
+    )
+    print(
+        f"        canonical keys represented in both directions within one XML: "
+        f"{diagnostic['bidirectional_key_pair_count_input1']} vs "
+        f"{diagnostic['bidirectional_key_pair_count_input2']}"
+    )
+    print(
+        f"        reverse candidates with different stored phase/k or multiplicity: "
+        f"input1->input2={diagnostic['reversed_parameter_mismatch_count_input1_to_input2']} "
+        f"input2->input1={diagnostic['reversed_parameter_mismatch_count_input2_to_input1']}"
+    )
+
+    shown = 0
+    for item in diagnostic.get("reversed_examples_input1_to_input2", []):
+        if shown >= limit:
+            break
+        key1 = item["key_input1"]
+        key2 = item["reverse_key_input2"]
+        annotation1 = _openmm_key_annotation(key1, topology1, 4)
+        annotation2 = _openmm_key_annotation(key2, topology2, 4)
+        annotations = []
+        if annotation1:
+            annotations.append(f"input1={annotation1}")
+        if annotation2:
+            annotations.append(f"input2={annotation2}")
+        suffix = f"  [{' ; '.join(annotations)}]" if annotations else ""
+        print(
+            f"        reverse candidate input1 key={key1} -> input2 key={key2}{suffix}; "
+            f"multiplicity={item['count_input1']} vs {item['count_input2']}; "
+            f"stored phase/k match={item['stored_parameters_match']}"
+        )
+        shown += 1
+
+    for item in diagnostic.get("reversed_examples_input2_to_input1", []):
+        if shown >= limit:
+            break
+        key2 = item["key_input2"]
+        key1 = item["reverse_key_input1"]
+        annotation2 = _openmm_key_annotation(key2, topology2, 4)
+        annotation1 = _openmm_key_annotation(key1, topology1, 4)
+        annotations = []
+        if annotation2:
+            annotations.append(f"input2={annotation2}")
+        if annotation1:
+            annotations.append(f"input1={annotation1}")
+        suffix = f"  [{' ; '.join(annotations)}]" if annotations else ""
+        print(
+            f"        reverse candidate input2 key={key2} -> input1 key={key1}{suffix}; "
+            f"multiplicity={item['count_input2']} vs {item['count_input1']}; "
+            f"stored phase/k match={item['stored_parameters_match']}"
+        )
+        shown += 1
+
+
+def _print_openmm_field_statistics(title: str, result: dict) -> None:
+    for field, stats in result.get("field_statistics", {}).items():
+        if stats["mismatch_count"] == 0:
+            continue
+        extra = ""
+        if field == "theta_rad":
+            extra = (
+                f"; max={np.degrees(stats['max_absolute_difference']):.4g} deg"
+                f"; rms={np.degrees(stats['rms_difference']):.4g} deg"
+            )
+        print(
+            f"      {title} {field}: mismatches={stats['mismatch_count']}/"
+            f"{stats['compared_count']} mean_abs={stats['mean_absolute_difference']:.6g} "
+            f"rms={stats['rms_difference']:.6g} max={stats['max_absolute_difference']:.6g}{extra}"
+        )
+
+
+def _print_openmm_top_record_differences(title: str, result: dict, limit: int = 3,
+                                         topology1=None, topology2=None,
+                                         atom_key_count: int | None = None) -> None:
+    shown = 0
+    for side, key_name, topology in (
+        ("input1-only", "keys_only_input1", topology1),
+        ("input2-only", "keys_only_input2", topology2),
+    ):
+        for key in result.get(key_name, []):
+            if shown >= limit:
+                return
+            annotation = _openmm_key_annotation(key, topology, atom_key_count)
+            suffix = f"  [{annotation}]" if annotation else ""
+            print(f"      {title} {side} key={key}{suffix}")
+            shown += 1
+
+    for mismatch in result.get("top_parameter_mismatches", []):
+        if shown >= limit:
+            return
+        changed = []
+        for field, values in mismatch["fields"].items():
+            if values["match"]:
+                continue
+            changed.append(
+                f"{field}: {values['input1']:.8g} vs {values['input2']:.8g} "
+                f"(delta={values['delta_input1_minus_input2']:+.3e})"
+            )
+        annotation1 = _openmm_key_annotation(mismatch["key"], topology1, atom_key_count)
+        annotation2 = _openmm_key_annotation(mismatch["key"], topology2, atom_key_count)
+        annotations = []
+        if annotation1:
+            annotations.append(f"input1={annotation1}")
+        if annotation2 and annotation2 != annotation1:
+            annotations.append(f"input2={annotation2}")
+        suffix = f"  [{' ; '.join(annotations)}]" if annotations else ""
+        print(f"      {title} key={mismatch['key']}{suffix}  " + "; ".join(changed))
+        shown += 1
+
+
+def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison: dict,
+                                              topology1=None, topology2=None) -> None:
+    if not comparison:
+        return
+
+    print("\nSerialized OpenMM XML Validation")
+    print("=" * 72)
+    for key, filename in _OPENMM_SERIALIZED_FILENAMES.items():
+        file1 = comparison["files"]["input1"][key]
+        file2 = comparison["files"]["input2"][key]
+        status1 = file1["path"] if file1["exists"] else "MISSING"
+        status2 = file2["path"] if file2["exists"] else "MISSING"
+        print(f"  {filename}")
+        print(f"    {label1:<20}: {status1}")
+        print(f"    {label2:<20}: {status2}")
+
+    system = comparison.get("system")
+    if system and "comparison_error" not in system:
+        print("\n  System semantic comparison")
+        particle_status = "MATCH" if system["particles"]["match"] else "DIFFER"
+        print(
+            f"    particles                    : {particle_status:<6}  "
+            f"{system['particles']['input1']} vs {system['particles']['input2']}"
+        )
+        _print_openmm_record_summary("particle masses", system["particle_masses"])
+        _print_openmm_field_statistics("particle masses", system["particle_masses"])
+        print(
+            f"      total mass delta: "
+            f"{system['particle_mass_totals_dalton']['delta_input1_minus_input2']:+.6g} Da"
+        )
+        if not system["particle_masses"]["match"]:
+            _print_openmm_top_record_differences(
+                "particle masses", system["particle_masses"],
+                topology1=topology1, topology2=topology2, atom_key_count=1
+            )
+        _print_openmm_record_summary("constraints", system["constraints"])
+        _print_openmm_field_statistics("constraints", system["constraints"])
+        if not system["constraints"]["match"]:
+            _print_openmm_top_record_differences(
+                "constraints", system["constraints"],
+                topology1=topology1, topology2=topology2, atom_key_count=2
+            )
+        print(
+            f"    default periodic box         : max |delta|="
+            f"{system['default_periodic_box_nm']['max_absolute_difference_nm']:.6g} nm"
+        )
+        print("    force inventory:")
+        for force_type, values in system["force_inventory"].items():
+            status = "MATCH" if values["match"] else "DIFFER"
+            print(
+                f"      {force_type:<24}: {status:<6}  "
+                f"{values['input1']} vs {values['input2']}"
+            )
+        for force_type, force_comparisons in system["forces"].items():
+            for occurrence, force_result in enumerate(force_comparisons):
+                prefix = f"{force_type}[{occurrence}]"
+                if "terms" in force_result:
+                    _print_openmm_record_summary(prefix, force_result["terms"])
+                    if force_type in (
+                        "HarmonicBondForce",
+                        "HarmonicAngleForce",
+                        "PeriodicTorsionForce",
+                    ):
+                        _print_openmm_unique_key_summary(force_result["terms"])
+                    if (
+                        force_type == "PeriodicTorsionForce"
+                        and "torsion_orientation_diagnostic" in force_result
+                    ):
+                        _print_openmm_torsion_orientation_summary(
+                            prefix,
+                            force_result["torsion_orientation_diagnostic"],
+                            topology1=topology1,
+                            topology2=topology2,
+                        )
+                    _print_openmm_field_statistics(prefix, force_result["terms"])
+                    if force_type == "HarmonicBondForce" and "constraint_overlap" in force_result:
+                        overlap = force_result["constraint_overlap"]
+                        print(
+                            f"      constrained harmonic terms: "
+                            f"{overlap['harmonic_terms_on_constrained_pairs_input1']} vs "
+                            f"{overlap['harmonic_terms_on_constrained_pairs_input2']}"
+                        )
+                        print(
+                            f"      input1-only bonds: constrained="
+                            f"{overlap['input1_only_terms_on_constrained_pairs']} "
+                            f"unconstrained={overlap['input1_only_terms_not_constrained']}; "
+                            f"input2-only: constrained="
+                            f"{overlap['input2_only_terms_on_constrained_pairs']} "
+                            f"unconstrained={overlap['input2_only_terms_not_constrained']}"
+                        )
+                    if not force_result["terms"]["match"]:
+                        atom_key_count = {
+                            "HarmonicBondForce": 2,
+                            "HarmonicAngleForce": 3,
+                            "PeriodicTorsionForce": 4,
+                        }.get(force_type)
+                        _print_openmm_top_record_differences(
+                            prefix, force_result["terms"],
+                            topology1=topology1, topology2=topology2,
+                            atom_key_count=atom_key_count
+                        )
+                if force_type == "NonbondedForce":
+                    print(
+                        f"    {prefix + ' settings':<28}: "
+                        f"different={force_result['settings']['n_different']}"
+                    )
+                    _print_openmm_record_summary(prefix + " particles", force_result["particles"])
+                    _print_openmm_field_statistics(prefix + " particles", force_result["particles"])
+                    charge_totals = force_result["particle_charge_totals_e"]
+                    print(
+                        f"      total particle charge (e): "
+                        f"{charge_totals['input1']:+.9g} vs {charge_totals['input2']:+.9g} "
+                        f"(delta={charge_totals['delta_input1_minus_input2']:+.6g})"
+                    )
+                    if not force_result["particles"]["match"]:
+                        _print_openmm_top_record_differences(
+                            prefix + " particles", force_result["particles"],
+                            topology1=topology1, topology2=topology2, atom_key_count=1
+                        )
+                    charge_summary = force_result.get("charge_residue_summary")
+                    if charge_summary and charge_summary["mismatch_count"]:
+                        print("      charge mismatches by residue type (largest |delta q|):")
+                        for entry in charge_summary["by_residue_type"][:5]:
+                            print(
+                                f"        {entry['name']:<20} n={entry['count']:<5d} "
+                                f"mean_abs={entry['mean_absolute_delta_e']:.6g} e "
+                                f"max={entry['max_absolute_delta_e']:.6g} e"
+                            )
+                        print("      largest residue-instance charge mismatches:")
+                        for entry in charge_summary["by_residue_instance"][:3]:
+                            print(
+                                f"        {entry['name']:<28} n={entry['count']:<4d} "
+                                f"max={entry['max_absolute_delta_e']:.6g} e"
+                            )
+                    _print_openmm_record_summary(prefix + " exceptions", force_result["exceptions"])
+                    _print_openmm_field_statistics(prefix + " exceptions", force_result["exceptions"])
+                    if not force_result["exceptions"]["match"]:
+                        _print_openmm_top_record_differences(
+                            prefix + " exceptions", force_result["exceptions"],
+                            topology1=topology1, topology2=topology2, atom_key_count=2
+                        )
+        if system["metadata_difference_count"]:
+            print(
+                f"    force metadata differences   : {system['metadata_difference_count']} "
+                "(group/name; reported separately from Hamiltonian differences)"
+            )
+
+    integrator = comparison.get("integrator")
+    if integrator and "comparison_error" not in integrator:
+        status = "MATCH" if integrator["match"] else "DIFFER"
+        print(f"\n  Integrator                     : {status}")
+        print(
+            f"    type                         : {integrator['type']['input1']} vs "
+            f"{integrator['type']['input2']}"
+        )
+        for field, values in integrator["settings"]["fields"].items():
+            if not values["match"]:
+                print(f"    {field:<28}: {values['input1']} vs {values['input2']}")
+
+    state = comparison.get("initial_state")
+    if state and "comparison_error" not in state:
+        status = "MATCH" if state["match"] else "DIFFER"
+        positions = state["positions"]
+        print(f"\n  Initial State                  : {status}")
+        if positions.get("n_atoms") is not None:
+            print(
+                f"    positions                    : {positions['n_atoms_above_tolerance']} atoms above "
+                f"{positions['position_tolerance_nm']:.1e} nm; max displacement="
+                f"{positions['max_atom_displacement_nm']:.6g} nm; rms="
+                f"{positions['rms_atom_displacement_nm']:.6g} nm"
+            )
+            centroid_delta = positions["centroid_delta_input1_minus_input2_nm"]
+            print(
+                "    centroid delta (1-2) nm      : "
+                + " ".join(f"{value:+.6g}" for value in centroid_delta)
+            )
+            print(
+                f"    centered coordinate delta    : rms="
+                f"{positions['centered_rms_atom_displacement_nm']:.6g} nm; max="
+                f"{positions['centered_max_atom_displacement_nm']:.6g} nm"
+            )
+            print(
+                f"    Kabsch-aligned delta          : rms="
+                f"{positions['kabsch_rms_atom_displacement_nm']:.6g} nm; max="
+                f"{positions['kabsch_max_atom_displacement_nm']:.6g} nm"
+            )
+        else:
+            print(
+                f"    positions                    : shape {positions['shape_input1']} vs "
+                f"{positions['shape_input2']}"
+            )
+        print(
+            f"    periodic box                 : max |delta|="
+            f"{state['periodic_box_nm']['max_absolute_difference_nm']:.6g} nm"
+        )
+        print(
+            f"    potential energy             : delta="
+            f"{state['potential_energy_kj_per_mol']['delta_input1_minus_input2']:+.6g} kJ/mol"
+        )
+        print(
+            f"    kinetic energy (diagnostic)  : delta="
+            f"{state['kinetic_energy_kj_per_mol']['delta_input1_minus_input2']:+.6g} kJ/mol"
+        )
+
+    constraint_geometry = comparison.get("initial_constraint_geometry")
+    if constraint_geometry:
+        print("\n  Initial constraint-geometry diagnostic")
+        for side_key, label in (("input1", label1), ("input2", label2)):
+            diagnostic = constraint_geometry[side_key]
+            print(f"    {label}:")
+            for bucket_name in ("all", "water", "nonwater"):
+                stats = diagnostic["summaries"][bucket_name]
+                thresholds = stats["counts_above_threshold_nm"]
+                print(
+                    f"      {bucket_name:<9} n={stats['count']:<7d} "
+                    f"rms={stats['rms_violation_nm']:.6g} nm "
+                    f"max={stats['max_absolute_violation_nm']:.6g} nm "
+                    f">1e-5nm={thresholds.get('1.0e-05', 0)}"
+                )
+            if diagnostic["top_violations"]:
+                print("      largest violations:")
+                for item in diagnostic["top_violations"][:3]:
+                    atom1 = item["input_atom1"]
+                    atom2 = item["input_atom2"]
+                    label_atom1 = atom1["label"] if atom1 else str(item["particle1"])
+                    label_atom2 = atom2["label"] if atom2 else str(item["particle2"])
+                    print(
+                        f"        {label_atom1} -- {label_atom2}: "
+                        f"actual-target={item['delta_actual_minus_target_nm']:+.6g} nm "
+                        f"(target={item['target_nm']:.8g} nm)"
+                    )
+
+    if comparison.get("problems"):
+        print("\n  Serialized XML differences requiring review:")
+        for problem in comparison["problems"]:
+            print(f"    - {problem}")
+    elif comparison.get("fully_compared"):
+        print("\n  No semantic differences detected in the serialized OpenMM objects.")
+    else:
+        print("\n  No differences detected in compared fields, but the XML comparison is incomplete.")
+
+    if comparison.get("warnings"):
+        print("\n  Serialized XML comparison warnings:")
+        for warning in comparison["warnings"]:
+            print(f"    - {warning}")
 
 
 # ──────────────────────────  MAIN  ───────────────────────────────────────────
@@ -408,8 +3433,8 @@ def main()->None:
     ap.add_argument("-o","--out-prefix", default="comparison", help="Use as a basename for the comparison (e.g. PDBid)")
     ap.add_argument("--label1", default="Complete Structure")
     ap.add_argument("--label2", default="Published Structure")
-    ap.add_argument("--out1", type=Path, help="OUT.gz file for trajectory 1 (optional)")
-    ap.add_argument("--out2", type=Path, help="OUT.gz file for trajectory 2 (optional)")
+    ap.add_argument("--out1", type=Path, help="MD output/screenout for trajectory 1; plain text or gzip (optional)")
+    ap.add_argument("--out2", type=Path, help="MD output/screenout for trajectory 2; plain text or gzip (optional)")
     ap.add_argument("--ligand", type=str, help="3-letter ligand residue name (e.g., CBN or LIG)")
     ap.add_argument("-q","--quiet",action="store_true")
     args=ap.parse_args()
@@ -539,8 +3564,8 @@ def main()->None:
         plt.savefig(f"{args.out_prefix}_rmsf_aligned.pdf",dpi=CONFIG["plot"]["dpi"]); plt.close()
 
         # Aligned residue lists (built earlier from m1 / m2)
-        aligned_res1 = [t1.topology.atom(ca).residue for ca in m1]
-        aligned_res2 = [t2.topology.atom(ca).residue for ca in m2]
+        aligned_res1 = [prot1.topology.atom(ca).residue for ca in m1]
+        aligned_res2 = [prot2.topology.atom(ca).residue for ca in m2]
         n_aligned    = len(aligned_res1)
 
         # ───────── TRAJECTORY VALIDATION: RMSF PROFILE SIMILARITY ─────────
@@ -1651,28 +4676,70 @@ def main()->None:
             }
             summary["ligand"]["loop_dccm"] = lig_loop_stats
         
-        # ───────── Simulation summary from OUT.gz (optional) ─────────
+        # ───────── MD output / OpenMM system + energy validation (optional) ─────────
+        out1_data = parse_out_file(args.out1) if args.out1 else None
+        out2_data = parse_out_file(args.out2) if args.out2 else None
+
         if args.out1 or args.out2:
-            print("\n" + "=" * 60)
-            print("Production Energy & Temperature Summary")
-            print("=" * 60)
-        
-        if args.out1:
-            out1_data = parse_out_file(args.out1)
+            print("\n" + "=" * 72)
+            print("MD Output / OpenMM Validation")
+            print("=" * 72)
+            if args.out1:
+                print_single_output_summary(args.label1, out1_data)
+            if args.out2:
+                print_single_output_summary(args.label2, out2_data)
+
+            openmm_validation = {
+                "delta_definition": f"{args.label1} - {args.label2}",
+                "relative_difference_definition": (
+                    "symmetric percent difference = 200*|x1-x2|/(|x1|+|x2|)"
+                ),
+                "input1": out1_data,
+                "input2": out2_data,
+                "comparison": None
+            }
+
+            serialized_xml_comparison = compare_serialized_openmm_xml(
+                args.out1, args.out2, args.label1, args.label2,
+                topology1=t1.topology, topology2=t2.topology
+            )
+            if serialized_xml_comparison is not None:
+                openmm_validation["serialized_xml"] = serialized_xml_comparison
+                print_serialized_openmm_xml_comparison(
+                    args.label1, args.label2, serialized_xml_comparison,
+                    topology1=t1.topology, topology2=t2.topology
+                )
+
             if out1_data:
-                summary["out1_summary"] = {k: float(v) for k, v in out1_data.items()}
-            print_sim_summary(args.label1, out1_data)
-        
-        if args.out2:
-            out2_data = parse_out_file(args.out2)
+                compat1 = compatibility_out_summary(out1_data)
+                if compat1:
+                    summary["out1_summary"] = compat1
             if out2_data:
-                summary["out2_summary"] = {k: float(v) for k, v in out2_data.items()}
-            print_sim_summary(args.label2, out2_data)
+                compat2 = compatibility_out_summary(out2_data)
+                if compat2:
+                    summary["out2_summary"] = compat2
+
+            if out1_data and out2_data:
+                output_comparison = compare_openmm_outputs(out1_data, out2_data)
+                openmm_validation["comparison"] = output_comparison
+
+                print_system_comparison(args.label1, args.label2, output_comparison)
+                print_representative_parameter_comparison(output_comparison)
+                print_protocol_comparison(args.label1, args.label2, output_comparison)
+                print_timing_comparison(args.label1, args.label2, output_comparison)
+                print_energy_comparison(args.label1, args.label2, output_comparison)
+                print_production_comparison(args.label1, args.label2, output_comparison)
+                plot_production_validation(
+                    out1_data, out2_data, output_comparison,
+                    args.label1, args.label2, args.out_prefix
+                )
+
+            summary["openmm_validation"] = openmm_validation
 
         json_file = f"{args.out_prefix}_summary.json"
         with open(json_file, "w") as jfh:
             json.dump(summary, jfh, indent=2, ensure_ascii=False)
-            logging.info("Wrote summary JSON to %s", json_file)
+            print(f"INFO: Wrote summary JSON to {json_file}", flush=True)
 
     finally:
         for f in tmp_files:
