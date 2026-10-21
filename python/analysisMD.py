@@ -2147,6 +2147,256 @@ def _openmm_nonbonded_exception_records(force) -> list:
     return records
 
 
+def _openmm_nonbonded_exception_offset_activity(force) -> dict[str, set[tuple[int, int]]]:
+    """Return exception pairs that parameter offsets can activate energetically."""
+    charge_pairs = set()
+    epsilon_pairs = set()
+    charge_product_unit = openmm_unit.elementary_charge**2
+    for index in range(force.getNumExceptionParameterOffsets()):
+        _, exception_index, charge_scale, _, epsilon_scale = force.getExceptionParameterOffset(index)
+        charge_scale = _openmm_float(charge_scale, charge_product_unit)
+        epsilon_scale = _openmm_float(epsilon_scale, openmm_unit.kilojoule_per_mole)
+        p1, p2, _, _, _ = force.getExceptionParameters(int(exception_index))
+        pair = tuple(sorted((int(p1), int(p2))))
+        if not _openmm_numbers_match(charge_scale, 0.0):
+            charge_pairs.add(pair)
+        if not _openmm_numbers_match(epsilon_scale, 0.0):
+            epsilon_pairs.add(pair)
+
+    return {
+        "charge_pairs": charge_pairs,
+        "epsilon_pairs": epsilon_pairs,
+        "energy_pairs": charge_pairs | epsilon_pairs,
+    }
+
+
+def _openmm_exception_residue_pair_labels(key, topology) -> tuple[str, str] | None:
+    """Return residue-type and residue-instance labels for one exception pair."""
+    if topology is None:
+        return None
+    annotations = [_openmm_atom_annotation(topology, particle_index) for particle_index in key[:2]]
+    if any(annotation is None for annotation in annotations):
+        return None
+
+    residue_types = [annotation["residue_name"] for annotation in annotations]
+    residue_instances = [annotation["residue_label"] for annotation in annotations]
+    type_label = residue_types[0] if residue_types[0] == residue_types[1] else " / ".join(residue_types)
+    instance_label = (
+        residue_instances[0]
+        if residue_instances[0] == residue_instances[1]
+        else " / ".join(residue_instances)
+    )
+    return type_label, instance_label
+
+
+def _openmm_nonbonded_exception_diagnostic(force1, force2, comparison: dict,
+                                            topology1=None, topology2=None) -> dict:
+    """Classify strict exception differences by their energetic significance.
+
+    A NonbondedForce exception with charge product and epsilon both equal to zero
+    contributes no electrostatic or Lennard-Jones energy, so its sigma value is
+    immaterial. An exception parameter offset can activate charge product or
+    epsilon later, so those pairs are conservatively treated as potentially
+    energy-active.
+    """
+    grouped1 = defaultdict(list)
+    grouped2 = defaultdict(list)
+    for key, values in _openmm_nonbonded_exception_records(force1):
+        grouped1[tuple(key)].append(tuple(float(value) for value in values))
+    for key, values in _openmm_nonbonded_exception_records(force2):
+        grouped2[tuple(key)].append(tuple(float(value) for value in values))
+
+    offset_activity1 = _openmm_nonbonded_exception_offset_activity(force1)
+    offset_activity2 = _openmm_nonbonded_exception_offset_activity(force2)
+
+    sigma_mismatch_count = 0
+    zero_energy_sigma_mismatch_count = 0
+    energy_active_sigma_mismatch_count = 0
+    lj_relevant_sigma_mismatch_count = 0
+    offset_sensitive_sigma_mismatch_count = 0
+    charge_product_mismatch_count = 0
+    epsilon_mismatch_count = 0
+    physics_affecting_parameter_mismatch_count = 0
+    mismatch_activity_transitions = {
+        "inactive_to_inactive": 0,
+        "inactive_to_active": 0,
+        "active_to_inactive": 0,
+        "active_to_active": 0,
+    }
+    physics_mismatches = []
+    residue_type_counts = defaultdict(int)
+    residue_instance_counts = defaultdict(int)
+
+    cfg = CONFIG["openmm_xml_validation"]
+    atol = cfg["absolute_tolerance"]
+    rtol = cfg["relative_tolerance"]
+
+    for key in sorted(set(grouped1) & set(grouped2)):
+        values1 = sorted(grouped1[key])
+        values2 = sorted(grouped2[key])
+        for params1, params2 in zip(values1, values2):
+            charge1, sigma1, epsilon1 = params1
+            charge2, sigma2, epsilon2 = params2
+            charge_match = _openmm_numbers_match(charge1, charge2)
+            sigma_match = _openmm_numbers_match(sigma1, sigma2)
+            epsilon_match = _openmm_numbers_match(epsilon1, epsilon2)
+            any_parameter_mismatch = not (charge_match and sigma_match and epsilon_match)
+
+            charge_active1 = (
+                not _openmm_numbers_match(charge1, 0.0)
+                or key in offset_activity1["charge_pairs"]
+            )
+            charge_active2 = (
+                not _openmm_numbers_match(charge2, 0.0)
+                or key in offset_activity2["charge_pairs"]
+            )
+            lj_active1 = (
+                not _openmm_numbers_match(epsilon1, 0.0)
+                or key in offset_activity1["epsilon_pairs"]
+            )
+            lj_active2 = (
+                not _openmm_numbers_match(epsilon2, 0.0)
+                or key in offset_activity2["epsilon_pairs"]
+            )
+            active1 = charge_active1 or lj_active1
+            active2 = charge_active2 or lj_active2
+            transition = (
+                ("active" if active1 else "inactive")
+                + "_to_"
+                + ("active" if active2 else "inactive")
+            )
+            if any_parameter_mismatch:
+                mismatch_activity_transitions[transition] += 1
+
+            if not charge_match:
+                charge_product_mismatch_count += 1
+            if not epsilon_match:
+                epsilon_mismatch_count += 1
+            if not sigma_match:
+                sigma_mismatch_count += 1
+                if not active1 and not active2:
+                    zero_energy_sigma_mismatch_count += 1
+                else:
+                    energy_active_sigma_mismatch_count += 1
+                if lj_active1 or lj_active2:
+                    lj_relevant_sigma_mismatch_count += 1
+                if key in offset_activity1["energy_pairs"] or key in offset_activity2["energy_pairs"]:
+                    offset_sensitive_sigma_mismatch_count += 1
+
+            sigma_physics_affecting = not sigma_match and (lj_active1 or lj_active2)
+            physics_affecting = not charge_match or not epsilon_match or sigma_physics_affecting
+            if not physics_affecting:
+                continue
+
+            physics_affecting_parameter_mismatch_count += 1
+            differences = {
+                "charge_product_e2": {
+                    "input1": charge1,
+                    "input2": charge2,
+                    "match": charge_match,
+                },
+                "sigma_nm": {
+                    "input1": sigma1,
+                    "input2": sigma2,
+                    "match": sigma_match,
+                    "physics_affecting": sigma_physics_affecting,
+                },
+                "epsilon_kj_per_mol": {
+                    "input1": epsilon1,
+                    "input2": epsilon2,
+                    "match": epsilon_match,
+                },
+            }
+            scores = []
+            for value1, value2 in (
+                (charge1, charge2), (sigma1, sigma2), (epsilon1, epsilon2)
+            ):
+                absolute = abs(value1 - value2)
+                allowed = atol + rtol * max(abs(value1), abs(value2))
+                scores.append(
+                    absolute / allowed
+                    if allowed > 0.0
+                    else (0.0 if absolute == 0.0 else float("inf"))
+                )
+
+            physics_mismatches.append({
+                "key": list(key),
+                "input1_activity": "active" if active1 else "inactive",
+                "input2_activity": "active" if active2 else "inactive",
+                "input1_charge_active": bool(charge_active1),
+                "input2_charge_active": bool(charge_active2),
+                "input1_lj_active": bool(lj_active1),
+                "input2_lj_active": bool(lj_active2),
+                "fields": differences,
+                "tolerance_score": max(scores),
+            })
+
+            labels1 = _openmm_exception_residue_pair_labels(key, topology1)
+            labels2 = _openmm_exception_residue_pair_labels(key, topology2)
+            if labels1 or labels2:
+                type1, instance1 = labels1 or ("<unknown>", "<unknown>")
+                type2, instance2 = labels2 or ("<unknown>", "<unknown>")
+                type_label = type1 if type1 == type2 else f"{type1} / {type2}"
+                instance_label = instance1 if instance1 == instance2 else f"{instance1} / {instance2}"
+                residue_type_counts[type_label] += 1
+                residue_instance_counts[instance_label] += 1
+
+    physics_mismatches.sort(
+        key=lambda item: (
+            item["input1_activity"] != item["input2_activity"],
+            not item["fields"]["charge_product_e2"]["match"]
+            or not item["fields"]["epsilon_kj_per_mol"]["match"],
+            item["tolerance_score"],
+        ),
+        reverse=True,
+    )
+    top_n = CONFIG["openmm_xml_validation"]["top_n_differences"]
+
+    strict_mismatch_is_zero_energy_sigma_only = (
+        not comparison["match"]
+        and comparison["count_match"]
+        and comparison["keys_only_input1_count"] == 0
+        and comparison["keys_only_input2_count"] == 0
+        and comparison["multiplicity_mismatch_count"] == 0
+        and comparison["parameter_mismatch_count"] == sigma_mismatch_count
+        and sigma_mismatch_count > 0
+        and charge_product_mismatch_count == 0
+        and epsilon_mismatch_count == 0
+        and energy_active_sigma_mismatch_count == 0
+    )
+
+    return {
+        "sigma_mismatch_count": sigma_mismatch_count,
+        "zero_energy_exclusion_sigma_mismatch_count": zero_energy_sigma_mismatch_count,
+        "energy_active_exception_sigma_mismatch_count": energy_active_sigma_mismatch_count,
+        "lj_relevant_sigma_mismatch_count": lj_relevant_sigma_mismatch_count,
+        "offset_sensitive_sigma_mismatch_count": offset_sensitive_sigma_mismatch_count,
+        "charge_product_mismatch_count": charge_product_mismatch_count,
+        "epsilon_mismatch_count": epsilon_mismatch_count,
+        "energy_offset_pair_count_input1": len(offset_activity1["energy_pairs"]),
+        "energy_offset_pair_count_input2": len(offset_activity2["energy_pairs"]),
+        "physics_affecting_parameter_mismatch_count": physics_affecting_parameter_mismatch_count,
+        "mismatch_activity_transitions": mismatch_activity_transitions,
+        "physics_affecting_by_residue_type": [
+            {"name": name, "count": count}
+            for name, count in sorted(
+                residue_type_counts.items(), key=lambda item: (-item[1], item[0])
+            )
+        ],
+        "physics_affecting_by_residue_instance": [
+            {"name": name, "count": count}
+            for name, count in sorted(
+                residue_instance_counts.items(), key=lambda item: (-item[1], item[0])
+            )
+        ],
+        "top_physics_affecting_mismatches": physics_mismatches[:top_n],
+        "sigma_mismatches_confined_to_zero_energy_exclusions": (
+            sigma_mismatch_count > 0 and energy_active_sigma_mismatch_count == 0
+        ),
+        "strict_mismatch_is_zero_energy_sigma_only": strict_mismatch_is_zero_energy_sigma_only,
+    }
+
+
 def _openmm_nonbonded_global_parameter_records(force) -> list:
     return [
         ((str(force.getGlobalParameterName(index)),),
@@ -2490,6 +2740,9 @@ def _compare_openmm_force(force1, force2, constraint_pairs1=None, constraint_pai
             exception_records2,
             ("charge_product_e2", "sigma_nm", "epsilon_kj_per_mol")
         )
+        exception_diagnostic = _openmm_nonbonded_exception_diagnostic(
+            force1, force2, exceptions, topology1=topology1, topology2=topology2
+        )
         globals_result = _openmm_compare_keyed_records(
             _openmm_nonbonded_global_parameter_records(force1),
             _openmm_nonbonded_global_parameter_records(force2),
@@ -2519,13 +2772,19 @@ def _compare_openmm_force(force1, force2, constraint_pairs1=None, constraint_pai
                 particle_records1, particle_records2, topology1, topology2
             ),
             "exceptions": exceptions,
+            "exception_diagnostic": exception_diagnostic,
             "global_parameters": globals_result,
             "particle_parameter_offsets": particle_offsets,
             "exception_parameter_offsets": exception_offsets
         })
-        for part in (settings, particles, exceptions, globals_result, particle_offsets, exception_offsets):
+        for part in (settings, particles, globals_result, particle_offsets, exception_offsets):
             if not part["match"]:
                 result["physics_differences"] += 1
+        if (
+            not exceptions["match"]
+            and not exception_diagnostic["strict_mismatch_is_zero_energy_sigma_only"]
+        ):
+            result["physics_differences"] += 1
 
     elif isinstance(force1, mm.CMMotionRemover) and isinstance(force2, mm.CMMotionRemover):
         frequency = _openmm_scalar_comparison(
@@ -2698,6 +2957,16 @@ def _compare_openmm_systems(system1, system2, topology1=None, topology2=None) ->
                 problems.append(
                     f"{force_type}[{occurrence}] differs in "
                     f"{comparison['physics_differences']} physics-affecting section(s)"
+                )
+            exception_diagnostic = comparison.get("exception_diagnostic")
+            if (
+                exception_diagnostic
+                and exception_diagnostic["strict_mismatch_is_zero_energy_sigma_only"]
+            ):
+                warnings.append(
+                    f"{force_type}[{occurrence}] has "
+                    f"{exception_diagnostic['sigma_mismatch_count']} strict exception sigma differences, "
+                    "all confined to zero-energy exclusions; these sigma values do not affect the Hamiltonian"
                 )
             if not comparison["fully_compared"]:
                 warnings.append(
@@ -2932,7 +3201,7 @@ def compare_serialized_openmm_xml(out1: Path | None, out2: Path | None,
         return None
 
     result = {
-        "comparison_version": 3,
+        "comparison_version": 4,
         "input1_label": label1,
         "input2_label": label2,
         "tolerances": dict(CONFIG["openmm_xml_validation"]),
@@ -3178,6 +3447,97 @@ def _print_openmm_top_record_differences(title: str, result: dict, limit: int = 
         shown += 1
 
 
+def _print_openmm_exception_diagnostic(prefix: str, diagnostic: dict,
+                                       topology1=None, topology2=None) -> None:
+    print("      exception activity/physics diagnostic:")
+    print(
+        f"        sigma mismatches={diagnostic['sigma_mismatch_count']}; "
+        f"zero-energy exclusions={diagnostic['zero_energy_exclusion_sigma_mismatch_count']}; "
+        f"energy-active exceptions={diagnostic['energy_active_exception_sigma_mismatch_count']}; "
+        f"LJ-relevant sigma={diagnostic['lj_relevant_sigma_mismatch_count']}"
+    )
+    if diagnostic["offset_sensitive_sigma_mismatch_count"]:
+        print(
+            f"        offset-sensitive sigma mismatches: "
+            f"{diagnostic['offset_sensitive_sigma_mismatch_count']}"
+        )
+    print(
+        f"        charge-product mismatches={diagnostic['charge_product_mismatch_count']}; "
+        f"epsilon mismatches={diagnostic['epsilon_mismatch_count']}; "
+        f"physics-affecting exception mismatches="
+        f"{diagnostic['physics_affecting_parameter_mismatch_count']}"
+    )
+
+    transitions = diagnostic["mismatch_activity_transitions"]
+    print(
+        "        mismatched exception activity: "
+        f"inactive->inactive={transitions['inactive_to_inactive']}  "
+        f"inactive->active={transitions['inactive_to_active']}  "
+        f"active->inactive={transitions['active_to_inactive']}  "
+        f"active->active={transitions['active_to_active']}"
+    )
+
+    if diagnostic["strict_mismatch_is_zero_energy_sigma_only"]:
+        print(
+            "        interpretation: strict exception differences are sigma-only on "
+            "zero-energy exclusions (qprod=0, epsilon=0, no qprod/epsilon offsets); "
+            "sigma is energy-inactive"
+        )
+
+    physics_count = diagnostic["physics_affecting_parameter_mismatch_count"]
+    if not physics_count:
+        return
+
+    by_type = diagnostic.get("physics_affecting_by_residue_type", [])
+    if by_type:
+        print("        physics-affecting mismatches by residue type/pair:")
+        for entry in by_type[:5]:
+            print(f"          {entry['name']:<28} n={entry['count']}")
+
+    by_instance = diagnostic.get("physics_affecting_by_residue_instance", [])
+    if by_instance:
+        print("        physics-affecting mismatches by residue instance/pair:")
+        for entry in by_instance[:5]:
+            print(f"          {entry['name']:<36} n={entry['count']}")
+
+    mismatches = diagnostic.get("top_physics_affecting_mismatches", [])
+    if not mismatches:
+        return
+
+    if physics_count <= len(mismatches):
+        print(f"        physics-affecting exception mismatches (all {physics_count}):")
+    else:
+        print(
+            f"        top {len(mismatches)} of {physics_count} physics-affecting "
+            "exception mismatches:"
+        )
+
+    for mismatch in mismatches:
+        key = mismatch["key"]
+        annotation1 = _openmm_key_annotation(key, topology1, 2)
+        annotation2 = _openmm_key_annotation(key, topology2, 2)
+        annotations = []
+        if annotation1:
+            annotations.append(f"input1={annotation1}")
+        if annotation2 and annotation2 != annotation1:
+            annotations.append(f"input2={annotation2}")
+        suffix = f"  [{' ; '.join(annotations)}]" if annotations else ""
+        print(
+            f"          key={key}{suffix}  activity="
+            f"{mismatch['input1_activity']}->{mismatch['input2_activity']}"
+        )
+        fields = mismatch["fields"]
+        charge = fields["charge_product_e2"]
+        sigma = fields["sigma_nm"]
+        epsilon = fields["epsilon_kj_per_mol"]
+        sigma_note = " (energy-relevant)" if sigma["physics_affecting"] and not sigma["match"] else ""
+        print(
+            f"            qprod(e^2): {charge['input1']:.9g} vs {charge['input2']:.9g}; "
+            f"sigma(nm): {sigma['input1']:.9g} vs {sigma['input2']:.9g}{sigma_note}; "
+            f"epsilon(kJ/mol): {epsilon['input1']:.9g} vs {epsilon['input2']:.9g}"
+        )
+
+
 def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison: dict,
                                               topology1=None, topology2=None) -> None:
     if not comparison:
@@ -3314,6 +3674,11 @@ def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison:
                             )
                     _print_openmm_record_summary(prefix + " exceptions", force_result["exceptions"])
                     _print_openmm_field_statistics(prefix + " exceptions", force_result["exceptions"])
+                    exception_diagnostic = force_result.get("exception_diagnostic")
+                    if exception_diagnostic and force_result["exceptions"]["parameter_mismatch_count"]:
+                        _print_openmm_exception_diagnostic(
+                            prefix, exception_diagnostic, topology1=topology1, topology2=topology2
+                        )
                     if not force_result["exceptions"]["match"]:
                         _print_openmm_top_record_differences(
                             prefix + " exceptions", force_result["exceptions"],
@@ -3415,7 +3780,7 @@ def print_serialized_openmm_xml_comparison(label1: str, label2: str, comparison:
         for problem in comparison["problems"]:
             print(f"    - {problem}")
     elif comparison.get("fully_compared"):
-        print("\n  No semantic differences detected in the serialized OpenMM objects.")
+        print("\n  No physics-affecting semantic differences detected in the serialized OpenMM objects.")
     else:
         print("\n  No differences detected in compared fields, but the XML comparison is incomplete.")
 
