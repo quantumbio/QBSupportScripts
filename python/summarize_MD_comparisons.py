@@ -183,6 +183,11 @@ CORE_DIAGNOSTICS = (
 # summaries are regenerated.
 CURRENT_ANALYSISMD_STRUCTURAL_ADVISORY_ONLY = True
 
+# comparison_version 4 is the first serialized-XML schema that distinguishes
+# strict NonbondedForce exception sigma differences on zero-energy exclusions
+# from differences that can actually change the Hamiltonian.
+PHYSICS_XML_MIN_VERSION = 4
+
 # Metrics retained from the original summarizer.  These are descriptive and are
 # not primary short-run validation criteria.
 LEGACY_DELTA_BASES = (
@@ -294,6 +299,12 @@ CSV_FIELDS = [
     "initial_box_max_delta_nm",
     "system_mismatch_count",
     "protocol_mismatch_count",
+    "serialized_xml_version",
+    "model_physics_status",
+    "model_physics_fully_compared",
+    "model_physics_problem_count",
+    "physics_affecting_exception_mismatch_count",
+    "model_physics_reasons",
 
     # Post-minimization energy decomposition.
     "postmin_total_sym_pct",
@@ -461,6 +472,107 @@ def representative_parameter_checks(summary: dict, reasons: list[str]) -> None:
         add_reason(reasons, f"water constraint delta={constraint_delta:.3g} nm")
 
 
+def serialized_system_physics_summary(summary: dict) -> dict[str, Any]:
+    """Summarize the serialized OpenMM System comparison for physics-only triage.
+
+    The System comparison is deliberately used here instead of minimized/production
+    energies, Integrator state, or initial State energies.  comparison_version 4+
+    is required because that schema distinguishes harmless exception-sigma
+    differences on zero-energy exclusions from Hamiltonian-affecting differences.
+    """
+    result = {
+        "version": None,
+        "status": "UNAVAILABLE",
+        "fully_compared": None,
+        "problem_count": 0,
+        "physics_affecting_exception_mismatch_count": 0,
+        "reasons": [],
+    }
+
+    serialized = nested(summary, "openmm_validation", "serialized_xml")
+    if not isinstance(serialized, dict):
+        result["reasons"].append("serialized OpenMM XML comparison not available")
+        return result
+
+    version_value = finite_float(serialized.get("comparison_version"))
+    version = int(version_value) if version_value is not None else None
+    result["version"] = version
+
+    system = serialized.get("system")
+    if not isinstance(system, dict):
+        result["reasons"].append("serialized OpenMM System comparison not available")
+        return result
+
+    if "comparison_error" in system:
+        result["status"] = "INCOMPLETE"
+        result["reasons"].append(
+            f"serialized OpenMM System comparison failed: {system['comparison_error']}"
+        )
+        return result
+
+    result["fully_compared"] = system.get("fully_compared")
+    problems = [
+        str(problem) for problem in system.get("problems", [])
+        if str(problem).strip()
+    ]
+    result["problem_count"] = len(problems)
+    result["reasons"].extend(problems)
+
+    exception_mismatch_count = 0
+    for force_type, force_comparisons in (system.get("forces") or {}).items():
+        if not isinstance(force_comparisons, list):
+            continue
+        for occurrence, force_result in enumerate(force_comparisons):
+            if not isinstance(force_result, dict):
+                continue
+            diagnostic = force_result.get("exception_diagnostic")
+            if not isinstance(diagnostic, dict):
+                continue
+            count = diagnostic.get("physics_affecting_parameter_mismatch_count")
+            try:
+                count = int(count)
+            except (TypeError, ValueError):
+                continue
+            exception_mismatch_count += count
+            if count > 0:
+                add_reason(
+                    result["reasons"],
+                    f"{force_type}[{occurrence}] physics-affecting exception mismatches={count}",
+                )
+    result["physics_affecting_exception_mismatch_count"] = exception_mismatch_count
+
+    if version is None or version < PHYSICS_XML_MIN_VERSION:
+        result["status"] = "LEGACY_XML"
+        add_reason(
+            result["reasons"],
+            "serialized XML comparison predates zero-energy exception-sigma physics classification; "
+            "regenerate with current analysisMD.py",
+        )
+        return result
+
+    # A nonempty problems list is affirmative evidence of a model/Hamiltonian
+    # mismatch.  If there are no reported problems but the comparator was not
+    # complete, do not turn uncertainty into a false-positive REVIEW.
+    if problems:
+        result["status"] = "MISMATCH"
+    elif system.get("fully_compared") is not True:
+        result["status"] = "INCOMPLETE"
+        add_reason(
+            result["reasons"],
+            "serialized OpenMM System comparison is not fully compared",
+        )
+    elif system.get("physics_match") is True:
+        result["status"] = "MATCH"
+    elif system.get("physics_match") is False:
+        result["status"] = "MISMATCH"
+        add_reason(result["reasons"], "serialized OpenMM System reports a physics mismatch")
+    else:
+        result["status"] = "INCOMPLETE"
+        add_reason(result["reasons"], "serialized OpenMM System physics status is unavailable")
+
+    return result
+
+
 def extract_metrics(system: str, json_path: Path, summary: dict) -> dict[str, Any]:
     label1 = str(summary.get("label1") or "input1")
     label2 = str(summary.get("label2") or "input2")
@@ -577,6 +689,16 @@ def extract_metrics(system: str, json_path: Path, summary: dict) -> dict[str, An
         nested(comparison, "system", "initial_box_nm", "max_absolute_difference")
     )
 
+    model_physics = serialized_system_physics_summary(summary)
+    row["serialized_xml_version"] = model_physics["version"]
+    row["model_physics_status"] = model_physics["status"]
+    row["model_physics_fully_compared"] = model_physics["fully_compared"]
+    row["model_physics_problem_count"] = model_physics["problem_count"]
+    row["physics_affecting_exception_mismatch_count"] = (
+        model_physics["physics_affecting_exception_mismatch_count"]
+    )
+    row["model_physics_reasons"] = "; ".join(model_physics["reasons"])
+
     # Post-minimization energy decomposition.  Initial energies remain descriptive
     # in analysisMD and are intentionally not triage criteria here.
     postmin = nested(comparison, "energy_decomposition_kj_per_mol", "post_minimization") or {}
@@ -617,7 +739,40 @@ def extract_metrics(system: str, json_path: Path, summary: dict) -> dict[str, An
     return row
 
 
-def classify(summary: dict, row: dict[str, Any]) -> None:
+def classify_physics_only(row: dict[str, Any]) -> None:
+    """Triage only affirmative serialized-System model/Hamiltonian differences."""
+    status = row.get("model_physics_status")
+    reasons = row.get("model_physics_reasons") or ""
+
+    row["structural_advisories"] = ""
+    row["notes"] = (
+        "physics-only triage: post-minimization energy, production thermodynamics, "
+        "trajectory differences, Integrator differences, and initial State differences do not trigger REVIEW"
+    )
+
+    if status == "MISMATCH":
+        row["status"] = "REVIEW"
+        row["review_categories"] = "MODEL"
+        row["review_reasons"] = reasons or "serialized OpenMM System reports a physics/model mismatch"
+        row["missing_core_diagnostics"] = ""
+    elif status == "MATCH":
+        row["status"] = "GOOD"
+        row["review_categories"] = ""
+        row["review_reasons"] = ""
+        row["missing_core_diagnostics"] = ""
+    else:
+        row["status"] = "GOOD_LIMITED"
+        row["review_categories"] = ""
+        row["review_reasons"] = ""
+        row["missing_core_diagnostics"] = "serialized_openmm_system_physics_v4"
+        if reasons:
+            row["notes"] += f"; {reasons}"
+
+
+def classify(summary: dict, row: dict[str, Any], physics_only: bool = False) -> None:
+    if physics_only:
+        classify_physics_only(row)
+        return
     reasons: list[str] = []
     categories: set[str] = set()
     structural_advisories: list[str] = []
@@ -897,7 +1052,9 @@ def infer_system_name(json_path: Path, summary: dict | None = None) -> str:
     return json_path.stem
 
 
-def analyze_one(json_path: Path, system_hint: str | None = None) -> dict[str, Any]:
+def analyze_one(
+    json_path: Path, system_hint: str | None = None, physics_only: bool = False
+) -> dict[str, Any]:
     system = system_hint or infer_system_name(json_path)
     if not json_path.is_file():
         return classify_missing_summary(system, json_path)
@@ -914,7 +1071,7 @@ def analyze_one(json_path: Path, system_hint: str | None = None) -> dict[str, An
     system = system_hint or infer_system_name(json_path, summary)
     try:
         row = extract_metrics(system, json_path, summary)
-        classify(summary, row)
+        classify(summary, row, physics_only=physics_only)
         return row
     except Exception as exc:
         return error_row(system, json_path, f"analysis error: {exc}")
@@ -1066,7 +1223,9 @@ def write_list(path: Path, rows: list[dict[str, Any]], statuses: set[str]) -> No
                 handle.write(f"{row['system']}\n")
 
 
-def write_report(path: Path, rows: list[dict[str, Any]], input_description: str) -> None:
+def write_report(
+    path: Path, rows: list[dict[str, Any]], input_description: str, physics_only: bool = False
+) -> None:
     counts = {status: 0 for status in ("REVIEW", "GOOD", "GOOD_LIMITED", "PENDING", "ERROR")}
     for row in rows:
         counts[row["status"]] = counts.get(row["status"], 0) + 1
@@ -1078,6 +1237,11 @@ def write_report(path: Path, rows: list[dict[str, Any]], input_description: str)
         handle.write("MD comparison / OpenMM validation summary\n")
         handle.write("=========================================\n\n")
         handle.write(f"Input: {input_description}\n")
+        if physics_only:
+            handle.write(
+                "Triage mode: physics-only (serialized OpenMM System/Hamiltonian; "
+                "energetic and trajectory divergence ignored)\n"
+            )
         handle.write(f"Structures considered: {len(rows)}\n")
         handle.write(f"REVIEW       : {counts.get('REVIEW', 0)}\n")
         handle.write(f"GOOD         : {counts.get('GOOD', 0)}\n")
@@ -1087,9 +1251,27 @@ def write_report(path: Path, rows: list[dict[str, Any]], input_description: str)
 
         handle.write("Interpretation\n")
         handle.write("--------------\n")
-        handle.write("REVIEW: one or more conservative engineering-review thresholds were exceeded.\n")
-        handle.write("GOOD: no review threshold was exceeded and all core diagnostics were present.\n")
-        handle.write("GOOD_LIMITED: available metrics did not trigger review, but core diagnostics were absent.\n")
+        if physics_only:
+            handle.write(
+                "REVIEW: comparison_version 4+ serialized OpenMM System reports one or more "
+                "physics/model incongruences.\n"
+            )
+            handle.write(
+                "GOOD: serialized OpenMM System is fully compared and reports physics_match=True.\n"
+            )
+            handle.write(
+                "GOOD_LIMITED: current summary does not contain a complete comparison_version 4+ "
+                "serialized OpenMM System physics result.\n"
+            )
+            handle.write(
+                "Post-minimization energies, production thermodynamics/energies, trajectory "
+                "differences, Integrator differences, and initial State differences do not trigger "
+                "REVIEW in this mode.\n"
+            )
+        else:
+            handle.write("REVIEW: one or more conservative engineering-review thresholds were exceeded.\n")
+            handle.write("GOOD: no review threshold was exceeded and all core diagnostics were present.\n")
+            handle.write("GOOD_LIMITED: available metrics did not trigger review, but core diagnostics were absent.\n")
         handle.write(
             "PENDING: summary JSON does not exist and available screenouts do not show a "
             "terminal failure; the run may still be active.\n"
@@ -1099,23 +1281,38 @@ def write_report(path: Path, rows: list[dict[str, Any]], input_description: str)
             "JSON was unreadable or could not be processed.\n"
         )
         handle.write("These labels are triage categories, not proof of ensemble equivalence or convergence.\n\n")
-        handle.write("Current analysisMD compatibility\n")
-        handle.write("------------------------------\n")
+        if not physics_only:
+            handle.write("Current analysisMD compatibility\n")
+            handle.write("------------------------------\n")
+            handle.write(
+                "Structural trajectory metrics are retained as advisories only for this running batch. "
+                "The current analysisMD.py computes Rg and internal C-alpha distances from raw trajectory "
+                "coordinates without an explicit make-whole/reimaging step; wrapped proteins can therefore "
+                "create very large apparent structural differences. These metrics do not trigger REVIEW here.\n\n"
+            )
+
+        if physics_only:
+            handle.write("Physics-only triage criterion\n")
+            handle.write("-----------------------------\n")
+            handle.write(
+                f"Requires serialized OpenMM XML comparison_version >= {PHYSICS_XML_MIN_VERSION}. "
+                "Only openmm_validation.serialized_xml.system physics/model differences trigger REVIEW.\n\n"
+            )
+        else:
+            handle.write("Primary triage thresholds\n")
+            handle.write("-------------------------\n")
+            for key, value in THRESHOLDS.items():
+                handle.write(f"{key}: {value}\n")
+            handle.write("\n")
+
         handle.write(
-            "Structural trajectory metrics are retained as advisories only for this running batch. "
-            "The current analysisMD.py computes Rg and internal C-alpha distances from raw trajectory "
-            "coordinates without an explicit make-whole/reimaging step; wrapped proteins can therefore "
-            "create very large apparent structural differences. These metrics do not trigger REVIEW here.\n\n"
+            "Physics/model structures requiring review\n"
+            if physics_only else "Structures requiring review\n"
         )
-
-        handle.write("Primary triage thresholds\n")
-        handle.write("-------------------------\n")
-        for key, value in THRESHOLDS.items():
-            handle.write(f"{key}: {value}\n")
-        handle.write("\n")
-
-        handle.write("Structures requiring review\n")
-        handle.write("---------------------------\n")
+        handle.write(
+            "-----------------------------------------\n"
+            if physics_only else "---------------------------\n"
+        )
         review_rows = [row for row in rows if row["status"] == "REVIEW"]
         if not review_rows:
             handle.write("None\n")
@@ -1124,15 +1321,16 @@ def write_report(path: Path, rows: list[dict[str, Any]], input_description: str)
                 handle.write(f"{row['system']}: {row['review_reasons']}\n")
         handle.write("\n")
 
-        handle.write("Structural advisories from current analysisMD output\n")
-        handle.write("---------------------------------------------------\n")
-        advisory_rows = [row for row in rows if row.get("structural_advisories")]
-        if not advisory_rows:
-            handle.write("None\n")
-        else:
-            for row in advisory_rows:
-                handle.write(f"{row['system']}: {row['structural_advisories']}\n")
-        handle.write("\n")
+        if not physics_only:
+            handle.write("Structural advisories from current analysisMD output\n")
+            handle.write("---------------------------------------------------\n")
+            advisory_rows = [row for row in rows if row.get("structural_advisories")]
+            if not advisory_rows:
+                handle.write("None\n")
+            else:
+                for row in advisory_rows:
+                    handle.write(f"{row['system']}: {row['structural_advisories']}\n")
+            handle.write("\n")
 
         handle.write("Good but limited diagnostics\n")
         handle.write("----------------------------\n")
@@ -1165,6 +1363,9 @@ def write_report(path: Path, rows: list[dict[str, Any]], input_description: str)
             for row in error_rows:
                 handle.write(f"{row['system']}: {row['review_reasons']}\n")
         handle.write("\n")
+
+        if physics_only:
+            return
 
         handle.write("Cross-system signed structural deltas\n")
         handle.write("-------------------------------------\n")
@@ -1289,12 +1490,16 @@ def write_plots(path: Path, rows: list[dict[str, Any]]) -> None:
             plt.close(fig)
 
 
-def print_console_summary(rows: list[dict[str, Any]], outputs: dict[str, Path]) -> None:
+def print_console_summary(
+    rows: list[dict[str, Any]], outputs: dict[str, Path], physics_only: bool = False
+) -> None:
     counts: dict[str, int] = {}
     for row in rows:
         counts[row["status"]] = counts.get(row["status"], 0) + 1
 
     print(f"Structures: {len(rows)}")
+    if physics_only:
+        print("Triage mode: physics-only serialized OpenMM System/Hamiltonian comparison")
     print(
         "Status: "
         f"REVIEW={counts.get('REVIEW', 0)}  "
@@ -1307,12 +1512,12 @@ def print_console_summary(rows: list[dict[str, Any]], outputs: dict[str, Path]) 
 
     review_rows = [row for row in rows if row["status"] == "REVIEW"]
     if review_rows:
-        print("Manual review candidates:")
+        print("Physics/model review candidates:" if physics_only else "Manual review candidates:")
         for row in review_rows:
             print(f"  {row['system']}: {row['review_reasons']}")
         print()
 
-    advisory_rows = [row for row in rows if row.get("structural_advisories")]
+    advisory_rows = [] if physics_only else [row for row in rows if row.get("structural_advisories")]
     if advisory_rows:
         print(
             f"Structural advisories (not REVIEW triggers with current analysisMD.py): "
@@ -1320,7 +1525,7 @@ def print_console_summary(rows: list[dict[str, Any]], outputs: dict[str, Path]) 
         )
         print()
 
-    delta_stats = stats_table(rows, signed_delta_fields(rows))
+    delta_stats = pd.DataFrame() if physics_only else stats_table(rows, signed_delta_fields(rows))
     if not delta_stats.empty:
         print("Cross-system signed deltas:")
         print(delta_stats.to_string(index=False, float_format=lambda x: f"{x:.4g}"))
@@ -1375,6 +1580,15 @@ def main(argv: list[str] | None = None) -> int:
         metavar="OUT.pdf",
         help="Optionally write cross-system distribution plots to a multi-page PDF.",
     )
+    parser.add_argument(
+        "--physics-only",
+        action="store_true",
+        help=(
+            "Triage REVIEW using only comparison_version 4+ serialized OpenMM System "
+            "physics/model incongruences. Ignore post-minimization/production energy, "
+            "thermodynamic, trajectory, Integrator, and initial-State differences as REVIEW triggers."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1387,7 +1601,10 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: no JSON files or PDB IDs found to process.", file=sys.stderr)
         return 1
 
-    rows = [analyze_one(path, system_hint) for system_hint, path in input_pairs]
+    rows = [
+        analyze_one(path, system_hint, physics_only=args.physics_only)
+        for system_hint, path in input_pairs
+    ]
 
     # Review candidates first, then limited/good results, then data-flow errors.
     rank = {"REVIEW": 0, "GOOD_LIMITED": 1, "GOOD": 2, "PENDING": 3, "ERROR": 4}
@@ -1416,7 +1633,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         input_description = f"auto-discovered PDB directories under {args.root.resolve()}"
 
-    write_report(report_path, rows, input_description)
+    write_report(report_path, rows, input_description, physics_only=args.physics_only)
     write_list(review_path, rows, {"REVIEW"})
     write_list(good_path, rows, {"GOOD"})
     write_list(limited_path, rows, {"GOOD_LIMITED"})
@@ -1437,7 +1654,7 @@ def main(argv: list[str] | None = None) -> int:
         write_plots(args.plots, rows)
         outputs["plots"] = args.plots
 
-    print_console_summary(rows, outputs)
+    print_console_summary(rows, outputs, physics_only=args.physics_only)
 
     # A missing JSON is PENDING unless available screenouts contain strong terminal
     # failure evidence. Malformed/unreadable existing JSON remains ERROR. REVIEW
