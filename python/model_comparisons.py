@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Diagnose SystemModelSnapshotWriter v1 JSON or gzip snapshots.
+"""Diagnose SystemModelSnapshotWriter v1-v3 JSON or gzip snapshots.
 
 Usage: python3 model_comparisons.py A.json.gz B.json.gz [--details]
 Indices identify flat atoms/residues at these checkpoints; they do not establish
 identity across independent model reconstruction. Numeric enums stay numeric.
 Only Python's standard library is required. Exit 0 for a successful comparison
 (including differences), 2 for invalid input or arguments.
+
+Schema 1/2 fields are compared when present; absent features remain unavailable.
+The current writer emits v3 policies: ordinary exclusions and independent special
+1-4 energy multipliers with optional unscaled LJ [A,B] coefficients. Pair identity
+uses flat atom indices, not collection position. Ring identity uses the ordered
+perimeter modulo rotation/reversal; raw ID/order differences remain diagnostic.
 """
 import argparse
 from collections import Counter, defaultdict
+from functools import lru_cache
 import gzip
 import json
 import math
@@ -17,6 +24,19 @@ import sys
 
 SCHEMA = 'quantumbio.system_model_snapshot'
 MISSING = object()
+POLICIES = ('nonbonded_exclusions', 'special_pairs')
+PAIR_FIELDS = ('atomA_index', 'atomB_index')
+
+
+def cycle_key(atoms):
+    """A perimeter, modulo rotation and reversal, never an unordered atom set."""
+    if (not isinstance(atoms, list) or len(atoms) < 3 or
+            any(type(a) is not int or a < 0 for a in atoms) or len(set(atoms)) != len(atoms)):
+        raise ValueError('invalid ring perimeter')
+    start = atoms.index(min(atoms))
+    forward = atoms[start:] + atoms[:start]
+    reverse = [forward[0]] + forward[:0:-1]
+    return min(tuple(forward), tuple(reverse))
 
 
 def display(value):
@@ -49,10 +69,24 @@ def validate(data, label):
     if not isinstance(header, dict) or header.get('schema') != SCHEMA:
         raise ValueError(f'{label}: missing or incompatible $.snapshot.schema (expected {SCHEMA})')
     version = header.get('schema_version')
-    if type(version) is not int or version != 1:
+    if type(version) is not int or version not in (1, 2, 3):
         raise ValueError(f'{label}: unsupported $.snapshot.schema_version: {version!r}')
     if not isinstance(data.get('system_model'), dict):
         raise ValueError(f'{label}: missing or malformed $.system_model')
+    for name in POLICIES:
+        policy = data['system_model'].get(name, MISSING)
+        if policy is MISSING:
+            continue  # Feature availability, rather than version alone, is authoritative.
+        path = '$.system_model.' + name
+        if not isinstance(policy, dict):
+            raise ValueError(f'{label}: {path} must be an object')
+        if 'pairs' in policy and not isinstance(policy['pairs'], list):
+            raise ValueError(f'{label}: {path}.pairs must be an array')
+        if 'complete' in policy and type(policy['complete']) is not bool:
+            raise ValueError(f'{label}: {path}.complete must be a boolean')
+        if 'provenance' in policy and policy['provenance'] not in (
+                'unavailable', 'imported', 'generated', 'mixed'):
+            raise ValueError(f'{label}: unsupported {path}.provenance: {policy["provenance"]!r}')
     # Collections can be absent in older checkpoints, but cannot have wrong types.
     def visit(obj, path):
         if isinstance(obj, dict):
@@ -63,6 +97,8 @@ def validate(data, label):
                     raise ValueError(f'{label}: {path}.counts must contain nonnegative integers')
             for key, val in obj.items():
                 child_path = path + '.' + key
+                if key == 'partial_charge_imported' and type(val) is not bool:
+                    raise ValueError(f'{label}: {child_path} must be a boolean')
                 if identity_fields(child_path) and not isinstance(val, list):
                     raise ValueError(f'{label}: {child_path} must be an array')
                 visit(val, child_path)
@@ -89,6 +125,7 @@ def load_snapshot(path):
         raise ValueError(f'Cannot read snapshot {path}: {exc}') from exc
 
 
+@lru_cache(maxsize=1024)
 def identity_fields(path):
     """Use writer fields, never a generic 'index' for unknown collections."""
     flat = '$.system_model.'
@@ -96,6 +133,8 @@ def identity_fields(path):
         return ('index',)
     if path == flat + 'bonds':
         return ('atomA_index', 'atomB_index')
+    if path in (flat + name + '.pairs' for name in POLICIES):
+        return PAIR_FIELDS
     if path == flat + 'residue_connections':
         return ('residue_a_index', 'residue_b_index')
     if path in (flat + 'rings', flat + 'fragments'):
@@ -123,11 +162,13 @@ def identity_fields(path):
     return None
 
 
-def record_key(record, fields):
+def record_key(record, fields, path=''):
     if not isinstance(record, dict) or any(k not in record for k in fields):
         raise ValueError('missing identity fields')
     values = tuple(record[k] for k in fields)
     if fields == ('atom_indices',):
+        if path == '$.system_model.rings':
+            return cycle_key(values[0])
         return tuple(sorted(values[0]))
     if len(fields) == 2 and fields[0].endswith(('_a_index', 'A_index')):
         return tuple(sorted(values))
@@ -176,12 +217,147 @@ class Comparison:
         self.collections = defaultdict(Counter)
         self.shapes = Counter()
         self.warnings = Counter()
+        self.raw_fields = Counter()
+        self.raw_examples = defaultdict(list)
+        self.noise = Counter()
+        self.invalid_collections = set()
         self.coords = defaultdict(lambda: [0, 0.0, 0.0, 0, 0])
         self.sizes_a, self.counts_a, wa = inventory(a, 'A')
         self.sizes_b, self.counts_b, wb = inventory(b, 'B')
         self.warnings.update(wa)
         self.warnings.update(wb)
+        self.rings_a = self.audit(a, 'A')
+        self.rings_b = self.audit(b, 'B')
         self.compare(a, b, '$', '$')
+
+    def audit(self, data, label):
+        """Keep malformed/duplicate raw records visible before identity matching."""
+        model = data['system_model']
+        atom_ids = {a.get('index') for a in model.get('atoms', []) if isinstance(a, dict)
+                    and type(a.get('index')) is int}
+        for name in POLICIES:
+            policy = model.get(name, {})
+            path = '$.system_model.' + name + '.pairs'
+            pairs = policy.get('pairs', [])
+            seen_pairs = set()
+            if policy.get('complete') is True and policy.get('provenance') == 'unavailable':
+                self.warnings[f'{label}: {name}: complete policy has unavailable provenance'] += 1
+            if pairs and policy.get('provenance') == 'unavailable':
+                self.warnings[f'{label}: {name}: pairs stored with unavailable provenance'] += 1
+            for i, pair in enumerate(pairs):
+                valid = isinstance(pair, dict) and all(type(pair.get(k)) is int for k in PAIR_FIELDS)
+                if valid:
+                    endpoints = [pair[k] for k in PAIR_FIELDS]
+                    valid = endpoints[0] != endpoints[1] and all(a >= 0 for a in endpoints)
+                    if 'atoms' in model:
+                        valid &= all(a in atom_ids for a in endpoints)
+                    key = tuple(sorted(endpoints))
+                    if key in seen_pairs:
+                        self.warnings[f'{label}: {path}: duplicate identity keys; positional comparison'] += 1
+                        self.invalid_collections.add(path)
+                    seen_pairs.add(key)
+                if name == 'special_pairs' and isinstance(pair, dict):
+                    for field in ('coulombMultiplier', 'ljMultiplier'):
+                        number = pair.get(field)
+                        valid &= type(number) in (int, float) and math.isfinite(number) and number >= 0
+                    coefficients = pair.get('ljCoefficients', MISSING)
+                    valid &= coefficients is None or (isinstance(coefficients, list) and
+                        len(coefficients) == 2 and all(type(v) in (int, float) and
+                            math.isfinite(v) and v >= 0 for v in coefficients))
+                if not valid:
+                    self.warnings[f'{label}: {path}: invalid pair record at position {i}; positional comparison'] += 1
+                    self.invalid_collections.add(path)
+        rings = {}
+        perimeters = set()
+        expected_atoms, expected_edges, expected_residues = defaultdict(set), defaultdict(set), defaultdict(set)
+        for i, ring in enumerate(model.get('rings', [])):
+            try:
+                ring_id = ring.get('index', i)
+                if type(ring_id) is not int or ring_id < 0 or ring_id in rings:
+                    raise ValueError('invalid or duplicate ring index')
+                perimeter = ring['atom_indices']
+                rings[ring_id] = cycle_key(perimeter)
+                if rings[ring_id] in perimeters:
+                    self.warnings[f'{label}: rings: duplicate perimeter identity; positional comparison'] += 1
+                    self.invalid_collections.add('$.system_model.rings')
+                perimeters.add(rings[ring_id])
+                if type(ring.get('residue_index')) is int:
+                    expected_residues[ring['residue_index']].add(ring_id)
+                if 'atoms' in model and any(a not in atom_ids for a in perimeter):
+                    self.warnings[f'{label}: rings: invalid perimeter atom references'] += 1
+                for a, b in zip(perimeter, perimeter[1:] + perimeter[:1]):
+                    expected_atoms[a].add(ring_id)
+                    expected_edges[tuple(sorted((a, b)))].add(ring_id)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                self.warnings[f'{label}: rings: invalid perimeter/index at position {i}'] += 1
+                self.invalid_collections.add('$.system_model.rings')
+        for name in ('atoms', 'bonds', 'residues'):
+            for record in model.get(name, []):
+                if not isinstance(record, dict):
+                    continue
+                for field in ('ringParticipation', 'systemRingIndices'):
+                    if field not in record:
+                        continue
+                    refs = record[field]
+                    if (not isinstance(refs, list) or any(type(r) is not int for r in refs)):
+                        self.warnings[f'{label}: {name}.{field}: malformed ring references'] += 1
+                        continue
+                    if len(refs) != len(set(refs)):
+                        self.warnings[f'{label}: {name}.{field}: duplicate ring references'] += 1
+                    if 'rings' in model and any(r not in rings for r in refs):
+                        self.warnings[f'{label}: {name}.{field}: invalid ring references'] += 1
+                    if field == 'ringParticipation' and 'ring_count' in record and record['ring_count'] != len(refs):
+                        self.warnings[f'{label}: {name}: ring_count disagrees with ringParticipation'] += 1
+                    if 'rings' in model and name in ('atoms', 'bonds', 'residues'):
+                        if name == 'atoms':
+                            expected = expected_atoms.get(record.get('index'), set())
+                        elif name == 'bonds':
+                            try:
+                                expected = expected_edges.get(record_key(record, PAIR_FIELDS), set())
+                            except (ValueError, TypeError):
+                                continue
+                        else:
+                            expected = expected_residues.get(record.get('index'), set())
+                        if set(refs) != expected:
+                            self.warnings[f'{label}: {name}.{field}: disagrees with registered perimeters'] += 1
+                        if name == 'atoms' and 'smallest_ring' in record:
+                            smallest = min((len(rings[r]) for r in expected), default=0)
+                            if record['smallest_ring'] != smallest:
+                                self.warnings[f'{label}: atoms.smallest_ring: disagrees with registered perimeters'] += 1
+        if 'bonds' in model and 'rings' in model:
+            edges = set()
+            for bond in model['bonds']:
+                try:
+                    edges.add(record_key(bond, PAIR_FIELDS))
+                except (ValueError, TypeError):
+                    pass
+            missing = expected_edges.keys() - edges
+            if missing:
+                self.warnings[f'{label}: rings: {len(missing)} perimeter edges absent from bonds'] += 1
+        return rings
+
+    def raw_change(self, path, identifier, a, b):
+        self.raw_fields[path] += 1
+        if len(self.raw_examples[path]) < self.max_examples:
+            self.raw_examples[path].append(f'{identifier}: A={display(a)}, B={display(b)}')
+
+    def ring_references(self, a, b, path, identifier):
+        try:
+            if not isinstance(a, list) or not isinstance(b, list):
+                return None
+            if any(type(r) is not int for r in a + b):
+                return None
+            left = Counter(self.rings_a[r] for r in a)
+            right = Counter(self.rings_b[r] for r in b)
+        except (KeyError, TypeError):
+            return None  # Undefined IDs cannot be interpreted; compare raw values.
+        if left != right:
+            return self.changed(path, identifier,
+                                {'ring_ids': a, 'perimeters': list(left.elements())},
+                                {'ring_ids': b, 'perimeters': list(right.elements())})
+        if a != b:
+            self.raw_change(path, identifier, a, b)
+        return False
 
     def changed(self, path, identifier, a, b):
         self.fields[path] += 1
@@ -207,6 +383,10 @@ class Comparison:
         return displacement > self.tolerance
 
     def compare(self, a, b, path, identifier):
+        if path.startswith('$.system_model.') and path.endswith(('.ringParticipation', '.systemRingIndices')):
+            result = self.ring_references(a, b, path, identifier)
+            if result is not None:
+                return result
         if path.endswith(('.atoms[].coordinates', '.atoms[].position')):
             return self.coordinates(a, b, path, identifier)
         if isinstance(a, dict) and isinstance(b, dict):
@@ -219,19 +399,23 @@ class Comparison:
             if len(a) != len(b):
                 self.shapes[path] += 1
             # Scalar arrays and Eigen matrices are one field per affected record.
-            if not any(isinstance(x, dict) for x in a) and not any(isinstance(x, dict) for x in b):
+            if not identity_fields(path) and not any(isinstance(x, dict) for x in a) and not any(isinstance(x, dict) for x in b):
                 if not equal(a, b):
                     return self.changed(path, identifier, a, b)
                 return False
             return self.collection(a, b, path, identifier)
         if not equal(a, b):
             return self.changed(path, identifier, a, b)
+        if isinstance(a, float) and isinstance(b, float) and a != b:
+            self.noise[path] += 1
         return False
 
     def collection(self, a, b, path, parent):
         summary = self.collections[path]
         fields = identity_fields(path)
         maps = []
+        if path in self.invalid_collections:
+            fields = None
         if fields:
             requested_fields = fields
             for label, records in (('A', a), ('B', b)):
@@ -239,12 +423,12 @@ class Comparison:
                 duplicates = 0
                 try:
                     for i, record in enumerate(records):
-                        key = record_key(record, requested_fields)
+                        key = record_key(record, requested_fields, path)
                         if key in mapping:
                             duplicates += 1
                         else:
                             mapping[key] = (i, record)
-                except (ValueError, TypeError, KeyError):
+                except (ValueError, TypeError, KeyError, AttributeError):
                     self.warnings[f'{label}: {path}: unusable identity; positional comparison'] += 1
                     fields = None
                     break
@@ -265,6 +449,11 @@ class Comparison:
         summary['matched'] += 1
         summary['removed'] += len(ma.keys() - mb.keys())
         summary['added'] += len(mb.keys() - ma.keys())
+        for kind, keys, records in (('removed', ma.keys() - mb.keys(), ma),
+                                    ('added', mb.keys() - ma.keys(), mb)):
+            example_path = path + '[].' + kind
+            for key in sorted(keys, key=repr)[:self.max_examples]:
+                self.examples[example_path].append(f'{path}[identity={display(key)}]: {display(records[key][1])}')
         modified = 0
         # Insertion order of A makes capped examples reproducible and avoids sorting huge maps.
         for key, (i, x) in ma.items():
@@ -278,20 +467,31 @@ class Comparison:
             # Vector positions are bookkeeping for endpoint/membership identities.
             # Endpoint orientation is recorded separately, not a chemical change.
             ignore = {'index'} if fields != ('index',) else set()
+            if 'index' in ignore and x.get('index') != y.get('index'):
+                self.raw_change(path + '[].index', identifier, x.get('index', MISSING), y.get('index', MISSING))
             if len(fields) == 2 and fields[0].endswith(('_a_index', 'A_index')):
-                ignore.update(fields)
                 summary['orientation'] += tuple(x[k] for k in fields) != tuple(y[k] for k in fields)
+                # Stereo, image offsets and signed rotations retain endpoint orientation.
+                directional = path == '$.system_model.bonds' and any(
+                    r.get(k, 0) != 0 for r in (x, y) for k in
+                    ('stereo', 'symmetry_index', 'symmetry_x', 'symmetry_y', 'symmetry_z', 'rotation_angle'))
+                if not directional:
+                    ignore.update(fields)
             record_changed = False
             for field in sorted(x.keys() | y.keys()):
                 if field not in ignore:
                     if fields == ('atom_indices',) and field == 'atom_indices':
                         summary['membership_order'] += x[field] != y[field]
-                        continue
+                        if path == '$.system_model.rings':
+                            if x[field] != y[field]:
+                                self.raw_change(path + '[].' + field, identifier, x[field], y[field])
+                            continue
+                        # Fragment membership order has no documented cycle semantics.
                     record_changed |= self.compare(x.get(field, MISSING), y.get(field, MISSING),
                                                    path + '[].' + field, identifier)
             modified += record_changed
         summary['modified'] += modified
-        return bool(summary['added'] or summary['removed'] or modified or summary['moved'] or summary['orientation'])
+        return bool(summary['added'] or summary['removed'] or modified)
 
     def report(self, filenames=('A', 'B'), details=False):
         lines = ['Summary']
@@ -304,6 +504,7 @@ class Comparison:
                      f'{sum(v["modified"] for v in self.collections.values())} modified records '
                      '(nested collections counted separately).')
         lines.append('  Flat indices are checkpoint identities; enums are stored numeric values.')
+        lines.append('  Missing fields mean unavailable, not empty/false/zero. Atom correspondence uses flat index; no inferred renumbering.')
         def section(title, rows, limit=12):
             lines.extend(['', title])
             if not rows:
@@ -326,6 +527,9 @@ class Comparison:
                     structural.append(f'{path}: {s["membership_order"]} records with reordered atom membership')
                 if path == '$.system_model.bonds' and not (s['added'] or s['removed']):
                     structural.append('Bond endpoint-pair sets are identical.')
+                if s['added'] or s['removed']:
+                    for kind in ('removed', 'added'):
+                        structural.extend(f'{kind}: {ex}' for ex in self.examples[path + '[].' + kind])
         for path, (n, ss, maximum, exceed, invalid) in sorted(self.coords.items()):
             structural.append(f'{path}: {n} matched atoms, max displacement={maximum:.6g}, '
                               f'RMS={math.sqrt(ss/n) if n else 0:.6g}; '
@@ -333,6 +537,25 @@ class Comparison:
         # Always show coordinates even when structural summaries are capped.
         section('Important structural changes', structural, 20)
         section('Metadata changes', self.metadata)
+        availability = []
+        for label, data in (('A', self.a), ('B', self.b)):
+            model = data['system_model']
+            for name in POLICIES:
+                policy = model.get(name)
+                if policy is None:
+                    availability.append(f'{label}: {name}: unavailable (not serialized)')
+                else:
+                    count = len(policy['pairs']) if 'pairs' in policy else 'unavailable'
+                    availability.append(f'{label}: {name}: provenance={display(policy.get("provenance", MISSING))}, '
+                                        f'complete={display(policy.get("complete", MISSING))}, pairs={count}')
+            atoms = model.get('atoms', [])
+            available = sum('partial_charge_imported' in atom for atom in atoms if isinstance(atom, dict))
+            availability.append(f'{label}: imported-charge provenance: {available}/{len(atoms)} atoms serialized; '
+                                'absent flags are unavailable')
+        section('Policy and imported-charge availability', availability)
+        section('Special-pair semantics', ['Independent dimensionless Coulomb/LJ energy multipliers; '
+                'ljCoefficients=[A,B] are unscaled (Angstrom, kcal/mol), never reordered or inverted; '
+                'null requires finalized MMData coefficients.'])
         rows = []
         unchanged = []
         def row(path, av, bv):
@@ -351,13 +574,21 @@ class Comparison:
                 rows.append(row(path + ' [length total]', av[0] if av else '<missing>', bv[0] if bv else '<missing>'))
                 if (av and av[1] != 1) or (bv and bv[1] != 1):
                     rows.append(row(path + ' [number of arrays]', av[1] if av else '<missing>', bv[1] if bv else '<missing>'))
-            if av == bv and path in ('$.system_model.' + k for k in ('atoms', 'residues', 'bonds')):
+            if av == bv and path in ('$.system_model.' + k for k in (
+                    'atoms', 'residues', 'bonds', 'nonbonded_exclusions.pairs', 'special_pairs.pairs')):
                 unchanged.append(row(path + ' [actual length]', av[0], bv[0]))
         for path, n in sorted(self.shapes.items()):
             if '[]' in path:
                 rows.append(f'{path}: {n} matched arrays with changed lengths (totals may cancel)')
         section('Collection-size differences', rows if len(rows) > 1 else [], 16)
         section('Important unchanged counts', unchanged)
+        raw = []
+        for path, count in sorted(self.raw_fields.items()):
+            raw.append(f'{path}: {count} raw bookkeeping/order differences; semantic identities unchanged')
+            raw.extend('  ' + example for example in self.raw_examples[path])
+        section('Raw ring/identity metadata differences', raw)
+        section('Numerical noise below rel/abs 1e-12 (not counted as changes)',
+                [f'{path}: {count} values' for path, count in sorted(self.noise.items())])
         section('Internal consistency warnings (independent of cross-snapshot differences)',
                 [f'{msg}' + (f' ({n} occurrences)' if n > 1 else '') for msg, n in sorted(self.warnings.items())])
         priorities = ('formal_charge', 'partial_charge', 'order', 'type', 'ringParticipation', 'enabled', 'mapping_valid')
