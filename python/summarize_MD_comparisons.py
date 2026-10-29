@@ -305,6 +305,16 @@ CSV_FIELDS = [
     "model_physics_problem_count",
     "physics_affecting_exception_mismatch_count",
     "model_physics_reasons",
+    "xml_precision_audit_status",
+    "xml_precision_policy",
+    "xml_precision_material_exception_count",
+    "xml_precision_numerical_exception_count",
+    "xml_precision_inert_sigma_count",
+    "xml_precision_original_model_status",
+    "xml_precision_original_reasons",
+    "xml_precision_system1_sha256",
+    "xml_precision_system2_sha256",
+    "xml_precision_note",
 
     # Post-minimization energy decomposition.
     "postmin_total_sym_pct",
@@ -573,6 +583,93 @@ def serialized_system_physics_summary(summary: dict) -> dict[str, Any]:
     return result
 
 
+def apply_xml_precision_recheck(summary: dict, row: dict[str, Any], json_path: Path) -> None:
+    """Optionally re-audit current XML; never edit summaries or simulation inputs.
+
+    Downgrade only the recognized exception-only legacy diagnostic, and only
+    after a complete supported-System audit and agreement of legacy counts.
+    Missing/unsupported XML never upgrades an incomplete comparison to GOOD.
+    """
+    from openmm_xml_precision import audit_system_pair
+
+    row["xml_precision_original_model_status"] = row.get("model_physics_status")
+    row["xml_precision_original_reasons"] = row.get("model_physics_reasons")
+    result = audit_system_pair(
+        json_path.parent / "cpp" / "openmm_system.xml",
+        json_path.parent / "python" / "openmm_system.xml",
+    )
+    row["xml_precision_audit_status"] = result["status"]
+    row["xml_precision_policy"] = result["policy"]["id"]
+    for i, source in enumerate(result.get("inputs", []), start=1):
+        row[f"xml_precision_system{i}_sha256"] = source["sha256"]
+    diagnostics = result.get("exceptions", [])
+    material = sum(d.get("material_pair_count", 0) for d in diagnostics)
+    row["xml_precision_material_exception_count"] = material
+    row["xml_precision_numerical_exception_count"] = sum(
+        d.get("numeric_active_pair_count", 0) for d in diagnostics
+    )
+    row["xml_precision_inert_sigma_count"] = sum(
+        d.get("inert_sigma_difference_count", 0) for d in diagnostics
+    )
+
+    if result["status"] == "MISMATCH":
+        # A new affirmative XML finding is never hidden by an older GOOD JSON.
+        row["model_physics_status"] = "MISMATCH"
+        reasons = result.get("problems", [])
+        row["model_physics_reasons"] = "; ".join(filter(None, [
+            row.get("model_physics_reasons"), "XML precision recheck: " + "; ".join(reasons)
+        ]))
+        row["model_physics_problem_count"] = max(
+            int(row.get("model_physics_problem_count") or 0), len(reasons)
+        )
+        row["xml_precision_note"] = "Current XML contains an out-of-tolerance or structural model mismatch."
+        return
+
+    if result["status"] != "MATCH_WITHIN_TOLERANCE":
+        row["xml_precision_note"] = "Recheck incomplete; no prior REVIEW was cleared. " + str(
+            result.get("error") or "; ".join(result.get("unsupported", []))
+        )
+        if row.get("model_physics_status") == "MATCH":
+            row["model_physics_status"] = "INCOMPLETE"
+            row["model_physics_reasons"] = row["xml_precision_note"]
+        return
+
+    original = nested(summary, "openmm_validation", "serialized_xml", "system") or {}
+    problems = original.get("problems") or []
+    known_exception_only = bool(problems) and all(
+        isinstance(text, str) and re.fullmatch(
+            r"NonbondedForce\[\d+\] differs in 1 physics-affecting section\(s\)", text
+        ) for text in problems
+    )
+    old_count = row.get("physics_affecting_exception_mismatch_count")
+    replayed_count = sum(d.get("legacy_active_mismatch_count", 0) for d in diagnostics)
+    version = row.get("serialized_xml_version")
+    eligible = (
+        row.get("model_physics_status") == "MISMATCH"
+        and row.get("model_physics_fully_compared") is True
+        and version is not None and version >= PHYSICS_XML_MIN_VERSION
+        and known_exception_only and old_count == replayed_count
+    )
+    if eligible:
+        row["model_physics_status"] = "MATCH"
+        row["model_physics_problem_count"] = 0
+        row["model_physics_reasons"] = ""
+        row["xml_precision_note"] = (
+            f"MATCH_WITHIN_TOLERANCE under {row['xml_precision_policy']}; "
+            f"{old_count} legacy active-exception flags are within the numerical policy. "
+            "Original count/reasons retained; not exact parameter equality, an energy replay, "
+            "or a minimization/trajectory validation."
+        )
+    elif row.get("model_physics_status") == "MATCH":
+        row["xml_precision_note"] = "Current XML independently matches within the explicit numerical policy."
+    else:
+        row["xml_precision_note"] = (
+            "Current XML matches within tolerance, but original diagnostics are not eligible "
+            "for a narrow exception-only downgrade (unknown/missing findings or stale count). "
+            "Original status retained."
+        )
+
+
 def extract_metrics(system: str, json_path: Path, summary: dict) -> dict[str, Any]:
     label1 = str(summary.get("label1") or "input1")
     label2 = str(summary.get("label2") or "input2")
@@ -749,6 +846,9 @@ def classify_physics_only(row: dict[str, Any]) -> None:
         "physics-only triage: post-minimization energy, production thermodynamics, "
         "trajectory differences, Integrator differences, and initial State differences do not trigger REVIEW"
     )
+
+    if row.get("xml_precision_note"):
+        row["notes"] += "; " + row["xml_precision_note"]
 
     if status == "MISMATCH":
         row["status"] = "REVIEW"
@@ -1053,7 +1153,8 @@ def infer_system_name(json_path: Path, summary: dict | None = None) -> str:
 
 
 def analyze_one(
-    json_path: Path, system_hint: str | None = None, physics_only: bool = False
+    json_path: Path, system_hint: str | None = None, physics_only: bool = False,
+    recheck_xml_precision: bool = False,
 ) -> dict[str, Any]:
     system = system_hint or infer_system_name(json_path)
     if not json_path.is_file():
@@ -1071,6 +1172,8 @@ def analyze_one(
     system = system_hint or infer_system_name(json_path, summary)
     try:
         row = extract_metrics(system, json_path, summary)
+        if recheck_xml_precision:
+            apply_xml_precision_recheck(summary, row, json_path)
         classify(summary, row, physics_only=physics_only)
         return row
     except Exception as exc:
@@ -1281,6 +1384,20 @@ def write_report(
             "JSON was unreadable or could not be processed.\n"
         )
         handle.write("These labels are triage categories, not proof of ensemble equivalence or convergence.\n\n")
+        if any(row.get("xml_precision_audit_status") for row in rows):
+            handle.write("Read-only XML numerical-precision recheck\n")
+            handle.write("-----------------------------------------\n")
+            handle.write(
+                "GOOD may mean MATCH_WITHIN_TOLERANCE under the named policy, not exact equality. "
+                "The original active-exception mismatch count and reasons remain in the CSV.\n"
+            )
+            for row in rows:
+                if row.get("xml_precision_audit_status"):
+                    handle.write(
+                        f"{row['system']}: {row['xml_precision_audit_status']} "
+                        f"[{row.get('xml_precision_policy')}]; {row.get('xml_precision_note')}\n"
+                    )
+            handle.write("\n")
         if not physics_only:
             handle.write("Current analysisMD compatibility\n")
             handle.write("------------------------------\n")
@@ -1509,6 +1626,17 @@ def print_console_summary(
         f"ERROR={counts.get('ERROR', 0)}"
     )
     print()
+    audited = [row for row in rows if row.get("xml_precision_audit_status")]
+    if audited:
+        counts_by_audit: dict[str, int] = {}
+        for row in audited:
+            key = str(row["xml_precision_audit_status"])
+            counts_by_audit[key] = counts_by_audit.get(key, 0) + 1
+        print("Read-only XML precision recheck: " + ", ".join(
+            f"{key}={count}" for key, count in sorted(counts_by_audit.items())
+        ))
+        print("Original mismatch counts/reasons retained in CSV; GOOD can mean numerical equivalence.")
+        print()
 
     review_rows = [row for row in rows if row["status"] == "REVIEW"]
     if review_rows:
@@ -1589,7 +1717,19 @@ def main(argv: list[str] | None = None) -> int:
             "thermodynamic, trajectory, Integrator, and initial-State differences as REVIEW triggers."
         ),
     )
+    parser.add_argument(
+        "--recheck-xml-precision",
+        action="store_true",
+        help=(
+            "With --physics-only, independently re-read <case>/cpp/openmm_system.xml "
+            "and <case>/python/openmm_system.xml using the explicit AMBER precision policy. "
+            "Retain original diagnostics; clear only verified exception-only numerical flags. "
+            "Does not rerun MD or modify XML/JSON inputs. Requires openmm_xml_precision.py."
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.recheck_xml_precision and not args.physics_only:
+        parser.error("--recheck-xml-precision requires --physics-only")
 
     try:
         input_pairs = resolve_inputs(args)
@@ -1602,7 +1742,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     rows = [
-        analyze_one(path, system_hint, physics_only=args.physics_only)
+        analyze_one(path, system_hint, physics_only=args.physics_only,
+                    recheck_xml_precision=args.recheck_xml_precision)
         for system_hint, path in input_pairs
     ]
 
