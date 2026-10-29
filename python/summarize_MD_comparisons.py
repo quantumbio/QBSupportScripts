@@ -583,6 +583,35 @@ def serialized_system_physics_summary(summary: dict) -> dict[str, Any]:
     return result
 
 
+def validate_xml_precision_helper() -> Path:
+    """Fail once, before processing cases or overwriting reports, if unavailable."""
+    import importlib
+
+    expected = Path(__file__).resolve().with_name("openmm_xml_precision.py")
+    if not expected.is_file():
+        raise RuntimeError(
+            f"required companion module is missing: {expected}. "
+            "Install openmm_xml_precision.py from the precision-audit package "
+            "beside summarize_MD_comparisons.py (not in the campaign directory)."
+        )
+    try:
+        helper = importlib.import_module("openmm_xml_precision")
+    except Exception as exc:
+        raise RuntimeError(
+            f"cannot import {expected}: {type(exc).__name__}: {exc}"
+        ) from exc
+    actual = getattr(helper, "__file__", None)
+    if actual is None or Path(actual).resolve() != expected:
+        raise RuntimeError(
+            f"wrong precision helper was imported: {actual!r}; expected {expected}"
+        )
+    if not callable(getattr(helper, "audit_system_pair", None)):
+        raise RuntimeError(
+            f"incompatible precision helper: {expected} has no callable audit_system_pair"
+        )
+    return expected
+
+
 def apply_xml_precision_recheck(summary: dict, row: dict[str, Any], json_path: Path) -> None:
     """Optionally re-audit current XML; never edit summaries or simulation inputs.
 
@@ -1177,7 +1206,7 @@ def analyze_one(
         classify(summary, row, physics_only=physics_only)
         return row
     except Exception as exc:
-        return error_row(system, json_path, f"analysis error: {exc}")
+        return error_row(system, json_path, f"analysis error ({type(exc).__name__}): {exc}")
 
 
 def read_pdbids(path: Path) -> list[str]:
@@ -1645,6 +1674,13 @@ def print_console_summary(
             print(f"  {row['system']}: {row['review_reasons']}")
         print()
 
+    error_rows = [row for row in rows if row["status"] == "ERROR"]
+    if error_rows:
+        print("Errors / failed runs:")
+        for row in error_rows:
+            print(f"  {row['system']}: {row['review_reasons']}")
+        print()
+
     advisory_rows = [] if physics_only else [row for row in rows if row.get("structural_advisories")]
     if advisory_rows:
         print(
@@ -1730,6 +1766,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.recheck_xml_precision and not args.physics_only:
         parser.error("--recheck-xml-precision requires --physics-only")
+
+    if args.recheck_xml_precision:
+        try:
+            validate_xml_precision_helper()
+        except RuntimeError as exc:
+            print(f"ERROR: XML precision comparison setup failed: {exc}", file=sys.stderr)
+            print(
+                "No structures were classified; existing reports were not overwritten. "
+                "This is an analysis setup error, not an MD or Hamiltonian failure.",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         input_pairs = resolve_inputs(args)
