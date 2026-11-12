@@ -93,6 +93,18 @@ parser.add_argument(
 )
 parser.add_argument("--skip-waterbox", action="store_true", help="Skip adding the water box")
 parser.add_argument(
+    "--validate-exclusions-only", action="store_true",
+    help=("Construct the OpenMM System and audit/repair raw AMBER exclusions "
+          "then save openmm_system.xml and exit before any MD or Context creation"),
+)
+parser.add_argument(
+    "--no-amber-exclusion-repair",
+    action="store_true",
+    help=("Audit raw AMBER exclusions in either System-construction path without "
+          "repairing missing or nonzero suppressed-dihedral exceptions; "
+          "exit with an error on any discrepancy"),
+)
+parser.add_argument(
     "--platform",
     choices=("CUDA", "CPU"),
     default="CUDA",
@@ -196,6 +208,20 @@ if preport_interval > production_nsteps:
 
 # Load the Amber topology and coordinate files
 prmtop = pmd.load_file(prmtopFile, inpcrdFile)
+
+# Keep the original ParmEd topology, its raw AMBER exclusions, and its atom
+# identities for BOTH System-construction paths.  The Python-solvation path
+# later rebinds "prmtop" to app.AmberPrmtopFile and appends solvent particles;
+# those transformations must never erase the original exclusion semantics.
+source_amber_structure = prmtop
+_AMBER_EXCLUSION_FLAGS = (
+    "NUMBER_EXCLUDED_ATOMS", "EXCLUDED_ATOMS_LIST",
+    "DIHEDRALS_INC_HYDROGEN", "DIHEDRALS_WITHOUT_HYDROGEN",
+)
+original_amber_flags = {
+    name: tuple(prmtop.parm_data[name]) for name in _AMBER_EXCLUSION_FLAGS
+    if name in getattr(prmtop, "parm_data", {})
+}
 
 WATER_RESIDUE_NAMES = {"HOH", "WAT"}
 
@@ -589,6 +615,358 @@ def _find_nonbonded_force(openmm_system):
         )
     return forces[0]
 
+def _amber_raw_exception_inventory(amber_structure, n_atoms, *, raw_data=None):
+    """Reconstruct the *raw* parm7 exclusions and proper 1-4 endpoint flags.
+
+    Read AmberParm.parm_data rather than ParmEd's derived dihedral/exclusion
+    partner lists: those derived lists are where suppressed 1-4 exclusions
+    can be lost during import.  The raw parm7 uses 1-based exclusion atom
+    indices and 3-times-the-0-based-index for signed dihedral atom fields.
+    """
+    raw = raw_data if raw_data is not None else getattr(amber_structure, "parm_data", None)
+    if raw is None:
+        raise RuntimeError(
+            "Direct AMBER exclusion validation requires AmberParm.parm_data; "
+            "refusing to skip the exclusion audit"
+        )
+
+    required = (
+        "NUMBER_EXCLUDED_ATOMS", "EXCLUDED_ATOMS_LIST",
+        "DIHEDRALS_INC_HYDROGEN", "DIHEDRALS_WITHOUT_HYDROGEN",
+    )
+    missing_fields = [name for name in required if name not in raw]
+    if missing_fields:
+        raise RuntimeError(
+            "Raw AMBER topology is missing exclusion/dihedral flags: "
+            + ", ".join(missing_fields)
+        )
+
+    counts = raw["NUMBER_EXCLUDED_ATOMS"]
+    entries = raw["EXCLUDED_ATOMS_LIST"]
+    if len(counts) != n_atoms:
+        raise RuntimeError(
+            f"AMBER exclusion counts have {len(counts)} atoms, "
+            f"but OpenMM has {n_atoms}"
+        )
+
+    exclusions = set()
+    cursor = 0
+    for atom_index, count_value in enumerate(counts):
+        count = int(count_value)
+        if count < 0 or cursor + count > len(entries):
+            raise RuntimeError(f"Invalid AMBER exclusion count at atom {atom_index}")
+        for entry in entries[cursor:cursor + count]:
+            partner_amber = int(entry)
+            if partner_amber == 0:  # AMBER's placeholder for an empty list
+                continue
+            partner = partner_amber - 1
+            if partner_amber < 0 or partner >= n_atoms or partner == atom_index:
+                raise RuntimeError(
+                    f"Invalid AMBER exclusion partner {partner_amber} "
+                    f"for atom {atom_index}"
+                )
+            exclusions.add(tuple(sorted((atom_index, partner))))
+        cursor += count
+    if cursor != len(entries):
+        raise RuntimeError(
+            f"AMBER exclusion list contains {len(entries) - cursor} unused entries"
+        )
+
+    endpoint_flags = {}
+    for field in ("DIHEDRALS_INC_HYDROGEN", "DIHEDRALS_WITHOUT_HYDROGEN"):
+        entries = raw[field]
+        if len(entries) % 5:
+            raise RuntimeError(f"Malformed AMBER dihedral array {field}")
+        for offset in range(0, len(entries), 5):
+            a, b, c, d, parameter_index = (int(v) for v in entries[offset:offset+5])
+            if any(abs(atom_value) % 3 for atom_value in (a, b, c, d)):
+                raise RuntimeError(f"Malformed AMBER dihedral atom index in {field}")
+            endpoints = (abs(a) // 3, abs(d) // 3)
+            if any(index >= n_atoms for index in endpoints) or endpoints[0] == endpoints[1]:
+                raise RuntimeError(f"Invalid dihedral endpoints in {field}: {endpoints}")
+            if d < 0:  # Negative fourth atom denotes an improper dihedral.
+                continue
+            pair = tuple(sorted(endpoints))
+            flags = endpoint_flags.setdefault(pair, {"allowed": 0, "suppressed": 0})
+            # Negative third atom suppresses the proper 1-4 nonbonded term.
+            flags["suppressed" if c < 0 else "allowed"] += 1
+    return exclusions, endpoint_flags
+
+
+def _validate_amber_prefix_mapping(amber_structure, topology, openmm_system,
+                                   *, allow_appended_particles):
+    """Prove initial AMBER atoms retained their index/identity/bonds in OpenMM.
+
+    Modeller.addSolvent() is expected to append water/ions.  Verify that
+    assumption rather than ever applying a raw parm7 exclusion to the wrong
+    particle.  Residue names may be changed by the script, so compare the
+    *current source structure* after its intentional residue renaming.
+    """
+    n_source = len(amber_structure.atoms)
+    n_system = int(openmm_system.getNumParticles())
+    if n_system < n_source or (not allow_appended_particles and n_system != n_source):
+        raise RuntimeError(
+            "Cannot audit AMBER exclusions: source/System particle counts "
+            f"are incompatible ({n_source} vs {n_system})"
+        )
+    topology_atoms = list(topology.atoms())
+    if len(topology_atoms) != n_system:
+        raise RuntimeError(
+            "Cannot audit AMBER exclusions: final OpenMM topology has "
+            f"{len(topology_atoms)} atoms but System has {n_system}"
+        )
+    for index, src in enumerate(amber_structure.atoms):
+        dest = topology_atoms[index]
+        element = dest.element
+        atomic_number = getattr(element, 'atomic_number', None)
+        if (
+            int(dest.index) != index
+            or src.name != dest.name
+            or int(src.atomic_number) != atomic_number
+            or int(src.residue.idx) != int(dest.residue.index)
+            or src.residue.name != dest.residue.name
+        ):
+            raise RuntimeError(
+                "Cannot audit AMBER exclusions: atom-index/identity mapping "
+                f"failed at index {index}: "
+                f"AMBER={src.residue.name}{src.residue.idx}:{src.name} "
+                f"vs OpenMM={dest.residue.name}{dest.residue.index}:{dest.name}"
+            )
+
+    # A name/index check cannot detect a changed bond graph.  This matters for
+    # the FFXML/Modeller branch, whose ForceField builds 1-4 exceptions from bonds.
+    source_bonds = {
+        tuple(sorted((int(bond.atom1.idx), int(bond.atom2.idx))))
+        for bond in amber_structure.bonds
+    }
+    topology_bonds = {
+        tuple(sorted((int(a.index), int(b.index))))
+        for a, b in topology.bonds()
+        if int(a.index) < n_source and int(b.index) < n_source
+    }
+    if source_bonds != topology_bonds:
+        extra = sorted(topology_bonds - source_bonds)
+        missing = sorted(source_bonds - topology_bonds)
+        raise RuntimeError(
+            "Cannot audit AMBER exclusions: original bond graph changed "
+            f"(missing={len(missing)}, extra={len(extra)}; "
+            f"examples missing={missing[:5]} extra={extra[:5]})"
+        )
+    return {
+        'amber_particle_count': n_source,
+        'openmm_particle_count': n_system,
+        'appended_particle_count': n_system - n_source,
+        'atom_identity_and_bonds_verified': True,
+    }
+
+
+def _openmm_nonbonded_float(value, target_unit):
+    """Extract parameter floats from OpenMM Quantities or minimal test mocks."""
+    return (float(value.value_in_unit(target_unit))
+            if hasattr(value, 'value_in_unit') else float(value))
+
+
+def audit_and_repair_amber_exclusions(amber_structure, openmm_system,
+                                      *, repair=True, raw_data=None,
+                                      topology=None, allow_appended_particles=False):
+    """Audit both AMBER/System construction paths against raw excluded pairs.
+
+    A raw excluded pair whose every proper endpoint term suppresses 1-4
+    interactions MUST be a zero-energy exception.  Direct ParmEd construction
+    may omit the pair; FFXML's bond-based 1-4 generation may create an active
+    exception instead.  Only these proven cases can be changed automatically.
+
+    This checks original AMBER particles only; appended water/ions are out of
+    scope for the raw-input comparison.  Run before XML/Context creation.
+    """
+    n_source = len(amber_structure.atoms)
+    n_system = int(openmm_system.getNumParticles())
+    if n_system < n_source or (not allow_appended_particles and n_source != n_system):
+        raise RuntimeError(
+            "Cannot repair AMBER exclusions: source/System particle count "
+            f"differs ({n_source} vs {n_system})"
+        )
+    if topology is not None:
+        mapping = _validate_amber_prefix_mapping(
+            amber_structure, topology, openmm_system,
+            allow_appended_particles=allow_appended_particles
+        )
+    elif allow_appended_particles:
+        raise RuntimeError(
+            "Cannot audit appended-solvent System without verifying the "
+            "original AMBER atom mapping (topology is required)"
+        )
+    else:
+        mapping = {
+            'amber_particle_count': n_source,
+            'openmm_particle_count': n_system,
+            'appended_particle_count': 0,
+            'atom_identity_and_bonds_verified': False,
+        }
+
+    excluded, endpoints = _amber_raw_exception_inventory(
+        amber_structure, n_source, raw_data=raw_data
+    )
+    nonbonded = _find_nonbonded_force(openmm_system)
+    if nonbonded.getNumParticles() != n_system:
+        raise RuntimeError("NonbondedForce particle count is inconsistent with System")
+
+    existing = {}
+    for index in range(nonbonded.getNumExceptions()):
+        p1, p2, charge_product, sigma, epsilon = nonbonded.getExceptionParameters(index)
+        pair = tuple(sorted((int(p1), int(p2))))
+        if pair in existing:
+            raise RuntimeError(f"Duplicate OpenMM exception pair: {pair}")
+        existing[pair] = (index, charge_product, sigma, epsilon)
+
+    missing = sorted(excluded - existing.keys())
+    unexpected = [
+        (pair, endpoints.get(pair, {"allowed": 0, "suppressed": 0}))
+        for pair in missing
+        if endpoints.get(pair, {}).get("allowed", 0) > 0
+        or endpoints.get(pair, {}).get("suppressed", 0) == 0
+    ]
+    if unexpected:
+        raise RuntimeError(
+            f"AMBER raw exclusions missing from OpenMM: {len(missing)}; "
+            f"{len(unexpected)} cannot be repaired as suppressed proper 1-4 pairs. "
+            f"Examples: {unexpected[:8]}. Investigate topology construction."
+        )
+
+    # ForceField.createSystem creates 1-4 exceptions based on the bond graph,
+    # potentially ignoring AMBER's negative third-dihedral index.  Inspect
+    # existing exceptions as well as missing ones; never rely on pair coverage
+    # alone.  No tolerance is permitted for zero/nonzero activation.
+    suppressed_only = sorted(
+        pair for pair in excluded
+        if endpoints.get(pair, {}).get('suppressed', 0) > 0
+        and endpoints[pair].get('allowed', 0) == 0
+    )
+    incorrectly_active = []
+    for pair in suppressed_only:
+        if pair not in existing:
+            continue
+        index, qprod, sigma, epsilon = existing[pair]
+        q_float = _openmm_nonbonded_float(qprod, unit.elementary_charge**2) if hasattr(qprod, 'value_in_unit') else float(qprod)
+        eps_float = _openmm_nonbonded_float(epsilon, unit.kilojoule_per_mole) if hasattr(epsilon, 'value_in_unit') else float(epsilon)
+        if not (np.isfinite(q_float) and np.isfinite(eps_float)):
+            raise RuntimeError(f"Non-finite OpenMM exception parameters for {pair}")
+        if q_float != 0.0 or eps_float != 0.0:
+            incorrectly_active.append((pair, index, q_float, sigma, eps_float))
+
+    if (missing or incorrectly_active) and not repair:
+        raise RuntimeError(
+            f"Found {len(missing)} missing and {len(incorrectly_active)} "
+            "nonzero suppressed-dihedral AMBER exclusions in OpenMM; "
+            "repair disabled. "
+            f"Missing examples: {missing[:8]}; "
+            f"nonzero examples: {[item[0] for item in incorrectly_active[:8]]}"
+        )
+
+    # If parameter offsets exist, global parameters may activate an exception
+    # later.  Fail closed before *any* mutation rather than apply an unsafe fix.
+    if missing or incorrectly_active:
+        for method in ("getNumParticleParameterOffsets", "getNumExceptionParameterOffsets"):
+            if not hasattr(nonbonded, method):
+                raise RuntimeError(
+                    "Cannot certify exception repair: NonbondedForce does not "
+                    f"expose {method}"
+                )
+            if getattr(nonbonded, method)():
+                raise RuntimeError(
+                    "Cannot repair AMBER exclusions with nonbonded parameter offsets"
+                )
+
+    def labels_for(pair):
+        a, b = (amber_structure.atoms[i] for i in pair)
+        return [
+            f"{a.residue.name}{a.residue.idx+1}:{a.name}",
+            f"{b.residue.name}{b.residue.idx+1}:{b.name}",
+        ]
+
+    added = []
+    for i, j in missing:
+        nonbonded.addException(i, j, 0.0, 0.5, 0.0, False)
+        added.append({
+            'indices': [i, j], 'atoms': labels_for((i, j)),
+            'suppressed_proper_dihedrals': endpoints[(i, j)]['suppressed'],
+        })
+
+    replaced = []
+    for (i, j), index, old_charge, sigma, old_epsilon in incorrectly_active:
+        # Preserve the existing sigma: it is inert once epsilon=0.  Explicitly
+        # replace the exception instead of adding another duplicate.
+        nonbonded.addException(i, j, 0.0, sigma, 0.0, True)
+        replaced.append({
+            'indices': [i, j], 'atoms': labels_for((i, j)),
+            'previous_charge_product_e2': old_charge,
+            'previous_epsilon_kj_mol': old_epsilon,
+            'suppressed_proper_dihedrals': endpoints[(i, j)]['suppressed'],
+        })
+
+    # Read the actual resulting Force rather than assume addException() worked.
+    # This is a coverage/activity check, not a numerical comparison of the
+    # existing *allowed* 1-4 exception parameters.
+    actual = {}
+    for index in range(nonbonded.getNumExceptions()):
+        i, j, qprod, sigma, epsilon = nonbonded.getExceptionParameters(index)
+        pair = tuple(sorted((int(i), int(j))))
+        if pair in actual:
+            raise RuntimeError(f"Duplicate OpenMM exception pair after repair: {pair}")
+        actual[pair] = (qprod, epsilon)
+    missing_after = excluded - actual.keys()
+    if missing_after:
+        raise RuntimeError(
+            f"AMBER exclusions remain missing after repair: {sorted(missing_after)[:8]}"
+        )
+    nonzero_after = []
+    for pair in suppressed_only:
+        qprod, epsilon = actual[pair]
+        q_float = _openmm_nonbonded_float(qprod, unit.elementary_charge**2) if hasattr(qprod, 'value_in_unit') else float(qprod)
+        eps_float = _openmm_nonbonded_float(epsilon, unit.kilojoule_per_mole) if hasattr(epsilon, 'value_in_unit') else float(epsilon)
+        if q_float != 0.0 or eps_float != 0.0:
+            nonzero_after.append(pair)
+    if nonzero_after:
+        raise RuntimeError(
+            "AMBER suppressed-only exclusions remain active after repair: "
+            f"{nonzero_after[:8]}"
+        )
+
+    original_only_extra = [
+        pair for pair in existing
+        if pair[0] < n_source and pair[1] < n_source and pair not in excluded
+    ]
+    solvent_related = [
+        pair for pair in existing if pair[0] >= n_source or pair[1] >= n_source
+    ]
+    return {
+        'policy': 'amber-suppressed-proper-dihedral-exclusions-v2',
+        'audit_scope': 'raw AMBER excluded-pair coverage and suppressed-only activity',
+        'status': 'REPAIRED' if (added or replaced) else 'COVERED',
+        'construction_path': 'generated_ffxml_plus_solvent' if allow_appended_particles else 'direct_parmed',
+        'source_mapping': mapping,
+        'raw_amber_exclusion_pair_count': len(excluded),
+        'raw_suppressed_only_pair_count': len(suppressed_only),
+        'openmm_exception_count_before': len(existing),
+        'openmm_exception_count_after': nonbonded.getNumExceptions(),
+        'missing_raw_exclusions_before': len(missing),
+        'missing_raw_exclusions_after': len(missing_after),
+        'nonzero_suppressed_exceptions_before': len(incorrectly_active),
+        'nonzero_suppressed_exceptions_after': len(nonzero_after),
+        'added_zero_exceptions': len(added),
+        'replaced_nonzero_exceptions': len(replaced),
+        'added_pairs': added,
+        'replaced_pairs': replaced,
+        'openmm_exceptions_not_in_raw_list': len(set(existing) - excluded),
+        'unmatched_original_atom_exception_count': len(original_only_extra),
+        'unmatched_original_atom_exception_examples': [list(pair) for pair in sorted(original_only_extra)[:10]],
+        'exceptions_involving_appended_atoms': len(solvent_related),
+        # Exclusions elsewhere in generated solvent are not certified by this
+        # audit; it also does not validate existing allowed 1-4 LJ coefficients.
+        'coverage_note': 'Original raw AMBER exclusions only; not full ForceField equivalence',
+    }
+
+
 def _generated_nonbonded_class_parameters(xml_filename, wanted_classes):
     """Read sigma/epsilon (OpenMM XML units) for selected transferred classes."""
     xml_root = ET.parse(xml_filename).getroot()
@@ -743,6 +1121,53 @@ def report_nonbonded_parameters(openmm_system, topology):
 
     return nonbonded
 
+# Enforce original AMBER exclusion semantics for BOTH construction pathways,
+# after building the System and before writing XML or constructing any Context.
+# In the generated-FFXML path, verify retained atom identities and connectivity
+# before applying raw parm7 indices to the solute prefix of the solvated System.
+exclusion_audit = audit_and_repair_amber_exclusions(
+    source_amber_structure, system,
+    repair=not args.no_amber_exclusion_repair,
+    raw_data=original_amber_flags,
+    topology=modeller.topology,
+    allow_appended_particles=not skip_waterbox,
+)
+with open(prmtopFile, "rb") as raw_prmtop:
+    exclusion_audit["input_prmtop_sha256"] = hashlib.sha256(
+        raw_prmtop.read()
+    ).hexdigest()
+exclusion_audit["parmed_version"] = getattr(pmd, "__version__", "unknown")
+exclusion_audit["openmm_version"] = getattr(mm, "__version__", "unknown")
+with open("amber_exclusion_audit.json", "w", encoding="utf-8") as audit_file:
+    import json
+    json.dump(exclusion_audit, audit_file, indent=2)
+    audit_file.write("\n")
+print(
+    "AMBER raw exclusion audit: "
+    f"path={exclusion_audit['construction_path']} "
+    f"raw={exclusion_audit['raw_amber_exclusion_pair_count']} "
+    f"OpenMM before={exclusion_audit['openmm_exception_count_before']} "
+    f"missing={exclusion_audit['missing_raw_exclusions_before']} "
+    f"nonzero_suppressed={exclusion_audit['nonzero_suppressed_exceptions_before']} "
+    f"added={exclusion_audit['added_zero_exceptions']} "
+    f"replaced={exclusion_audit['replaced_nonzero_exceptions']} "
+    f"status={exclusion_audit['status']}",
+    flush=True,
+)
+if exclusion_audit["added_pairs"] or exclusion_audit["replaced_pairs"]:
+    for item in exclusion_audit["added_pairs"][:5]:
+        print(f"  restored missing excluded pair {item['indices']}: {item['atoms']}", flush=True)
+    for item in exclusion_audit["replaced_pairs"][:5]:
+        print(f"  zeroed incorrectly active pair {item['indices']}: {item['atoms']}", flush=True)
+    print("  Details: amber_exclusion_audit.json", flush=True)
+if exclusion_audit['unmatched_original_atom_exception_count']:
+    print(
+        "  WARNING: OpenMM has "
+        f"{exclusion_audit['unmatched_original_atom_exception_count']} "
+        "exceptions among original AMBER atoms not in the raw exclusion list; "
+        "verify these separately (see JSON).", flush=True,
+    )
+
 nonbonded_force = report_nonbonded_parameters(system, modeller.topology)
 
 # Match the C++ MDDriver force-group layout so that OpenMM energies can be
@@ -765,6 +1190,12 @@ for force_index in range(system.getNumForces()):
 with open("openmm_system.xml", "w") as xml_file:
     xml_file.write(mm.XmlSerializer.serialize(system))
 print("Serialized OpenMM System to openmm_system.xml", flush=True)
+if args.validate_exclusions_only:
+    print(
+        "Exclusion validation-only: System XML and amber_exclusion_audit.json "
+        "written; no OpenMM Context or MD trajectory created.", flush=True,
+    )
+    sys.exit(0)
 
 def report_openmm_energy_components(simulation, label):
     """Report OpenMM potential-energy components using the C++ force groups."""
