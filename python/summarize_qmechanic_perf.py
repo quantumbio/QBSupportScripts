@@ -26,14 +26,23 @@ import shutil
 import subprocess
 import sys
 
-# perf script -F time,event,ip,sym,dso prints one sample header per event:
-#  12345.678901: cpu-clock: 7f123456 my_function (/path/libfoo.so)
-# Following callchain frames have no timestamp/event prefix and are ignored.
-SAMPLE = re.compile(
-    r"^\s*(?P<time>\d+\.\d+):\s+"
-    r"(?P<event>[^:]+):\s+"
-    r"(?P<ip>(?:0x)?[0-9a-fA-F]+)\s+"
-    r"(?P<symbol>.*?)\s+\((?P<dso>[^\r\n()]*)\)\s*$"
+# perf script output has two common layouts. Older perf releases (including
+# Oracle Linux 8) print a timestamp/event header on its own line, followed by
+# callchain frames; the FIRST frame is the sampled instruction. Other versions
+# print that instruction on the same line as the event header.
+#
+#   1507.281564: cpu-clock:u:
+#           7f6fb6f91860 do_lookup_x (/usr/lib64/ld-2.28.so)
+#           7f6fb6f92150 _dl_lookup_symbol_x (/usr/lib64/ld-2.28.so)
+#
+# Only count the first frame, never its callers.
+HEADER = re.compile(r"^\s*\d+\.\d+:\s+\S+:\s*$")
+INLINE_SAMPLE = re.compile(
+    r"^\s*\d+\.\d+:\s+\S+:\s+"
+    r"(?:0x)?[0-9a-fA-F]+\s+(?P<symbol>.+)\s+\((?P<dso>[^\r\n]*)\)\s*$"
+)
+FRAME = re.compile(
+    r"^\s*(?:0x)?[0-9a-fA-F]+\s+(?P<symbol>.+)\s+\((?P<dso>[^\r\n]*)\)\s*$"
 )
 
 
@@ -49,17 +58,40 @@ def summarize_profile(path: Path, perf_bin: str):
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, errors="replace", bufsize=1)
         assert proc.stdout is not None
+        awaiting_first_frame = False
         for line in proc.stdout:
-            m = SAMPLE.match(line)
+            m = INLINE_SAMPLE.match(line)
             if m:
-                # Ignore stack-trace frames: only the record with time/event is sampled.
+                awaiting_first_frame = False
+            elif HEADER.match(line):
+                # In multi-line format the next frame is the sampled IP.
+                if awaiting_first_frame:
+                    unmatched_headers += 1
+                awaiting_first_frame = True
+                continue
+            elif awaiting_first_frame:
+                if not line.strip():
+                    # A header without a frame cannot be attributed.
+                    unmatched_headers += 1
+                    awaiting_first_frame = False
+                    continue
+                m = FRAME.match(line)
+                awaiting_first_frame = False
+                if not m:
+                    unmatched_headers += 1
+                    continue
+            else:
+                # Remaining frames in a callchain are callers, not samples.
+                continue
+
+            if m:
                 symbol = m.group("symbol").strip() or "[unknown]"
                 dso = m.group("dso").strip() or "[unknown]"
                 symbol_counts[(dso, symbol)] += 1
                 library_counts[dso] += 1
                 sample_count += 1
-            elif re.match(r"^\s*\d+\.\d+:\s+", line):
-                unmatched_headers += 1
+        if awaiting_first_frame:
+            unmatched_headers += 1
         proc.stdout.close()
         stderr = proc.stderr.read() if proc.stderr is not None else ""
         rc = proc.wait()
