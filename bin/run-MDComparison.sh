@@ -51,6 +51,25 @@ PYTHON=python
 : "${REPORT_INTERVAL:=500}"
 : "${PREP_LEVEL:=all}"
 
+# Optional CPU sampling profile for the C++ MD qmechanic invocation only.
+# Output: <PDBID>/cpp/qmechanic.perf.data (one independent profile per job).
+: "${MD_PERF:=0}"
+: "${MD_PERF_FREQ:=99}"
+if [[ "${MD_PERF}" != 0 && "${MD_PERF}" != 1 ]]; then
+    echo "ERROR: MD_PERF must be 0 or 1." >&2
+    exit 2
+fi
+if [[ "${MD_PERF}" == 1 ]]; then
+    [[ "${MD_PERF_FREQ}" =~ ^[1-9][0-9]*$ ]] || {
+        echo "ERROR: MD_PERF_FREQ must be a positive integer." >&2
+        exit 2
+    }
+    command -v perf >/dev/null 2>&1 || {
+        echo "ERROR: MD_PERF=1 but perf was not found in PATH." >&2
+        exit 1
+    }
+fi
+
 export MINIMIZATION_STEPS
 export EQUILIBRATION_STEPS
 export PRODUCTION_STEPS
@@ -237,11 +256,20 @@ echo "======================================================================"
     export DEV_MIN_STEPS="${MINIMIZATION_STEPS}"
     export DEV_MD_REPORT_INTERVAL="${REPORT_INTERVAL}"
 
+    # With MD_PERF=0 the empty prefix executes qmechanic exactly as before.
+    # Use DWARF unwinding for optimized builds without frame pointers.
+    PERF_PREFIX=()
+    if [[ "${MD_PERF}" == 1 ]]; then
+        echo "Recording C++ MD CPU profile: qmechanic.perf.data (freq=${MD_PERF_FREQ} Hz)"
+        PERF_PREFIX=(perf record -F "${MD_PERF_FREQ}" -g --call-graph dwarf \
+            -o qmechanic.perf.data --)
+    fi
+
 #    "${DIVCON}/bin/qmechanic" "${PDBID}+H+wb.pdb" \
 #        -h amberff14sb \
 
 
-    "${DIVCON}/bin/qmechanic" "${PDBID}+wb.inpcrd" \
+    "${PERF_PREFIX[@]}" "${DIVCON}/bin/qmechanic" "${PDBID}+wb.inpcrd" \
         -h "${PDBID}+wb.parm7" \
         --np 8 -v 3 \
         -O \
