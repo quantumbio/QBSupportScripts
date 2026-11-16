@@ -331,6 +331,16 @@ CSV_FIELDS = [
     "production_volume_mean_sym_pct",
     "production_density_mean_sym_pct",
 
+    # Timing is descriptive: it never affects GOOD/REVIEW triage.
+    # Missing whole-process time remains unavailable (not a stage-time substitute).
+    *[f"timing_{implementation}_{field}" for implementation in ("cpp", "python")
+      for field in (
+          "minimization_wall_time_s", "nvt_equilibration_wall_time_s",
+          "npt_equilibration_wall_time_s", "production_wall_time_s",
+          "timed_md_stages_wall_time_s", "total_execution_wall_time_s",
+          "non_timed_md_execution_wall_time_s",
+      )],
+
     # Triage metadata.
     "missing_core_diagnostics",
     "review_categories",
@@ -338,6 +348,62 @@ CSV_FIELDS = [
     "structural_advisories",
     "notes",
 ]
+
+
+TIMING_FIELDS = (
+    "minimization_wall_time_s",
+    "nvt_equilibration_wall_time_s",
+    "npt_equilibration_wall_time_s",
+    "production_wall_time_s",
+    "timed_md_stages_wall_time_s",
+    "total_execution_wall_time_s",
+    "non_timed_md_execution_wall_time_s",
+)
+
+
+def good_timing_report(rows: list[dict[str, Any]]) -> str:
+    """Paired GOOD-job timing means (seconds); missing values are not imputed."""
+    good = [row for row in rows if row.get("status") == "GOOD"]
+    metrics = (
+        ("Entire execution", "total_execution_wall_time_s"),
+        ("Minimization", "minimization_wall_time_s"),
+        ("NVT equilibration", "nvt_equilibration_wall_time_s"),
+        ("NPT equilibration", "npt_equilibration_wall_time_s"),
+        ("Production MD", "production_wall_time_s"),
+        ("All timed MD stages", "timed_md_stages_wall_time_s"),
+        ("Outside timed MD stages", "non_timed_md_execution_wall_time_s"),
+    )
+    result = [
+        f"GOOD-only timing averages (seconds; {len(good)} GOOD jobs)",
+        "C++ - Python differences; negative means C++ is faster.",
+        "Each row uses only jobs with BOTH timings; n may differ by metric.",
+        f"{'Timing metric':<29} {'n':>5} {'C++':>12} {'Python':>12} {'Delta':>12} {'|Delta| %':>11}",
+        "-" * 87,
+    ]
+    for label, field in metrics:
+        pairs = []
+        for row in good:
+            cpp = finite_float(row.get(f"timing_cpp_{field}"))
+            python = finite_float(row.get(f"timing_python_{field}"))
+            if cpp is not None and python is not None:
+                pairs.append((cpp, python))
+        if not pairs:
+            result.append(f"{label:<29} {0:>5} {'n/a':>12} {'n/a':>12} {'n/a':>12} {'n/a':>11}")
+            continue
+        c_mean = statistics.mean(c for c, _ in pairs)
+        p_mean = statistics.mean(p for _, p in pairs)
+        difference = c_mean - p_mean
+        denominator = (abs(c_mean) + abs(p_mean)) / 2.0
+        relative = 100.0 * abs(difference) / denominator if denominator else 0.0
+        result.append(
+            f"{label:<29} {len(pairs):>5} {c_mean:>12.3f} {p_mean:>12.3f} "
+            f"{difference:>+12.3f} {relative:>10.3f}%"
+        )
+    result.append(
+        "Outside timed MD stages = total execution - minimization - NVT - NPT - production; "
+        "requires reported whole-process timing."
+    )
+    return "\n".join(result)
 
 
 def nested(mapping: Any, *keys: str) -> Any:
@@ -838,6 +904,17 @@ def extract_metrics(system: str, json_path: Path, summary: dict) -> dict[str, An
         row[column] = finite_float(
             nested(postmin, component, "symmetric_relative_difference_percent")
         )
+
+    # Preserve normalized timings independently of the validation/triage mode.
+    # Use implementation identities, not input1/input2 display labels.
+    for source in (input1, input2):
+        implementation = source.get("implementation")
+        if implementation not in ("cpp_openmm", "python_openmm"):
+            continue
+        prefix = "cpp" if implementation == "cpp_openmm" else "python"
+        timing = source.get("timing") or {}
+        for name in TIMING_FIELDS:
+            row[f"timing_{prefix}_{name}"] = finite_float(timing.get(name))
 
     # Production thermodynamics.
     production = comparison.get("production") or {}
@@ -1380,6 +1457,7 @@ def write_report(
         handle.write(f"GOOD_LIMITED : {counts.get('GOOD_LIMITED', 0)}\n")
         handle.write(f"PENDING      : {counts.get('PENDING', 0)}\n")
         handle.write(f"ERROR        : {counts.get('ERROR', 0)}\n\n")
+        handle.write(good_timing_report(rows) + "\n\n")
 
         handle.write("Interpretation\n")
         handle.write("--------------\n")
@@ -1695,6 +1773,8 @@ def print_console_summary(
         print(delta_stats.to_string(index=False, float_format=lambda x: f"{x:.4g}"))
         print()
 
+    print(good_timing_report(rows))
+    print()
     print("Wrote:")
     for label, path in outputs.items():
         print(f"  {label:<13}: {path}")
