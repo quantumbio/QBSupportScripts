@@ -44,6 +44,12 @@
 #     % python runMD-fromDivCon.py 1lri_out.prmtop 1lri_out.inpcrd
 #
 
+# Whole-script wall timer.  Start before heavyweight third-party imports so the
+# reported total includes Python/OpenMM/ParmEd/MDTraj import and setup overhead,
+# closely matching qmechanic's whole-computation timing scope.
+import time as _program_timer
+_program_start_time = _program_timer.perf_counter()
+
 import openmm as mm
 import openmm.app as app
 import simtk.unit as unit
@@ -1859,6 +1865,12 @@ summary_values = {
 print("Simulation summary:")
 for label, value in summary_values.items():
     print(f"  {label}: {value}")
+
+# Emit a true whole-script timer only after final companion/output files and
+# the simulation summary have been produced.  analysisMD.py already recognizes
+# this label as total_execution_wall_time_s.
+total_execution_wall_time_s = _program_timer.perf_counter() - _program_start_time
+print(f"Total Computation Time (Seconds): {total_execution_wall_time_s:.6f}")
 
 sys.exit()
 
