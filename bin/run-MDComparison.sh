@@ -64,6 +64,11 @@ if [[ "${MD_PERF}" == 1 ]]; then
         echo "ERROR: MD_PERF_FREQ must be a positive integer." >&2
         exit 2
     }
+    : "${MD_PERF_MMAP_PAGES:=8}"
+    [[ "${MD_PERF_MMAP_PAGES}" =~ ^[1-9][0-9]*$ ]] || {
+        echo "ERROR: MD_PERF_MMAP_PAGES must be a positive integer." >&2
+        exit 2
+    }
     command -v perf >/dev/null 2>&1 || {
         echo "ERROR: MD_PERF=1 but perf was not found in PATH." >&2
         exit 1
@@ -260,8 +265,8 @@ echo "======================================================================"
     # Use DWARF unwinding for optimized builds without frame pointers.
     PERF_PREFIX=()
     if [[ "${MD_PERF}" == 1 ]]; then
-        echo "Recording C++ MD CPU profile: qmechanic.perf.data (freq=${MD_PERF_FREQ} Hz)"
-        PERF_PREFIX=(perf record -F "${MD_PERF_FREQ}" -g --call-graph dwarf \
+        echo "Recording C++ MD CPU profile: qmechanic.perf.data (freq=${MD_PERF_FREQ} Hz, mmap=${MD_PERF_MMAP_PAGES} pages)"
+        PERF_PREFIX=(perf record -e cpu-clock -F "${MD_PERF_FREQ}" -m "${MD_PERF_MMAP_PAGES}" -g --call-graph dwarf \
             -o qmechanic.perf.data --)
     fi
 
